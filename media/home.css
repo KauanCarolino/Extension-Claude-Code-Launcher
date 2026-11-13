@@ -1,0 +1,160 @@
+body {
+	margin: 0;
+	padding: 12px;
+	color: var(--vscode-foreground);
+	background: transparent;
+	font-family: var(--vscode-font-family);
+	font-size: var(--vscode-font-size);
+	line-height: 1.4;
+}
+
+[hidden] {
+	display: none !important;
+}
+
+p {
+	margin: 0 0 8px;
+}
+
+.muted {
+	color: var(--vscode-descriptionForeground);
+}
+
+.warning {
+	color: var(--vscode-errorForeground);
+}
+
+button {
+	border: none;
+	border-radius: 2px;
+	cursor: pointer;
+	font: inherit;
+}
+
+button.primary,
+button.secondary {
+	padding: 6px 10px;
+}
+
+button.primary {
+	background: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+}
+
+button.primary:hover {
+	background: var(--vscode-button-hoverBackground);
+}
+
+button.secondary {
+	background: var(--vscode-button-secondaryBackground);
+	color: var(--vscode-button-secondaryForeground);
+}
+
+button.secondary:hover {
+	background: var(--vscode-button-secondaryHoverBackground);
+}
+
+button.wide {
+	width: 100%;
+}
+
+.actions {
+	display: grid;
+	grid-template-columns: 1fr;
+	gap: 6px;
+	margin-bottom: 16px;
+}
+
+section {
+	margin-bottom: 16px;
+}
+
+.section-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+}
+
+h2 {
+	margin: 0 0 6px;
+	color: var(--vscode-descriptionForeground);
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+}
+
+.list {
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+
+.item {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 5px 6px;
+	border-radius: 3px;
+	cursor: pointer;
+}
+
+.item:hover {
+	background: var(--vscode-list-hoverBackground);
+}
+
+.item.active {
+	background: var(--vscode-list-inactiveSelectionBackground);
+}
+
+.icon {
+	flex: none;
+	width: 16px;
+	color: var(--vscode-descriptionForeground);
+	font-size: 11px;
+	text-align: center;
+}
+
+.item.active .icon,
+.item.open .item-meta {
+	color: var(--vscode-textLink-foreground);
+}
+
+.item-text {
+	display: flex;
+	flex: 1;
+	flex-direction: column;
+	min-width: 0;
+}
+
+.item-title {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.item-meta {
+	color: var(--vscode-descriptionForeground);
+	font-size: 11px;
+}
+
+.icon-button {
+	flex: none;
+	padding: 0 6px;
+	background: transparent;
+	color: var(--vscode-descriptionForeground);
+	font-size: 14px;
+	line-height: 20px;
+	visibility: hidden;
+}
+
+.item:hover .icon-button,
+.section-head .icon-button {
+	visibility: visible;
+}
+
+.icon-button:hover {
+	border-radius: 3px;
+	background: var(--vscode-toolbar-hoverBackground);
+	color: var(--vscode-foreground);
+}

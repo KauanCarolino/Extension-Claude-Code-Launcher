@@ -1,0 +1,22 @@
+# Dependências
+node_modules/
+
+# Saída da compilação (gerada por `npm run compile`)
+out/
+*.map
+
+# Pacotes gerados pelo vsce
+*.vsix
+
+# Configurações locais do Claude Code (caminhos absolutos da máquina e log de mudanças)
+.claude/settings.local.json
+.claude/launcher-changes/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Arquivos do sistema operacional
+.DS_Store
+Thumbs.db
+desktop.ini

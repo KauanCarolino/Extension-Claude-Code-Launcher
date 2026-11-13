@@ -1,0 +1,187 @@
+{
+  "name": "claude-code-launcher",
+  "displayName": "Claude Code Launcher",
+  "description": "Abre o chat oficial do Claude Code e mostra, de forma didática, o que ele mudou em cada arquivo.",
+  "version": "0.5.4",
+  "publisher": "kauan",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "claude-code-launcher.openSidebar",
+        "title": "Abrir chat na barra lateral",
+        "category": "Claude Code Launcher",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "claude-code-launcher.openTab",
+        "title": "Abrir chat em nova aba",
+        "category": "Claude Code Launcher",
+        "icon": "$(open-preview)"
+      },
+      {
+        "command": "claude-code-launcher.install",
+        "title": "Instalar Claude Code",
+        "category": "Claude Code Launcher"
+      },
+      {
+        "command": "claude-code-launcher.showChanges",
+        "title": "Mostrar mudanças do Claude",
+        "category": "Claude Code Launcher",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "claude-code-launcher.enableChangeLog",
+        "title": "Ativar registro de mudanças",
+        "category": "Claude Code Launcher"
+      },
+      {
+        "command": "claude-code-launcher.disableChangeLog",
+        "title": "Desligar registro de mudanças",
+        "category": "Claude Code Launcher"
+      },
+      {
+        "command": "claude-code-launcher.clearChanges",
+        "title": "Limpar histórico de mudanças",
+        "category": "Claude Code Launcher"
+      },
+      {
+        "command": "claude-code-launcher.toggleInlineChanges",
+        "title": "Ligar/desligar marcas das mudanças no código",
+        "category": "Claude Code Launcher"
+      },
+      {
+        "command": "claude-code-launcher.hideInlineChanges",
+        "title": "Ocultar marcas (aceita as mudanças do Claude neste arquivo)",
+        "category": "Claude Code Launcher"
+      },
+      {
+        "command": "claude-code-launcher.showInlineChanges",
+        "title": "Ver mudança no código",
+        "category": "Claude Code Launcher"
+      },
+      {
+        "command": "claude-code-launcher.compareInline",
+        "title": "Comparar lado a lado",
+        "category": "Claude Code Launcher"
+      },
+      {
+        "command": "claude-code-launcher.newTab",
+        "title": "Nova conversa em aba",
+        "category": "Claude Code Launcher",
+        "icon": "$(add)"
+      },
+      {
+        "command": "claude-code-launcher.acceptAllChanges",
+        "title": "Aceitar todas as mudanças do Claude neste arquivo",
+        "category": "Claude Code Launcher"
+      },
+      {
+        "command": "claude-code-launcher.rejectAllChanges",
+        "title": "Recusar todas as mudanças do Claude neste arquivo",
+        "category": "Claude Code Launcher"
+      },
+      {
+        "command": "claude-code-launcher.acceptChange",
+        "title": "Aceitar trecho",
+        "category": "Claude Code Launcher"
+      },
+      {
+        "command": "claude-code-launcher.rejectChange",
+        "title": "Recusar trecho",
+        "category": "Claude Code Launcher"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "claude-code-launcher.openSidebar",
+          "group": "navigation@1"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "claude-code-launcher.newTab",
+          "when": "view == claude-code-launcher.home",
+          "group": "navigation@0"
+        },
+        {
+          "command": "claude-code-launcher.showChanges",
+          "when": "view == claude-code-launcher.changes",
+          "group": "navigation@1"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "claude-code-launcher.showInlineChanges",
+          "when": "false"
+        },
+        {
+          "command": "claude-code-launcher.compareInline",
+          "when": "false"
+        },
+        {
+          "command": "claude-code-launcher.acceptChange",
+          "when": "false"
+        },
+        {
+          "command": "claude-code-launcher.rejectChange",
+          "when": "false"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "claude-code-launcher",
+          "title": "Claude Code",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "claude-code-launcher": [
+        {
+          "type": "webview",
+          "id": "claude-code-launcher.home",
+          "name": "Claude Code"
+        },
+        {
+          "type": "webview",
+          "id": "claude-code-launcher.changes",
+          "name": "Mudanças"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Claude Code Launcher",
+      "properties": {
+        "claudeCodeLauncher.inlineChanges": {
+          "type": "boolean",
+          "default": true,
+          "description": "Marca no próprio editor as linhas que o Claude adicionou, modificou ou removeu, enquanto o arquivo continuar como o Claude deixou."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package --allow-missing-repository"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.6.0",
+    "typescript": "^5.6.0"
+  }
+}

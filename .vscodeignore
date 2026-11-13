@@ -1,0 +1,24 @@
+# Código-fonte e configs de build (o pacote usa só out/)
+src/**
+tsconfig.json
+**/*.ts
+**/*.map
+
+# Dependências de desenvolvimento
+node_modules/**
+
+# Configurações do editor, git e Claude
+.vscode/**
+.claude/**
+.git/**
+.gitignore
+.gitattributes
+
+# Pacotes antigos e logs
+**/*.vsix
+**/*.log
+
+# Arquivos do sistema operacional
+**/.DS_Store
+**/Thumbs.db
+**/desktop.ini
