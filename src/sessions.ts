@@ -185,7 +185,68 @@ export function findReasonInTranscript(transcriptPath: string, toolUseId: string
 	return null;
 }
 
-function clip(text: string): string {
+export interface RequestInfo {
+	/** Identifica a mensagem do usuário dentro da conversa. */
+	id: string;
+	text: string;
+}
+
+/**
+ * Para cada chamada de ferramenta no fim do transcript, a mensagem do usuário
+ * que a originou (o "pedido"). Respostas de ferramentas e mensagens internas
+ * não contam como pedido.
+ */
+export function findRequestsInTranscript(transcriptPath: string): Map<string, RequestInfo> {
+	const result = new Map<string, RequestInfo>();
+	let size: number;
+	try {
+		size = fs.statSync(transcriptPath).size;
+	} catch {
+		return result;
+	}
+	const text = readRange(transcriptPath, Math.max(0, size - REASON_TAIL_BYTES), size);
+	let current: RequestInfo | null = null;
+	for (const entry of parseLines(text)) {
+		if (entry.type === 'user' && !entry.isMeta && entry.message) {
+			const prompt = promptText(entry.message.content);
+			if (prompt) {
+				current = { id: String(entry.uuid ?? `${transcriptPath}:${prompt}`), text: clip(prompt, MAX_REQUEST) };
+			}
+			continue;
+		}
+		if (entry.type !== 'assistant' || !entry.message || !current) {
+			continue;
+		}
+		const content = entry.message.content;
+		for (const block of Array.isArray(content) ? content : []) {
+			if (block && block.type === 'tool_use' && typeof block.id === 'string') {
+				result.set(block.id, current);
+			}
+		}
+	}
+	return result;
+}
+
+const MAX_REQUEST = 160;
+
+function promptText(content: unknown): string | null {
+	const blocks: any[] = typeof content === 'string' ? [{ type: 'text', text: content }] : Array.isArray(content) ? content : [];
+	if (blocks.some((block) => block && block.type === 'tool_result')) {
+		return null;
+	}
+	const parts: string[] = [];
+	for (const block of blocks) {
+		if (block && block.type === 'text' && typeof block.text === 'string') {
+			const clean = block.text.replace(/<[^>]+>[\s\S]*?<\/[^>]+>/g, '').trim();
+			if (clean) {
+				parts.push(clean);
+			}
+		}
+	}
+	return parts.length > 0 ? parts.join(' ') : null;
+}
+
+function clip(text: string, max = MAX_TITLE): string {
 	const oneLine = text.replace(/\s+/g, ' ').trim();
-	return oneLine.length > MAX_TITLE ? `${oneLine.slice(0, MAX_TITLE - 1)}…` : oneLine;
+	return oneLine.length > max ? `${oneLine.slice(0, max - 1)}…` : oneLine;
 }

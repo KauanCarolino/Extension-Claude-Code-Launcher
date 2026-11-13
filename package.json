@@ -2,9 +2,13 @@
   "name": "claude-code-launcher",
   "displayName": "Claude Code Launcher",
   "description": "Abre o chat oficial do Claude Code e mostra, de forma didática, o que ele mudou em cada arquivo.",
-  "version": "0.5.4",
+  "version": "0.6.0",
   "publisher": "kauan",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/KauanCarolino/Extension-Claude-Code-Launcher.git"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -92,6 +96,31 @@
         "category": "Claude Code Launcher"
       },
       {
+        "command": "claude-code-launcher.acceptEverything",
+        "title": "Aceitar todas as mudanças pendentes do Claude",
+        "category": "Claude Code Launcher"
+      },
+      {
+        "command": "claude-code-launcher.rejectEverything",
+        "title": "Recusar todas as mudanças pendentes do Claude",
+        "category": "Claude Code Launcher"
+      },
+      {
+        "command": "claude-code-launcher.undoReject",
+        "title": "Desfazer a última recusa",
+        "category": "Claude Code Launcher"
+      },
+      {
+        "command": "claude-code-launcher.nextChange",
+        "title": "Próxima mudança do Claude",
+        "category": "Claude Code Launcher"
+      },
+      {
+        "command": "claude-code-launcher.previousChange",
+        "title": "Mudança anterior do Claude",
+        "category": "Claude Code Launcher"
+      },
+      {
         "command": "claude-code-launcher.acceptChange",
         "title": "Aceitar trecho",
         "category": "Claude Code Launcher"
@@ -140,6 +169,30 @@
         }
       ]
     },
+    "keybindings": [
+      {
+        "command": "claude-code-launcher.nextChange",
+        "key": "alt+]",
+        "when": "editorTextFocus && claudeCodeLauncher.hasPendingChanges && !inlineSuggestionVisible"
+      },
+      {
+        "command": "claude-code-launcher.previousChange",
+        "key": "alt+[",
+        "when": "editorTextFocus && claudeCodeLauncher.hasPendingChanges && !inlineSuggestionVisible"
+      }
+    ],
+    "colors": [
+      {
+        "id": "claudeCodeLauncher.pendingChangeForeground",
+        "description": "Cor dos arquivos com mudanças do Claude para revisar, no Explorer.",
+        "defaults": {
+          "dark": "#d98c5f",
+          "light": "#b5592a",
+          "highContrast": "#f0a070",
+          "highContrastLight": "#9a4a20"
+        }
+      }
+    ],
     "viewsContainers": {
       "activitybar": [
         {
@@ -177,7 +230,8 @@
   "scripts": {
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "package": "vsce package --allow-missing-repository"
+    "test": "tsc -p ./ && node --test \"test/*.test.js\"",
+    "package": "vsce package"
   },
   "devDependencies": {
     "@types/vscode": "^1.85.0",

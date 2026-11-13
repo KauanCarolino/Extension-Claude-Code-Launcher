@@ -1,11 +1,10 @@
 import * as vscode from 'vscode';
 import { DiffLine, diffLines, Group, groupsOf, groupSignature, joinText, sameText, splitText } from './diff';
-import { changeUri, RawEntry, Snapshot } from './changes';
+import { changeUri, DROP_REVIEW_COMMAND } from './changes';
+import { collectChain, fileKey, RawEntry, Status, textOf } from './logic';
 
 const CONFIG_SECTION = 'claudeCodeLauncher';
 const CONFIG_KEY = 'inlineChanges';
-const REVIEWED_KEY = 'claudeCodeLauncher.reviewedEntries';
-const MAX_REVIEWED = 1000;
 const MAX_GHOST_CHARS = 90;
 const MAX_HOVER_REASON = 900;
 const MAX_LENS_REASON = 70;
@@ -13,6 +12,10 @@ const MAX_LENS_REASON = 70;
 export interface EntrySource {
 	readonly onDidChangeEntries: vscode.Event<void>;
 	getEntries(): readonly RawEntry[];
+	isReviewed(id: string): boolean;
+	setStatus(ids: readonly string[], status: Status | undefined): void;
+	/** Arquivos com mudanças pendentes, na ordem do painel. */
+	pendingFiles(): string[];
 }
 
 /**
@@ -27,6 +30,9 @@ interface Review {
 	first: RawEntry;
 	last: RawEntry;
 	reason: string | null;
+	/** Trechos aceitos e recusados um a um: decidem se a revisão termina aceita ou recusada. */
+	accepted: number;
+	rejected: number;
 }
 
 interface Built {
@@ -41,8 +47,11 @@ interface Built {
 }
 
 export function registerInline(context: vscode.ExtensionContext, source: EntrySource): void {
-	const inline = new InlineChanges(source, context.workspaceState);
+	const inline = new InlineChanges(source);
 	context.subscriptions.push(
+		vscode.commands.registerCommand(DROP_REVIEW_COMMAND, (uri: string) => inline.drop(uri)),
+		vscode.commands.registerCommand('claude-code-launcher.nextChange', () => inline.navigate(1)),
+		vscode.commands.registerCommand('claude-code-launcher.previousChange', () => inline.navigate(-1)),
 		inline,
 		vscode.languages.registerCodeLensProvider({ scheme: 'file' }, inline),
 		vscode.commands.registerCommand('claude-code-launcher.showInlineChanges', (id?: string) => inline.show(id)),
@@ -122,12 +131,10 @@ class InlineChanges implements vscode.CodeLensProvider, vscode.Disposable {
 
 	private readonly lenses = new Map<string, vscode.CodeLens[]>();
 	private readonly reviews = new Map<string, Review>();
-	private readonly reviewed: Set<string>;
 	private readonly pending = new Map<string, unknown>();
 	private readonly disposables: vscode.Disposable[] = [];
 
-	constructor(private readonly source: EntrySource, private readonly memento: vscode.Memento) {
-		this.reviewed = new Set(memento.get<string[]>(REVIEWED_KEY, []));
+	constructor(private readonly source: EntrySource) {
 		this.disposables.push(
 			this.addedType,
 			this.modifiedType,
@@ -168,18 +175,24 @@ class InlineChanges implements vscode.CodeLensProvider, vscode.Disposable {
 				.update(CONFIG_KEY, true, vscode.ConfigurationTarget.Global);
 		}
 		const uri = vscode.Uri.file(entry.file);
-		for (const item of this.entriesFor(uri.toString())) {
-			this.reviewed.delete(item.id);
-		}
-		this.reviews.delete(uri.toString());
-		void this.saveReviewed();
-
 		let editor: vscode.TextEditor;
 		try {
 			editor = await vscode.window.showTextDocument(uri, { preview: false });
 		} catch {
 			void vscode.window.showWarningMessage(`O arquivo ${basename(entry.file)} não existe mais.`);
 			return;
+		}
+
+		// Edições já aceitas ou recusadas voltam para revisão, desde que o arquivo
+		// ainda esteja exatamente como o Claude deixou.
+		const key = uri.toString();
+		const entries = this.entriesFor(key);
+		const after = textOf(entries[entries.length - 1]?.after ?? null);
+		if (!this.reviews.has(key) && after !== undefined && sameText(after, editor.document.getText())) {
+			const chain = collectChain(entries, () => false);
+			if (chain) {
+				this.source.setStatus(chain.ids, undefined);
+			}
 		}
 		const built = this.apply(editor);
 		if (!built) {
@@ -225,6 +238,7 @@ class InlineChanges implements vscode.CodeLensProvider, vscode.Disposable {
 		const base = splitText(review.base);
 		base.lines.splice(group.oldStart, group.oldLines.length, ...group.newLines);
 		review.base = joinText(base);
+		review.accepted += 1;
 		this.applyAll();
 	}
 
@@ -234,7 +248,8 @@ class InlineChanges implements vscode.CodeLensProvider, vscode.Disposable {
 		if (!target) {
 			return;
 		}
-		const { document, group } = target;
+		const { document, review, group } = target;
+		review.rejected += 1;
 		const current = splitText(document.getText());
 		current.lines.splice(group.newStart, group.newLines.length, ...group.oldLines);
 		await this.replaceDocument(document, joinText(current));
@@ -244,7 +259,7 @@ class InlineChanges implements vscode.CodeLensProvider, vscode.Disposable {
 		const key = uri ?? vscode.window.activeTextEditor?.document.uri.toString();
 		const review = key ? this.reviews.get(key) : undefined;
 		if (key && review) {
-			this.finish(key, review);
+			this.finish(key, review, 'accepted');
 		}
 		this.applyAll();
 	}
@@ -256,7 +271,70 @@ class InlineChanges implements vscode.CodeLensProvider, vscode.Disposable {
 		if (!review || !document) {
 			return;
 		}
+		review.rejected += 1;
 		await this.replaceDocument(document, review.base);
+	}
+
+	/** Esquece a revisão do arquivo sem marcar nada: quem chamou já decidiu o que fazer. */
+	drop(uri: string): void {
+		this.reviews.delete(uri);
+		this.applyAll();
+	}
+
+	/**
+	 * Vai para o próximo (1) ou anterior (-1) trecho do Claude no arquivo atual.
+	 * No fim do arquivo, passa para o próximo arquivo pendente.
+	 */
+	async navigate(direction: 1 | -1): Promise<void> {
+		const editor = vscode.window.activeTextEditor;
+		const anchors = editor ? this.anchors(editor) : [];
+		if (editor && anchors.length > 0) {
+			const line = editor.selection.active.line;
+			const target = direction > 0
+				? anchors.find((anchor) => anchor > line)
+				: [...anchors].reverse().find((anchor) => anchor < line);
+			if (target !== undefined) {
+				reveal(editor, target);
+				return;
+			}
+		}
+
+		const files = this.source.pendingFiles();
+		const current = editor ? fileKey(editor.document.uri.fsPath) : '';
+		const index = files.findIndex((file) => fileKey(file) === current);
+		const order = index < 0
+			? (direction > 0 ? files : [...files].reverse())
+			: Array.from({ length: files.length }, (_, step) => files[(index + direction * (step + 1) + files.length * 2) % files.length]);
+		for (const file of order) {
+			let next: vscode.TextEditor;
+			try {
+				next = await vscode.window.showTextDocument(vscode.Uri.file(file), { preview: false });
+			} catch {
+				continue;
+			}
+			const found = this.anchors(next);
+			if (found.length > 0) {
+				reveal(next, direction > 0 ? found[0] : found[found.length - 1]);
+				return;
+			}
+		}
+		void vscode.window.showInformationMessage(
+			files.length === 0
+				? 'Nenhuma mudança do Claude para revisar.'
+				: 'As mudanças pendentes não batem mais com o código. Revise pelo painel Mudanças.',
+		);
+	}
+
+	/** Linha de início de cada trecho do Claude no editor. */
+	private anchors(editor: vscode.TextEditor): number[] {
+		const built = this.apply(editor);
+		const review = this.reviews.get(editor.document.uri.toString());
+		if (!built || !review) {
+			return [];
+		}
+		const last = Math.max(0, editor.document.lineCount - 1);
+		return groupsOf(diffLines(review.base, editor.document.getText()).lines)
+			.map((group) => Math.min(group.newStart, last));
 	}
 
 	private groupAt(uri: string, index: number, signature: string):
@@ -345,7 +423,7 @@ class InlineChanges implements vscode.CodeLensProvider, vscode.Disposable {
 		const latest = entries[entries.length - 1];
 		let review = this.reviews.get(key);
 
-		if (latest && !this.reviewed.has(latest.id) && !review?.ids.includes(latest.id)) {
+		if (latest && !this.source.isReviewed(latest.id) && !review?.ids.includes(latest.id)) {
 			const after = textOf(latest.after);
 			if (after !== undefined && sameText(after, text)) {
 				if (review) {
@@ -374,40 +452,20 @@ class InlineChanges implements vscode.CodeLensProvider, vscode.Disposable {
 	}
 
 	private startReview(entries: RawEntry[]): Review | undefined {
-		const last = entries[entries.length - 1];
-		let before = textOf(last.before);
-		if (before === undefined) {
+		const chain = collectChain(entries, (id) => this.source.isReviewed(id));
+		if (!chain) {
 			return undefined;
 		}
-		const ids = [last.id];
-		let first = last;
-		for (let index = entries.length - 2; index >= 0; index -= 1) {
-			const previous = entries[index];
-			const previousAfter = textOf(previous.after);
-			const previousBefore = textOf(previous.before);
-			if (
-				this.reviewed.has(previous.id)
-				|| previousAfter === undefined
-				|| previousBefore === undefined
-				|| !sameText(previousAfter, before)
-			) {
-				break;
-			}
-			before = previousBefore;
-			first = previous;
-			ids.unshift(previous.id);
-		}
-		return { base: before, ids, first, last, reason: last.reason?.trim() || null };
+		return { ...chain, reason: chain.last.reason?.trim() || null, accepted: 0, rejected: 0 };
 	}
 
-	private finish(key: string, review: Review): void {
-		review.ids.forEach((id) => this.reviewed.add(id));
+	/**
+	 * Encerra a revisão. Sem decisão explícita, conta como aceita se algum trecho
+	 * foi aceito; senão o arquivo voltou ao que era, então conta como recusada.
+	 */
+	private finish(key: string, review: Review, status?: Status): void {
 		this.reviews.delete(key);
-		void this.saveReviewed();
-	}
-
-	private async saveReviewed(): Promise<void> {
-		await this.memento.update(REVIEWED_KEY, [...this.reviewed].slice(-MAX_REVIEWED));
+		this.source.setStatus(review.ids, status ?? (review.accepted > 0 ? 'accepted' : 'rejected'));
 	}
 
 	private entriesFor(key: string): RawEntry[] {
@@ -606,18 +664,14 @@ function codeBlock(code: string, language: string): string {
 	return `${fence}${language}\n${code}\n${fence}\n`;
 }
 
-function lineRange(line: number): vscode.Range {
-	return new vscode.Range(line, 0, line, 0);
+function reveal(editor: vscode.TextEditor, line: number): void {
+	const position = new vscode.Position(line, 0);
+	editor.selection = new vscode.Selection(position, position);
+	editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
 }
 
-function textOf(snapshot: Snapshot | null): string | undefined {
-	if (!snapshot || snapshot.large) {
-		return undefined;
-	}
-	if (!snapshot.exists) {
-		return '';
-	}
-	return snapshot.text ?? undefined;
+function lineRange(line: number): vscode.Range {
+	return new vscode.Range(line, 0, line, 0);
 }
 
 function truncate(text: string, max: number): string {

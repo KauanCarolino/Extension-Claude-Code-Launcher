@@ -48,6 +48,8 @@
 		}
 		if (state.files && state.files.length > 0) {
 			root.append(renderFiles(state));
+		} else if (state.entries.length > 0) {
+			root.append(el('p', 'muted all-reviewed', '✓ Nada para revisar: todas as mudanças do Claude já foram aceitas ou recusadas.'));
 		}
 		root.append(renderLegend());
 
@@ -63,14 +65,47 @@
 			firstRender = false;
 		}
 		let lastDay = '';
+		let group = null;
 		for (const entry of state.entries) {
 			const day = dayLabel(entry.time);
 			if (day !== lastDay) {
 				root.append(el('div', 'day', day));
 				lastDay = day;
+				group = null;
 			}
-			root.append(renderEntry(entry));
+			if (!entry.requestId) {
+				group = null;
+				root.append(renderEntry(entry));
+				continue;
+			}
+			if (!group || group.id !== entry.requestId) {
+				group = { id: entry.requestId, box: renderRequest(entry, state.entries) };
+				root.append(group.box);
+			}
+			group.box.append(renderEntry(entry));
 		}
+	}
+
+	// Agrupa as edições feitas para atender a mesma mensagem do usuário.
+	function renderRequest(entry, entries) {
+		const same = entries.filter((item) => item.requestId === entry.requestId);
+		const files = new Set(same.map((item) => (item.dir ? item.dir + '/' : '') + item.file));
+		const box = el('div', 'request');
+		const head = el('div', 'request-head');
+		const text = el('div', 'request-text');
+		text.append(el('span', 'request-label', 'Pedido'));
+		text.append(el('span', 'request-quote', entry.request));
+		head.append(text);
+		const meta = el('div', 'request-meta');
+		meta.append(el('span', 'muted', files.size === 1 ? '1 arquivo' : files.size + ' arquivos'));
+		if (same.some((item) => item.status !== 'rejected')) {
+			const undo = button('Desfazer pedido', 'rejectRequest', { request: entry.requestId }, 'secondary small');
+			undo.title = 'Volta os arquivos deste pedido para como eram antes dele';
+			meta.append(undo);
+		}
+		head.append(meta);
+		box.append(head);
+		return box;
 	}
 
 	function renderToolbar(state) {
@@ -79,6 +114,11 @@
 			state.enabled ? '● Registrando' : '○ Registro desligado');
 		bar.append(status);
 		const actions = el('div', 'actions');
+		if (state.canUndo) {
+			const undo = button('↶ Desfazer recusa', 'undoReject', null, 'primary');
+			undo.title = 'Traz de volta as mudanças do Claude que você acabou de recusar';
+			actions.append(undo);
+		}
 		actions.append(button('Atualizar', 'refresh'));
 		if (!state.wide) {
 			actions.append(button('Tela maior', 'openPanel'));
@@ -105,7 +145,7 @@
 
 		const head = el('summary', 'files-head');
 		const count = state.files.length;
-		head.append(el('span', 'files-count', count === 1 ? '1 arquivo' : count + ' arquivos'));
+		head.append(el('span', 'files-count', (count === 1 ? '1 arquivo' : count + ' arquivos') + ' para revisar'));
 		const headActions = el('span', 'files-actions');
 		const accept = button('✓ Aceitar todos', 'acceptAll', null, 'secondary review accept');
 		accept.title = 'Mantém tudo como o Claude deixou e tira os arquivos desta lista';
@@ -120,17 +160,18 @@
 
 		const list = el('div', 'files-list');
 		for (const file of state.files) {
-			const row = el('button', 'file-row');
-			row.type = 'button';
-			row.title = (file.dir ? file.dir + '/' : '') + file.file + '\nClique para ver a mudança no código';
-			row.addEventListener('click', () => {
+			const row = el('div', 'file-row');
+			const main = el('button', 'file-main');
+			main.type = 'button';
+			main.title = (file.dir ? file.dir + '/' : '') + file.file + '\nClique para ver a mudança no código';
+			main.addEventListener('click', () => {
 				vscode.postMessage({ command: file.deleted ? 'openFile' : 'showInCode', id: file.id });
 			});
 			const icon = fileIcon(file.file);
-			row.append(el('span', 'file-icon ' + icon.className, icon.text));
-			row.append(el('span', 'file-name' + (file.deleted ? ' gone' : ''), file.file));
+			main.append(el('span', 'file-icon ' + icon.className, icon.text));
+			main.append(el('span', 'file-name' + (file.deleted ? ' gone' : ''), file.file));
 			if (file.created) {
-				row.append(el('span', 'file-tag', 'novo'));
+				main.append(el('span', 'file-tag', 'novo'));
 			}
 			const stats = el('span', 'file-stats');
 			if (file.added) {
@@ -139,7 +180,18 @@
 			if (file.removed) {
 				stats.append(el('span', 'stat del', '−' + file.removed));
 			}
-			row.append(stats);
+			main.append(stats);
+			row.append(main);
+
+			const rowActions = el('span', 'file-actions');
+			const accept = button('✓', 'acceptFile', { key: file.key }, 'icon accept');
+			accept.title = 'Aceitar as mudanças neste arquivo';
+			accept.setAttribute('aria-label', 'Aceitar ' + file.file);
+			const reject = button('✕', 'rejectFile', { key: file.key }, 'icon reject');
+			reject.title = 'Recusar: volta este arquivo para como era antes do Claude';
+			reject.setAttribute('aria-label', 'Recusar ' + file.file);
+			rowActions.append(accept, reject);
+			row.append(rowActions);
 			list.append(row);
 		}
 		box.append(list);
@@ -205,6 +257,11 @@
 		const title = el('div', 'title');
 		title.append(el('span', 'badge ' + badgeClass(entry.action), entry.action));
 		title.append(el('span', 'file', entry.file));
+		if (entry.status === 'accepted') {
+			title.append(el('span', 'status-tag accepted', 'aceita'));
+		} else if (entry.status === 'rejected') {
+			title.append(el('span', 'status-tag rejected', 'recusada'));
+		}
 		head.append(title);
 		const meta = el('div', 'meta');
 		meta.append(el('span', 'time', timeLabel(entry.time)));

@@ -1,35 +1,31 @@
 import * as vscode from 'vscode';
 import { computeDiff, DiffResult, Hunk } from './diff';
-import { findReasonInTranscript } from './sessions';
+import { fileKey, groupByFile, normalizeEol, planRevert, RawEntry, Status, trimLog } from './logic';
+import { findReasonInTranscript, findRequestsInTranscript, RequestInfo } from './sessions';
+
+export type { RawEntry, Snapshot } from './logic';
 
 const HOOK_FILE = 'launcher-record-change.js';
-const LOG_PATH = ['.claude', 'launcher-changes', 'log.jsonl'];
+const LOG_DIR = ['.claude', 'launcher-changes'];
+const LOG_PATH = [...LOG_DIR, 'log.jsonl'];
 const SETTINGS_PATH = ['.claude', 'settings.local.json'];
 const MATCHER = 'Edit|Write|MultiEdit|NotebookEdit';
 const SCHEME = 'claude-launcher-change';
+const STATUS_KEY = 'claudeCodeLauncher.entryStatus';
+const LEGACY_REVIEWED_KEY = 'claudeCodeLauncher.reviewedEntries';
+const PENDING_CONTEXT = 'claudeCodeLauncher.hasPendingChanges';
+/** Comando interno de inline.ts: esquece a revisão aberta de um arquivo, sem marcar nada. */
+export const DROP_REVIEW_COMMAND = 'claude-code-launcher.dropReview';
+
+/** Edições mostradas no histórico. */
+const MAX_HISTORY = 60;
+/** Acima disso, o log perde as edições revisadas mais antigas. */
+const MAX_LOG_ENTRIES = 400;
+const MAX_STATUS = 3000;
+const MAX_META_ATTEMPTS = 10;
 
 export function changeUri(entry: RawEntry, side: 'antes' | 'depois'): vscode.Uri {
 	return vscode.Uri.from({ scheme: SCHEME, path: `/${entry.id}/${side}/${basename(entry.file)}` });
-}
-const MAX_ENTRIES = 60;
-const MAX_REASON_ATTEMPTS = 10;
-
-export interface Snapshot {
-	exists: boolean;
-	text: string | null;
-	large: boolean;
-}
-
-export interface RawEntry {
-	id: string;
-	time: string;
-	tool?: string | null;
-	file: string;
-	before: Snapshot | null;
-	after: Snapshot | null;
-	reason?: string | null;
-	transcript?: string | null;
-	toolUseId?: string | null;
 }
 
 interface ViewEntry {
@@ -46,9 +42,25 @@ interface ViewEntry {
 	hunks: Hunk[];
 	note: string | null;
 	canCompare: boolean;
+	status: Status | null;
+	requestId: string | null;
+	request: string | null;
 }
 
-type Message = { command?: string; id?: string };
+interface UndoItem {
+	file: string;
+	/** Conteúdo antes de recusar (undefined = o arquivo não existia). */
+	previous: string | undefined;
+	/** Conteúdo que a recusa deixou (undefined = a recusa apagou o arquivo). */
+	restored: string | undefined;
+}
+
+interface Undo {
+	items: UndoItem[];
+	ids: string[];
+}
+
+type Message = { command?: string; id?: string; key?: string; request?: string };
 
 export function registerChanges(context: vscode.ExtensionContext): ChangesController {
 	const controller = new ChangesController(context);
@@ -56,52 +68,119 @@ export function registerChanges(context: vscode.ExtensionContext): ChangesContro
 		controller,
 		vscode.window.registerWebviewViewProvider(ChangesController.viewId, controller),
 		vscode.workspace.registerTextDocumentContentProvider(SCHEME, controller),
+		vscode.window.registerFileDecorationProvider(controller),
 		vscode.commands.registerCommand('claude-code-launcher.showChanges', () => controller.openPanel()),
 		vscode.commands.registerCommand('claude-code-launcher.enableChangeLog', () => controller.setEnabled(true)),
 		vscode.commands.registerCommand('claude-code-launcher.disableChangeLog', () => controller.setEnabled(false)),
 		vscode.commands.registerCommand('claude-code-launcher.clearChanges', () => controller.clear()),
+		vscode.commands.registerCommand('claude-code-launcher.acceptEverything', () => controller.acceptEverything()),
+		vscode.commands.registerCommand('claude-code-launcher.rejectEverything', () => controller.rejectEverything()),
+		vscode.commands.registerCommand('claude-code-launcher.undoReject', () => controller.undoReject()),
 	);
-	void controller.installHookScript();
+	void controller.repairHooks();
 	return controller;
 }
 
-export class ChangesController implements vscode.WebviewViewProvider, vscode.TextDocumentContentProvider, vscode.Disposable {
+export class ChangesController implements
+	vscode.WebviewViewProvider, vscode.TextDocumentContentProvider, vscode.FileDecorationProvider, vscode.Disposable {
 	public static readonly viewId = 'claude-code-launcher.changes';
 
+	/** Todas as edições do log, da mais recente para a mais antiga. */
 	private entries: RawEntry[] = [];
 	private enabled = false;
 	private view: vscode.WebviewView | undefined;
 	private panel: vscode.WebviewPanel | undefined;
 	private refreshTimer: unknown;
+	private publishTimer: unknown;
+	private metaTimer: unknown;
 	private readonly disposables: vscode.Disposable[] = [];
 	private readonly reasonCache = new Map<string, string>();
-	private readonly reasonAttempts = new Map<string, number>();
-	private reasonTimer: unknown;
+	private readonly requestCache = new Map<string, RequestInfo>();
+	private readonly metaAttempts = new Map<string, number>();
+	private readonly status: Map<string, Status>;
+	private lastUndo: Undo | undefined;
+	/** Arquivos marcados no Explorer: chave → caminho real. */
+	private decorated = new Map<string, string>();
+	private readonly statusItem: vscode.StatusBarItem;
+
 	private readonly entriesEmitter = new vscode.EventEmitter<void>();
 	readonly onDidChangeEntries = this.entriesEmitter.event;
+	private readonly decorationEmitter = new vscode.EventEmitter<vscode.Uri[]>();
+	readonly onDidChangeFileDecorations = this.decorationEmitter.event;
 
 	constructor(private readonly context: vscode.ExtensionContext) {
+		this.status = loadStatus(context.workspaceState);
+		this.statusItem = vscode.window.createStatusBarItem('claude-code-launcher.pending', vscode.StatusBarAlignment.Right, 99);
+		this.statusItem.name = 'Mudanças do Claude';
+		this.statusItem.command = 'claude-code-launcher.showChanges';
+
 		const watcher = vscode.workspace.createFileSystemWatcher('**/.claude/{launcher-changes/log.jsonl,settings.local.json}');
 		const schedule = () => this.scheduleRefresh();
 		this.disposables.push(
 			this.entriesEmitter,
+			this.decorationEmitter,
+			this.statusItem,
 			watcher,
 			watcher.onDidCreate(schedule),
 			watcher.onDidChange(schedule),
 			watcher.onDidDelete(schedule),
-			vscode.workspace.onDidChangeWorkspaceFolders(schedule),
+			vscode.workspace.onDidChangeWorkspaceFolders(() => {
+				void this.repairHooks();
+				schedule();
+			}),
 		);
 		this.scheduleRefresh();
 	}
 
 	dispose(): void {
 		clearTimeout(this.refreshTimer);
+		clearTimeout(this.publishTimer);
+		clearTimeout(this.metaTimer);
 		this.disposables.forEach((disposable) => disposable.dispose());
 	}
+
+	// ---- Usado por inline.ts ----------------------------------------------------
 
 	getEntries(): readonly RawEntry[] {
 		return this.entries;
 	}
+
+	isReviewed(id: string): boolean {
+		return this.status.has(id);
+	}
+
+	/** Marca edições como aceitas ou recusadas; `undefined` volta para pendente. */
+	setStatus(ids: readonly string[], status: Status | undefined): void {
+		let changed = false;
+		for (const id of ids) {
+			if (status === undefined) {
+				changed = this.status.delete(id) || changed;
+			} else if (this.status.get(id) !== status) {
+				this.status.delete(id);
+				this.status.set(id, status);
+				changed = true;
+			}
+		}
+		if (!changed) {
+			return;
+		}
+		while (this.status.size > MAX_STATUS) {
+			this.status.delete(this.status.keys().next().value as string);
+		}
+		void this.context.workspaceState.update(STATUS_KEY, Object.fromEntries(this.status));
+		// Pode ser chamado no meio de uma pintura das marcas: avisa depois.
+		clearTimeout(this.publishTimer);
+		this.publishTimer = setTimeout(() => this.publish(), 0);
+	}
+
+	/** Arquivos (caminho completo) com mudanças pendentes que ainda existem, na ordem do painel. */
+	pendingFiles(): string[] {
+		return this.pendingGroups()
+			.filter((list) => list[0].after?.exists !== false)
+			.map((list) => list[0].file);
+	}
+
+	// ---- Webview, conteúdo virtual e decorações ---------------------------------
 
 	resolveWebviewView(webviewView: vscode.WebviewView): void {
 		this.view = webviewView;
@@ -135,15 +214,18 @@ export class ChangesController implements vscode.WebviewViewProvider, vscode.Tex
 		return snapshot?.text ?? '';
 	}
 
-	async installHookScript(): Promise<void> {
-		const target = this.hookScriptUri();
-		await vscode.workspace.fs.createDirectory(this.context.globalStorageUri);
-		await vscode.workspace.fs.copy(
-			vscode.Uri.joinPath(this.context.extensionUri, 'hooks', 'record-change.js'),
-			target,
-			{ overwrite: true },
-		);
+	provideFileDecoration(uri: vscode.Uri): vscode.FileDecoration | undefined {
+		if (uri.scheme !== 'file' || !this.decorated.has(fileKey(uri.fsPath))) {
+			return undefined;
+		}
+		return {
+			badge: 'C',
+			tooltip: 'Mudanças do Claude para revisar',
+			color: new vscode.ThemeColor('claudeCodeLauncher.pendingChangeForeground'),
+		};
 	}
+
+	// ---- Registro (hooks) --------------------------------------------------------
 
 	async setEnabled(enable: boolean): Promise<void> {
 		const folders = vscode.workspace.workspaceFolders ?? [];
@@ -151,16 +233,39 @@ export class ChangesController implements vscode.WebviewViewProvider, vscode.Tex
 			void vscode.window.showWarningMessage('Abra uma pasta de projeto para registrar as mudanças do Claude.');
 			return;
 		}
-		await this.installHookScript();
-		const script = this.hookScriptUri().fsPath.replace(/\\/g, '/');
 		for (const folder of folders) {
-			await this.writeHooks(folder, script, enable);
+			if (enable) {
+				await this.installHookScript(folder);
+			}
+			await this.writeHooks(folder, enable);
 		}
 		await this.refresh();
 		if (enable) {
 			void vscode.window.showInformationMessage(
 				'Registro de mudanças ativado. Ele vale para conversas do Claude Code iniciadas a partir de agora.',
 			);
+		}
+	}
+
+	/**
+	 * Mantém o hook funcionando: atualiza a cópia do script dentro do projeto e,
+	 * se o settings ainda aponta para outro lugar (versão antiga, que usava o
+	 * armazenamento global do editor), passa a apontar para essa cópia.
+	 */
+	async repairHooks(): Promise<void> {
+		for (const folder of vscode.workspace.workspaceFolders ?? []) {
+			try {
+				const text = await readText(vscode.Uri.joinPath(folder.uri, ...SETTINGS_PATH));
+				if (!text?.includes(HOOK_FILE)) {
+					continue;
+				}
+				await this.installHookScript(folder);
+				if (!text.includes(this.scriptPath(folder))) {
+					await this.writeHooks(folder, true);
+				}
+			} catch {
+				// Sem permissão de escrita, por exemplo: o registro segue como estava.
+			}
 		}
 	}
 
@@ -173,6 +278,181 @@ export class ChangesController implements vscode.WebviewViewProvider, vscode.Tex
 			}
 		}
 		await this.refresh();
+	}
+
+	// ---- Aceitar e recusar ---------------------------------------------------------
+
+	/** Mantém tudo como o Claude deixou e tira os arquivos da lista de pendentes. */
+	async acceptEverything(): Promise<void> {
+		const groups = this.pendingGroups();
+		if (groups.length > 0) {
+			await this.accept(groups);
+			void vscode.window.showInformationMessage(`Mudanças do Claude aceitas em ${countFiles(groups.length)}.`);
+		}
+	}
+
+	async rejectEverything(): Promise<void> {
+		const groups = this.pendingGroups();
+		if (groups.length === 0) {
+			return;
+		}
+		const ok = await confirm(
+			`Recusar as mudanças do Claude em ${countFiles(groups.length)}?`,
+			'Cada arquivo volta a ser como era antes do Claude editar: arquivos que ele criou vão para a lixeira e os que ele '
+			+ 'apagou são recriados. Dá para desfazer logo depois.',
+			'Recusar todas',
+		);
+		if (ok) {
+			this.report(await this.revert(groups));
+		}
+	}
+
+	/** Volta os arquivos de uma recusa para como estavam antes dela. */
+	async undoReject(): Promise<void> {
+		const undo = this.lastUndo;
+		if (!undo) {
+			void vscode.window.showInformationMessage('Não há recusa para desfazer.');
+			return;
+		}
+		this.lastUndo = undefined;
+		const failed: string[] = [];
+		for (const item of undo.items) {
+			const uri = vscode.Uri.file(item.file);
+			try {
+				const current = await currentText(uri);
+				const untouched = item.restored === undefined
+					? current === undefined
+					: current !== undefined && normalizeEol(current) === normalizeEol(item.restored);
+				if (!untouched) {
+					failed.push(basename(item.file));
+					continue;
+				}
+				if (item.previous !== undefined) {
+					await writeText(uri, item.previous);
+				} else if (current !== undefined) {
+					await deleteFile(uri);
+				}
+				await vscode.commands.executeCommand(DROP_REVIEW_COMMAND, uri.toString());
+			} catch {
+				failed.push(basename(item.file));
+			}
+		}
+		this.setStatus(undo.ids, undefined);
+		if (failed.length > 0) {
+			void vscode.window.showWarningMessage(
+				`Não desfiz a recusa em ${failed.join(', ')}: ${failed.length === 1 ? 'o arquivo mudou' : 'os arquivos mudaram'} depois dela.`,
+			);
+		} else {
+			void vscode.window.showInformationMessage('Recusa desfeita: as mudanças do Claude voltaram.');
+		}
+	}
+
+	private async acceptFile(key: string | undefined): Promise<void> {
+		const group = this.pendingGroups().find((list) => fileKey(list[0].file) === key);
+		if (group) {
+			await this.accept([group]);
+		}
+	}
+
+	private async rejectFile(key: string | undefined): Promise<void> {
+		const group = this.pendingGroups().find((list) => fileKey(list[0].file) === key);
+		if (group) {
+			this.report(await this.revert([group]));
+		}
+	}
+
+	/** Recusa tudo o que o Claude mudou para atender um pedido. */
+	private async rejectRequest(requestId: string | undefined): Promise<void> {
+		const entries = this.entries.filter(
+			(entry) => this.requestCache.get(entry.id)?.id === requestId && this.status.get(entry.id) !== 'rejected',
+		);
+		if (!requestId || entries.length === 0) {
+			return;
+		}
+		const groups = groupByFile(entries);
+		const text = this.requestCache.get(entries[0].id)?.text ?? '';
+		const ok = await confirm(
+			`Desfazer o pedido "${text}"?`,
+			`${capitalize(countFiles(groups.length))} ${groups.length === 1 ? 'volta' : 'voltam'} a ser como era antes deste pedido. `
+			+ 'Arquivos mudados depois dele ficam como estão. Dá para desfazer logo depois.',
+			'Desfazer pedido',
+		);
+		if (ok) {
+			this.report(await this.revert(groups));
+		}
+	}
+
+	private async accept(groups: RawEntry[][]): Promise<void> {
+		for (const list of groups) {
+			await vscode.commands.executeCommand(DROP_REVIEW_COMMAND, vscode.Uri.file(list[0].file).toString());
+		}
+		this.setStatus(groups.flat().map((entry) => entry.id), 'accepted');
+	}
+
+	/**
+	 * Volta cada arquivo para antes da edição mais antiga do grupo. Cada grupo
+	 * tem as edições de um arquivo, da mais recente para a mais antiga.
+	 */
+	private async revert(groups: RawEntry[][]): Promise<{ done: number; skipped: string[] }> {
+		const items: UndoItem[] = [];
+		const ids: string[] = [];
+		const skipped: string[] = [];
+		for (const list of groups) {
+			const newest = list[0];
+			const oldest = list[list.length - 1];
+			const uri = vscode.Uri.file(newest.file);
+			try {
+				const current = await currentText(uri);
+				const plan = planRevert(oldest, newest, current);
+				if (plan.kind === 'skip') {
+					skipped.push(basename(newest.file));
+					continue;
+				}
+				if (plan.kind === 'write') {
+					await writeText(uri, plan.text);
+				} else if (plan.kind === 'delete') {
+					await deleteFile(uri);
+				}
+				items.push({ file: newest.file, previous: current, restored: plan.kind === 'write' ? plan.text : undefined });
+				await vscode.commands.executeCommand(DROP_REVIEW_COMMAND, uri.toString());
+				ids.push(...list.map((entry) => entry.id));
+			} catch {
+				skipped.push(basename(newest.file));
+			}
+		}
+		if (ids.length > 0) {
+			this.lastUndo = { items, ids };
+			this.setStatus(ids, 'rejected');
+		}
+		return { done: groups.length - skipped.length, skipped };
+	}
+
+	private report({ done, skipped }: { done: number; skipped: string[] }): void {
+		if (done > 0) {
+			const message = done === 1
+				? '1 arquivo voltou a ser como era antes do Claude.'
+				: `${done} arquivos voltaram a ser como eram antes do Claude.`;
+			void vscode.window.showInformationMessage(message, 'Desfazer').then((choice) => {
+				if (choice === 'Desfazer') {
+					void this.undoReject();
+				}
+			});
+		}
+		if (skipped.length > 0) {
+			const one = skipped.length === 1;
+			void vscode.window.showWarningMessage(
+				`${one ? '1 arquivo ficou' : `${skipped.length} arquivos ficaram`} como ${one ? 'está' : 'estão'} porque `
+				+ `${one ? 'mudou' : 'mudaram'} depois do Claude ou não há cópia do conteúdo anterior: ${skipped.join(', ')}. `
+				+ 'Use "Ver no código" para recusar trecho a trecho.',
+			);
+		}
+	}
+
+	// ---- Estado ---------------------------------------------------------------------
+
+	/** Edições pendentes agrupadas por arquivo, da mais recente para a mais antiga. */
+	private pendingGroups(): RawEntry[][] {
+		return groupByFile(this.entries.filter((entry) => !this.status.has(entry.id)));
 	}
 
 	private setupWebview(webview: vscode.Webview, wide: boolean): void {
@@ -216,141 +496,19 @@ export class ChangesController implements vscode.WebviewViewProvider, vscode.Tex
 			case 'rejectAll':
 				await this.rejectEverything();
 				return;
+			case 'acceptFile':
+				await this.acceptFile(message.key);
+				return;
+			case 'rejectFile':
+				await this.rejectFile(message.key);
+				return;
+			case 'rejectRequest':
+				await this.rejectRequest(message.request);
+				return;
+			case 'undoReject':
+				await this.undoReject();
+				return;
 		}
-	}
-
-	/** Mantém tudo como o Claude deixou: tira as marcas do código e esvazia a lista. */
-	private async acceptEverything(): Promise<void> {
-		const files = groupByFile(this.entries);
-		if (files.length === 0) {
-			return;
-		}
-		for (const list of files) {
-			await vscode.commands.executeCommand('claude-code-launcher.acceptAllChanges', vscode.Uri.file(list[0].file).toString());
-		}
-		await this.removeEntries(new Set(files.flat().map((entry) => entry.id)));
-		void vscode.window.showInformationMessage(
-			files.length === 1 ? 'Mudanças do Claude aceitas em 1 arquivo.' : `Mudanças do Claude aceitas em ${files.length} arquivos.`,
-		);
-	}
-
-	/**
-	 * Volta cada arquivo para como estava antes das edições do Claude: restaura o
-	 * texto anterior e apaga os arquivos que ele criou. Arquivos que mudaram
-	 * depois da última edição do Claude ficam como estão.
-	 */
-	private async rejectEverything(): Promise<void> {
-		const files = groupByFile(this.entries);
-		if (files.length === 0) {
-			return;
-		}
-		const label = files.length === 1 ? '1 arquivo' : `${files.length} arquivos`;
-		const confirm = 'Recusar todas';
-		const answer = await vscode.window.showWarningMessage(
-			`Recusar as mudanças do Claude em ${label}?`,
-			{ modal: true, detail: 'Cada arquivo volta a ser como era antes do Claude editar. Arquivos que ele criou vão para a lixeira.' },
-			confirm,
-		);
-		if (answer !== confirm) {
-			return;
-		}
-
-		const done = new Set<string>();
-		const skipped: string[] = [];
-		for (const list of files) {
-			// `entries` vem da mais recente para a mais antiga.
-			const newest = list[0];
-			const oldest = list[list.length - 1];
-			let reverted = false;
-			try {
-				reverted = await this.revertFile(newest, oldest);
-			} catch {
-				reverted = false;
-			}
-			if (reverted) {
-				list.forEach((entry) => done.add(entry.id));
-			} else {
-				skipped.push(basename(newest.file));
-			}
-		}
-		await this.removeEntries(done);
-
-		if (skipped.length > 0) {
-			const one = skipped.length === 1;
-			void vscode.window.showWarningMessage(
-				`${one ? '1 arquivo ficou' : `${skipped.length} arquivos ficaram`} como ${one ? 'está' : 'estão'} porque `
-				+ `${one ? 'mudou' : 'mudaram'} depois do Claude ou não há cópia do conteúdo anterior: ${skipped.join(', ')}. `
-				+ 'Use "Ver mudança no código" para recusar trecho a trecho.',
-			);
-		}
-	}
-
-	private async revertFile(newest: RawEntry, oldest: RawEntry): Promise<boolean> {
-		const before = oldest.before;
-		const after = newest.after;
-		if (!before || !after || before.large || after.large || (before.exists && before.text === null)) {
-			return false;
-		}
-		const uri = vscode.Uri.file(newest.file);
-		const open = vscode.workspace.textDocuments.find((doc) => doc.uri.toString() === uri.toString());
-		const current = open ? open.getText() : await readText(uri);
-
-		// Só mexe se o arquivo ainda está exatamente como o Claude deixou.
-		const untouched = after.exists
-			? current !== undefined && normalize(current) === normalize(after.text ?? '')
-			: current === undefined;
-		if (!untouched) {
-			return false;
-		}
-
-		if (!before.exists) {
-			await vscode.workspace.fs.delete(uri, { useTrash: true });
-			return true;
-		}
-
-		const text = normalize(before.text ?? '');
-		if (open) {
-			const content = open.eol === vscode.EndOfLine.CRLF ? text.replace(/\n/g, '\r\n') : text;
-			const edit = new vscode.WorkspaceEdit();
-			edit.replace(uri, open.validateRange(new vscode.Range(0, 0, open.lineCount, 0)), content);
-			if (!(await vscode.workspace.applyEdit(edit))) {
-				return false;
-			}
-			await open.save();
-		} else {
-			await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(before.text ?? ''));
-		}
-		await vscode.commands.executeCommand('claude-code-launcher.acceptAllChanges', uri.toString());
-		return true;
-	}
-
-	/** Tira do registro as edições indicadas, mantendo as demais. */
-	private async removeEntries(ids: Set<string>): Promise<void> {
-		if (ids.size > 0) {
-			for (const folder of vscode.workspace.workspaceFolders ?? []) {
-				const uri = vscode.Uri.joinPath(folder.uri, ...LOG_PATH);
-				const text = await readText(uri);
-				if (text === undefined) {
-					continue;
-				}
-				const kept = text.split('\n').filter((line) => {
-					if (!line.trim()) {
-						return false;
-					}
-					try {
-						return !ids.has((JSON.parse(line) as RawEntry).id);
-					} catch {
-						return true;
-					}
-				});
-				if (kept.length === 0) {
-					await vscode.workspace.fs.delete(uri);
-				} else {
-					await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(kept.join('\n') + '\n'));
-				}
-			}
-		}
-		await this.refresh();
 	}
 
 	private async compare(id: string | undefined): Promise<void> {
@@ -383,43 +541,14 @@ export class ChangesController implements vscode.WebviewViewProvider, vscode.Tex
 		}, 250);
 	}
 
-	// O hook roda antes de o Claude Code gravar o texto da edição no transcript.
-	// Aqui a explicação é buscada de novo; enquanto faltar, tenta outra vez em
-	// alguns segundos, até MAX_REASON_ATTEMPTS vezes por edição.
-	private fillReasons(entries: RawEntry[]): void {
-		let missing = false;
-		for (const entry of entries) {
-			if (entry.reason || !entry.transcript || !entry.toolUseId) {
-				continue;
-			}
-			const cached = this.reasonCache.get(entry.id);
-			if (cached !== undefined) {
-				entry.reason = cached;
-				continue;
-			}
-			const reason = findReasonInTranscript(entry.transcript, entry.toolUseId);
-			if (reason !== null) {
-				this.reasonCache.set(entry.id, reason);
-				entry.reason = reason;
-				continue;
-			}
-			const attempts = (this.reasonAttempts.get(entry.id) ?? 0) + 1;
-			this.reasonAttempts.set(entry.id, attempts);
-			if (attempts < MAX_REASON_ATTEMPTS) {
-				missing = true;
-			}
-		}
-		if (missing) {
-			clearTimeout(this.reasonTimer);
-			this.reasonTimer = setTimeout(() => {
-				void this.refresh();
-			}, 3000);
-		}
-	}
-
 	private async refresh(): Promise<void> {
 		this.entries = await this.loadEntries();
 		this.enabled = await this.hooksEnabled();
+		this.publish();
+	}
+
+	/** Espalha o estado atual: marcas no editor, painel, Explorer e barra de status. */
+	private publish(): void {
 		this.entriesEmitter.fire();
 		if (this.view) {
 			this.post(this.view.webview, false);
@@ -427,26 +556,60 @@ export class ChangesController implements vscode.WebviewViewProvider, vscode.Tex
 		if (this.panel) {
 			this.post(this.panel.webview, true);
 		}
+
+		const groups = this.pendingGroups();
+		const next = new Map(
+			groups.filter((list) => list[0].after?.exists !== false).map((list) => [fileKey(list[0].file), list[0].file]),
+		);
+		const changed = [...this.decorated, ...next]
+			.filter(([key]) => this.decorated.has(key) !== next.has(key))
+			.map(([, file]) => vscode.Uri.file(file));
+		this.decorated = next;
+		if (changed.length > 0) {
+			this.decorationEmitter.fire(changed);
+		}
+
+		if (groups.length > 0) {
+			this.statusItem.text = `$(sparkle) ${groups.length}`;
+			this.statusItem.tooltip = `${capitalize(countFiles(groups.length))} com mudanças do Claude para revisar`;
+			this.statusItem.show();
+		} else {
+			this.statusItem.hide();
+		}
+		void vscode.commands.executeCommand('setContext', PENDING_CONTEXT, groups.length > 0);
 	}
 
 	private post(webview: vscode.Webview, wide: boolean): void {
+		const pending = this.entries.filter((entry) => !this.status.has(entry.id));
+		const history: ViewEntry[] = this.entries.slice(0, MAX_HISTORY).map((entry) => {
+			const request = this.requestCache.get(entry.id);
+			return {
+				...toViewEntry(entry),
+				status: this.status.get(entry.id) ?? null,
+				requestId: request?.id ?? null,
+				request: request?.text ?? null,
+			};
+		});
 		void webview.postMessage({
 			type: 'state',
 			wide,
 			hasFolder: (vscode.workspace.workspaceFolders ?? []).length > 0,
 			enabled: this.enabled,
-			entries: this.entries.map(toViewEntry),
-			files: summarizeFiles(this.entries),
+			entries: history,
+			files: summarizeFiles(pending),
+			canUndo: Boolean(this.lastUndo),
 		});
 	}
 
 	private async loadEntries(): Promise<RawEntry[]> {
 		const all: RawEntry[] = [];
 		for (const folder of vscode.workspace.workspaceFolders ?? []) {
-			const text = await readText(vscode.Uri.joinPath(folder.uri, ...LOG_PATH));
+			const uri = vscode.Uri.joinPath(folder.uri, ...LOG_PATH);
+			let text = await readText(uri);
 			if (text === undefined) {
 				continue;
 			}
+			text = await this.rotate(uri, text);
 			for (const line of text.split('\n')) {
 				if (!line.trim()) {
 					continue;
@@ -462,9 +625,83 @@ export class ChangesController implements vscode.WebviewViewProvider, vscode.Tex
 			}
 		}
 		all.sort((a, b) => b.time.localeCompare(a.time));
-		const recent = all.slice(0, MAX_ENTRIES);
-		this.fillReasons(recent);
-		return recent;
+		const shown = new Set(all.slice(0, MAX_HISTORY).map((entry) => entry.id));
+		this.fillMeta(all.filter((entry) => shown.has(entry.id) || !this.status.has(entry.id)));
+		return all;
+	}
+
+	/** Mantém o log abaixo de MAX_LOG_ENTRIES, tirando as edições revisadas mais antigas. */
+	private async rotate(uri: vscode.Uri, text: string): Promise<string> {
+		const kept = trimLog(text.split('\n'), MAX_LOG_ENTRIES, (id) => this.status.has(id));
+		if (!kept) {
+			return text;
+		}
+		try {
+			// O hook pode ter acrescentado uma linha desde a leitura: ela é mantida.
+			const again = await readText(uri);
+			if (again === undefined || !again.startsWith(text)) {
+				return text;
+			}
+			const next = `${kept.join('\n')}\n${again.slice(text.length)}`;
+			await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(next));
+			return next;
+		} catch {
+			return text;
+		}
+	}
+
+	// O hook roda antes de o Claude Code gravar o texto da edição no transcript.
+	// Aqui a explicação e o pedido são buscados de novo; enquanto faltarem, tenta
+	// outra vez em alguns segundos, até MAX_META_ATTEMPTS vezes por edição.
+	private fillMeta(entries: RawEntry[]): void {
+		let missing = false;
+		const requestsByTranscript = new Map<string, Map<string, RequestInfo>>();
+		for (const entry of entries) {
+			if (!entry.transcript || !entry.toolUseId) {
+				continue;
+			}
+			const cachedReason = this.reasonCache.get(entry.id);
+			if (cachedReason !== undefined) {
+				entry.reason = cachedReason;
+			}
+			const needsReason = !entry.reason;
+			const needsRequest = !this.requestCache.has(entry.id);
+			if (!needsReason && !needsRequest) {
+				continue;
+			}
+			if ((this.metaAttempts.get(entry.id) ?? 0) >= MAX_META_ATTEMPTS) {
+				continue;
+			}
+			if (needsReason) {
+				const reason = findReasonInTranscript(entry.transcript, entry.toolUseId);
+				if (reason !== null) {
+					this.reasonCache.set(entry.id, reason);
+					entry.reason = reason;
+				}
+			}
+			if (needsRequest) {
+				let requests = requestsByTranscript.get(entry.transcript);
+				if (!requests) {
+					requests = findRequestsInTranscript(entry.transcript);
+					requestsByTranscript.set(entry.transcript, requests);
+				}
+				const request = requests.get(entry.toolUseId);
+				if (request) {
+					this.requestCache.set(entry.id, request);
+				}
+			}
+			if (!entry.reason || !this.requestCache.has(entry.id)) {
+				const attempts = (this.metaAttempts.get(entry.id) ?? 0) + 1;
+				this.metaAttempts.set(entry.id, attempts);
+				missing = missing || attempts < MAX_META_ATTEMPTS;
+			}
+		}
+		if (missing) {
+			clearTimeout(this.metaTimer);
+			this.metaTimer = setTimeout(() => {
+				void this.refresh();
+			}, 3000);
+		}
 	}
 
 	private async hooksEnabled(): Promise<boolean> {
@@ -477,7 +714,22 @@ export class ChangesController implements vscode.WebviewViewProvider, vscode.Tex
 		return false;
 	}
 
-	private async writeHooks(folder: vscode.WorkspaceFolder, script: string, enable: boolean): Promise<void> {
+	/** Copia o script do hook para dentro do projeto, numa pasta que o git ignora. */
+	private async installHookScript(folder: vscode.WorkspaceFolder): Promise<void> {
+		const dir = vscode.Uri.joinPath(folder.uri, ...LOG_DIR);
+		await vscode.workspace.fs.createDirectory(dir);
+		const ignore = vscode.Uri.joinPath(dir, '.gitignore');
+		if ((await readText(ignore)) === undefined) {
+			await vscode.workspace.fs.writeFile(ignore, new TextEncoder().encode('*\n'));
+		}
+		await vscode.workspace.fs.copy(
+			vscode.Uri.joinPath(this.context.extensionUri, 'hooks', 'record-change.js'),
+			this.scriptUri(folder),
+			{ overwrite: true },
+		);
+	}
+
+	private async writeHooks(folder: vscode.WorkspaceFolder, enable: boolean): Promise<void> {
 		const uri = vscode.Uri.joinPath(folder.uri, ...SETTINGS_PATH);
 		const text = await readText(uri);
 		// eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -496,6 +748,7 @@ export class ChangesController implements vscode.WebviewViewProvider, vscode.Tex
 			return;
 		}
 
+		const script = this.scriptPath(folder);
 		const hooks = settings.hooks && typeof settings.hooks === 'object' ? settings.hooks : {};
 		for (const [event, phase] of [['PreToolUse', 'pre'], ['PostToolUse', 'post']] as const) {
 			const groups: unknown[] = Array.isArray(hooks[event]) ? hooks[event] : [];
@@ -522,8 +775,12 @@ export class ChangesController implements vscode.WebviewViewProvider, vscode.Tex
 		await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(`${JSON.stringify(settings, null, 2)}\n`));
 	}
 
-	private hookScriptUri(): vscode.Uri {
-		return vscode.Uri.joinPath(this.context.globalStorageUri, HOOK_FILE);
+	private scriptUri(folder: vscode.WorkspaceFolder): vscode.Uri {
+		return vscode.Uri.joinPath(folder.uri, ...LOG_DIR, HOOK_FILE);
+	}
+
+	private scriptPath(folder: vscode.WorkspaceFolder): string {
+		return this.scriptUri(folder).fsPath.replace(/\\/g, '/');
 	}
 
 	private mediaUri(): vscode.Uri {
@@ -551,7 +808,54 @@ export class ChangesController implements vscode.WebviewViewProvider, vscode.Tex
 	}
 }
 
-function toViewEntry(entry: RawEntry): ViewEntry {
+function loadStatus(memento: vscode.Memento): Map<string, Status> {
+	const saved = memento.get<Record<string, Status>>(STATUS_KEY);
+	if (saved && typeof saved === 'object') {
+		return new Map(Object.entries(saved).filter(([, value]) => value === 'accepted' || value === 'rejected'));
+	}
+	// Versões anteriores guardavam só a lista de edições revisadas.
+	const legacy = memento.get<string[]>(LEGACY_REVIEWED_KEY, []);
+	return new Map(legacy.map((id) => [id, 'accepted' as Status]));
+}
+
+async function confirm(message: string, detail: string, action: string): Promise<boolean> {
+	const answer = await vscode.window.showWarningMessage(message, { modal: true, detail }, action);
+	return answer === action;
+}
+
+/** Texto atual do arquivo: o do editor, se estiver aberto, senão o do disco. */
+async function currentText(uri: vscode.Uri): Promise<string | undefined> {
+	const open = vscode.workspace.textDocuments.find((doc) => !doc.isClosed && doc.uri.toString() === uri.toString());
+	return open ? open.getText() : readText(uri);
+}
+
+/** Grava o texto pelo editor quando o arquivo está aberto (fica no Ctrl+Z); senão, direto no disco. */
+async function writeText(uri: vscode.Uri, text: string): Promise<void> {
+	const open = vscode.workspace.textDocuments.find((doc) => !doc.isClosed && doc.uri.toString() === uri.toString());
+	if (open) {
+		const clean = normalizeEol(text);
+		const content = open.eol === vscode.EndOfLine.CRLF ? clean.replace(/\n/g, '\r\n') : clean;
+		const edit = new vscode.WorkspaceEdit();
+		edit.replace(uri, open.validateRange(new vscode.Range(0, 0, open.lineCount, 0)), content);
+		if (!(await vscode.workspace.applyEdit(edit))) {
+			throw new Error('O editor recusou a edição.');
+		}
+		await open.save();
+		return;
+	}
+	await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(uri, '..'));
+	await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(text));
+}
+
+async function deleteFile(uri: vscode.Uri): Promise<void> {
+	try {
+		await vscode.workspace.fs.delete(uri, { useTrash: true });
+	} catch {
+		await vscode.workspace.fs.delete(uri, { useTrash: false });
+	}
+}
+
+function toViewEntry(entry: RawEntry): Omit<ViewEntry, 'status' | 'requestId' | 'request'> {
 	const relative = vscode.workspace.asRelativePath(entry.file, false).replace(/\\/g, '/');
 	const slash = relative.lastIndexOf('/');
 	const before = entry.before;
@@ -559,7 +863,7 @@ function toViewEntry(entry: RawEntry): ViewEntry {
 	const created = before !== null && !before.exists && after?.exists === true;
 	const deleted = after !== null && !after.exists;
 
-	const base: ViewEntry = {
+	const base = {
 		id: entry.id,
 		time: entry.time,
 		action: actionLabel(entry.tool, created),
@@ -570,8 +874,8 @@ function toViewEntry(entry: RawEntry): ViewEntry {
 		added: 0,
 		removed: 0,
 		modified: 0,
-		hunks: [],
-		note: null,
+		hunks: [] as Hunk[],
+		note: null as string | null,
 		canCompare: false,
 	};
 
@@ -609,6 +913,8 @@ function toViewEntry(entry: RawEntry): ViewEntry {
 interface FileSummary {
 	/** Edição mais recente do arquivo: "Ver no código" parte dela. */
 	id: string;
+	/** Identifica o arquivo nas ações aceitar/recusar. */
+	key: string;
 	file: string;
 	dir: string;
 	added: number;
@@ -617,25 +923,9 @@ interface FileSummary {
 	deleted: boolean;
 }
 
-/** Agrupa as edições por arquivo, mantendo a ordem (da mais recente para a mais antiga). */
-function groupByFile(entries: readonly RawEntry[]): RawEntry[][] {
-	const byFile = new Map<string, RawEntry[]>();
-	for (const entry of entries) {
-		const key = entry.file.replace(/\\/g, '/').toLowerCase();
-		const list = byFile.get(key) ?? [];
-		list.push(entry);
-		byFile.set(key, list);
-	}
-	return [...byFile.values()];
-}
-
-function normalize(text: string): string {
-	return text.replace(/\r\n/g, '\n');
-}
-
 /**
  * Uma linha por arquivo, como a lista "N Files" do Cursor. Compara o conteúdo de
- * antes da primeira edição registrada com o de depois da última; quando falta
+ * antes da primeira edição pendente com o de depois da última; quando falta
  * algum desses textos, soma os números de cada edição.
  */
 function summarizeFiles(entries: readonly RawEntry[]): FileSummary[] {
@@ -661,6 +951,7 @@ function summarizeFiles(entries: readonly RawEntry[]): FileSummary[] {
 		}
 		result.push({
 			id: newest.id,
+			key: fileKey(newest.file),
 			file: view.file,
 			dir: view.dir,
 			added,
@@ -707,6 +998,10 @@ function summarize(diff: DiffResult, created: boolean): string {
 	}
 	const where = diff.hunks.length === 1 ? 'em 1 trecho' : `em ${diff.hunks.length} trechos`;
 	return `${joinPt(parts)}, ${where} do arquivo.`;
+}
+
+function countFiles(count: number): string {
+	return plural(count, 'arquivo', 'arquivos');
 }
 
 function plural(count: number, one: string, many: string): string {

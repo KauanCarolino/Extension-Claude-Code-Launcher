@@ -1,5 +1,6 @@
 # Código-fonte e configs de build (o pacote usa só out/)
 src/**
+test/**
 tsconfig.json
 **/*.ts
 **/*.map

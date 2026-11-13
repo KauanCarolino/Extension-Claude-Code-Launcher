@@ -4,7 +4,7 @@ Extensão para o Cursor e o VS Code que abre o chat oficial do Claude Code e mos
 
 O chat é o da extensão oficial **Claude Code** (`anthropic.claude-code`), com as ferramentas e as permissões dela. Esta extensão não coloca um botão dentro do painel do Agent do Cursor e não substitui esse painel.
 
-Versão atual do pacote: `claude-code-launcher-0.5.4.vsix`.
+Versão atual do pacote: `claude-code-launcher-0.6.0.vsix`.
 
 ## Requisitos
 
@@ -15,10 +15,12 @@ Versão atual do pacote: `claude-code-launcher-0.5.4.vsix`.
 ## Instalar
 
 1. Em Extensions, abra o menu `...` e escolha **Install from VSIX**.
-2. Selecione `claude-code-launcher-0.5.4.vsix`.
+2. Selecione `claude-code-launcher-0.6.0.vsix`.
 3. Na primeira abertura do chat, aceite instalar o Claude Code oficial, se ele ainda não estiver presente.
 
 Para desenvolver a partir deste repositório, abra a pasta no Cursor e use **Run Extension** (F5). O código TypeScript em `src/` é compilado para `out/`.
+
+`npm test` compila e roda os testes de `test/` com o runner do próprio Node (Node 20 ou mais novo). Eles cobrem o diff, as regras de revisão (`src/logic.ts`) e a leitura dos transcripts; nenhum precisa do editor aberto.
 
 ## Abrir o chat
 
@@ -51,9 +53,21 @@ Os títulos vêm dos transcripts do Claude Code em `~/.claude/projects/` (ou em 
 
 A view **Mudanças** guarda cada arquivo que o Claude criar ou editar com as ferramentas Edit, Write, MultiEdit e NotebookEdit.
 
-No topo, um bloco **N arquivos** resume o histórico por arquivo, no mesmo espírito da lista de arquivos do Cursor. Cada linha mostra o nome, `+` linhas novas ou modificadas, `−` linhas removidas, e a marca **novo** quando o arquivo foi criado. O número junta a primeira versão registrada com a última. Clique na linha para ver a mudança no código; se o arquivo foi apagado, o clique tenta abri-lo. **Revisar**, nesse bloco, abre o painel em tela maior.
+No topo, um bloco **N arquivos para revisar** lista os arquivos com mudanças do Claude que você ainda não aceitou nem recusou, no mesmo espírito da lista de arquivos do Cursor. Cada linha mostra o nome, `+` linhas novas ou modificadas, `−` linhas removidas, e a marca **novo** quando o arquivo foi criado. O número junta a primeira edição pendente com a última. Clique na linha para ver a mudança no código; se o arquivo foi apagado, o clique tenta abri-lo. **Revisar**, nesse bloco, abre o painel em tela maior.
 
-Abaixo, cada card de edição mostra:
+Aceitar e recusar:
+
+- **✓** e **✕**, que aparecem ao passar o mouse numa linha, aceitam ou recusam aquele arquivo.
+- **✓ Aceitar todos** mantém tudo como o Claude deixou e esvazia o bloco. O histórico continua, com a marca **aceita**.
+- **✕ Recusar todos** pede confirmação e volta cada arquivo para como era antes do Claude: o texto anterior é restaurado, arquivos criados por ele vão para a lixeira e arquivos apagados por ele são recriados. O histórico ganha a marca **recusada**.
+- Recusar nunca mexe num arquivo que mudou depois da última edição do Claude, nem num arquivo sem cópia do conteúdo anterior (mais de 512 KB). Esses ficam no bloco e um aviso lista quais foram. Dá para recusá-los trecho a trecho em **Ver no código**.
+- Depois de recusar, o aviso tem **Desfazer**, e a barra do painel mostra **↶ Desfazer recusa** até a próxima recusa. Desfazer só devolve arquivos que continuam como a recusa deixou.
+
+Quando nada está pendente, o bloco some e o painel diz que tudo foi revisado.
+
+Abaixo fica o histórico. As edições feitas para atender a mesma mensagem sua ficam agrupadas sob **Pedido**, com o texto da mensagem e quantos arquivos ela mudou. **Desfazer pedido** volta esses arquivos para como eram antes do pedido, com as mesmas proteções de **Recusar todos**. O pedido vem do transcript da conversa; edições sem transcript aparecem soltas.
+
+Cada card de edição mostra:
 
 - a ação (criou, reescreveu, editou, editou notebook);
 - um resumo em texto, com contagem de linhas novas, removidas e modificadas;
@@ -70,13 +84,21 @@ Ações do card e da barra:
 - **Limpar** apaga o histórico deste projeto e mantém o registro ligado.
 - **Ativar** e **Desligar** ligam e desligam o registro.
 
-O registro só vale para conversas iniciadas depois de ativar. Um arquivo com mais de 512 KB não tem o texto guardado; o card avisa isso. A view mostra as 60 edições mais recentes.
+O registro só vale para conversas iniciadas depois de ativar. Um arquivo com mais de 512 KB não tem o texto guardado; o card avisa isso. O histórico mostra as 60 edições mais recentes. O log guarda até 400 edições: acima disso, as revisadas mais antigas saem, e as pendentes ficam sempre.
+
+### Fora do painel
+
+- **Explorer**: arquivos com mudanças pendentes ganham a letra **C** e uma cor própria (`claudeCodeLauncher.pendingChangeForeground`, ajustável no tema).
+- **Barra de status**: `✦ N` mostra quantos arquivos faltam revisar; o clique abre o painel. Some quando não há nada pendente.
+- **Navegação**: `Alt+]` vai para o próximo trecho do Claude e `Alt+[` para o anterior. No fim do arquivo, passa para o próximo arquivo pendente. Os atalhos só valem quando há mudanças pendentes e nenhuma sugestão inline aberta; dá para trocá-los em Keyboard Shortcuts.
 
 ### Como o registro funciona
 
 **Ativar** grava um hook `PreToolUse` e `PostToolUse` em `.claude/settings.local.json` do projeto. O hook chama `node` e não altera o que o Claude faz: se falhar, a edição segue. **Desligar** remove só esses hooks e deixa o resto do arquivo como está. Se o JSON estiver inválido, o arquivo não é modificado.
 
-O histórico fica em `.claude/launcher-changes/log.jsonl`. O hook cria um `.gitignore` nessa pasta com `*`, para o log não entrar no git. O script do hook é copiado para o armazenamento global da extensão.
+O histórico fica em `.claude/launcher-changes/log.jsonl`. A pasta tem um `.gitignore` com `*`, para nada dela entrar no git. O script do hook é copiado para essa mesma pasta (`launcher-record-change.js`), então o registro continua funcionando se o projeto for aberto em outro editor (Cursor ou VS Code). Ao abrir o projeto, a extensão atualiza essa cópia e corrige o caminho no `settings.local.json` se ele apontar para outro lugar, como nas versões anteriores, que usavam o armazenamento global do editor.
+
+Aceitar e recusar ficam guardados no estado do projeto no editor, não no log.
 
 ## Marcas no código
 
@@ -112,6 +134,11 @@ Na paleta de comandos, categoria **Claude Code Launcher**:
 | Desligar registro de mudanças | Remove o hook do projeto |
 | Limpar histórico de mudanças | Apaga o `log.jsonl` |
 | Ligar/desligar marcas das mudanças no código | Liga ou desliga as marcas no editor |
+| Aceitar todas as mudanças pendentes do Claude | Aceita todos os arquivos do bloco **para revisar** |
+| Recusar todas as mudanças pendentes do Claude | Recusa todos os arquivos do bloco, com confirmação |
+| Desfazer a última recusa | Traz de volta o que a última recusa desfez |
+| Próxima mudança do Claude (`Alt+]`) | Vai para o próximo trecho, passando de arquivo no fim |
+| Mudança anterior do Claude (`Alt+[`) | Vai para o trecho anterior |
 | Aceitar todas as mudanças do Claude neste arquivo | Confirma a revisão do arquivo |
 | Recusar todas as mudanças do Claude neste arquivo | Desfaz a revisão do arquivo |
 | Ocultar marcas (aceita as mudanças do Claude neste arquivo) | O mesmo que aceitar tudo |
