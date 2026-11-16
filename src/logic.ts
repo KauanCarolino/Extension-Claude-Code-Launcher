@@ -5,6 +5,8 @@ export interface Snapshot {
 	exists: boolean;
 	text: string | null;
 	large: boolean;
+	/** sha1 do texto, guardado em launcher-changes/blobs/<hash>.txt (log a partir da 0.7). */
+	hash?: string | null;
 }
 
 export interface RawEntry {
@@ -26,9 +28,16 @@ export function normalizeEol(text: string): string {
 	return text.replace(/\r\n/g, '\n');
 }
 
-/** Chave estável de um arquivo: mesma pasta escrita com barras ou letras diferentes conta como um só. */
-export function fileKey(file: string): string {
-	return file.replace(/\\/g, '/').toLowerCase();
+/** Windows e macOS não diferenciam maiúsculas no caminho; Linux diferencia. */
+const CASE_INSENSITIVE_FS = process.platform === 'win32' || process.platform === 'darwin';
+
+/**
+ * Chave estável de um arquivo: barras diferentes contam como o mesmo caminho e,
+ * onde o sistema de arquivos não diferencia maiúsculas, letras também.
+ */
+export function fileKey(file: string, caseInsensitive = CASE_INSENSITIVE_FS): string {
+	const slashes = file.replace(/\\/g, '/');
+	return caseInsensitive ? slashes.toLowerCase() : slashes;
 }
 
 /** Agrupa as edições por arquivo, mantendo a ordem em que vieram. */
@@ -84,6 +93,32 @@ export function planRevert(oldest: RawEntry, newest: RawEntry, current: string |
 		return after.exists ? { kind: 'delete' } : { kind: 'noop' };
 	}
 	return { kind: 'write', text: before.text ?? '' };
+}
+
+/** Os dois snapshots descrevem com certeza o mesmo conteúdo (inclusive "arquivo não existe"). */
+function sameSnapshot(a: Snapshot | null, b: Snapshot | null): boolean {
+	if (!a || !b || a.large || b.large) {
+		return false;
+	}
+	if (!a.exists || !b.exists) {
+		return a.exists === b.exists;
+	}
+	return a.text !== null && b.text !== null && normalizeEol(a.text) === normalizeEol(b.text);
+}
+
+/**
+ * As últimas edições de um arquivo que vieram em sequência sem nada no meio:
+ * o "depois" de cada uma é exatamente o "antes" da seguinte. `entries` vai da
+ * mais antiga para a mais recente. Se alguém mexeu no arquivo entre duas
+ * edições (ou não dá para saber), a sequência começa depois desse ponto, para
+ * que recusar não apague o que foi feito no meio.
+ */
+export function contiguousTail<T extends RawEntry>(entries: readonly T[]): T[] {
+	let start = entries.length - 1;
+	while (start > 0 && sameSnapshot(entries[start - 1].after, entries[start].before)) {
+		start -= 1;
+	}
+	return entries.slice(Math.max(0, start));
 }
 
 export interface Chain {
@@ -156,4 +191,43 @@ export function trimLog(lines: readonly string[], max: number, isReviewed: (id: 
 		return undefined;
 	}
 	return parsed.filter((item) => !dropped.has(item.line)).map((item) => item.line);
+}
+
+const BLOB_HASH = /^[0-9a-f]{40}$/;
+
+/** Hash de blob válido (evita montar caminhos com texto qualquer vindo do log). */
+export function isBlobHash(hash: unknown): hash is string {
+	return typeof hash === 'string' && BLOB_HASH.test(hash);
+}
+
+/**
+ * Snapshot com o texto preenchido a partir do blob, quando o log guarda só o
+ * hash. Sem o blob, o texto fica null e o snapshot conta como desconhecido.
+ */
+export function resolveSnapshot(snapshot: Snapshot | null, getBlob: (hash: string) => string | undefined): Snapshot | null {
+	if (!snapshot || snapshot.text !== null || !snapshot.exists || snapshot.large || !isBlobHash(snapshot.hash)) {
+		return snapshot;
+	}
+	return { ...snapshot, text: getBlob(snapshot.hash) ?? null };
+}
+
+/** Hashes de blob citados nas linhas do log (ou de qualquer JSON com snapshots `before`/`after`). */
+export function referencedBlobs(lines: readonly string[]): Set<string> {
+	const hashes = new Set<string>();
+	for (const line of lines) {
+		if (!line.trim()) {
+			continue;
+		}
+		try {
+			const entry = JSON.parse(line) as Partial<RawEntry>;
+			for (const snapshot of [entry.before, entry.after]) {
+				if (snapshot && isBlobHash(snapshot.hash)) {
+					hashes.add(snapshot.hash);
+				}
+			}
+		} catch {
+			// Linha incompleta: o hook pode estar escrevendo.
+		}
+	}
+	return hashes;
 }

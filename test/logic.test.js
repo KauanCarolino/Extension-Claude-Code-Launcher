@@ -3,7 +3,9 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { collectChain, fileKey, groupByFile, planRevert, textOf, trimLog } = require('../out/logic.js');
+const {
+	collectChain, contiguousTail, fileKey, groupByFile, planRevert, referencedBlobs, resolveSnapshot, textOf, trimLog,
+} = require('../out/logic.js');
 
 function snap(text) {
 	return text === undefined ? { exists: false, text: null, large: false } : { exists: true, text, large: false };
@@ -18,15 +20,20 @@ function entry(id, before, after, extra) {
 
 const never = () => false;
 
-test('fileKey ignora barras e maiúsculas', () => {
-	assert.equal(fileKey('C:\\Proj\\A.ts'), fileKey('c:/proj/a.ts'));
+test('fileKey ignora barras e, onde o disco não diferencia, maiúsculas', () => {
+	assert.equal(fileKey('C:\\Proj\\A.ts', true), fileKey('c:/proj/a.ts', true));
+});
+
+test('fileKey diferencia maiúsculas em disco que diferencia (Linux)', () => {
+	assert.notEqual(fileKey('/proj/A.ts', false), fileKey('/proj/a.ts', false));
+	assert.equal(fileKey('/proj\\a.ts', false), fileKey('/proj/a.ts', false));
 });
 
 test('groupByFile agrupa mantendo a ordem', () => {
 	const groups = groupByFile([
 		{ id: '1', file: 'C:\\p\\a.ts' },
 		{ id: '2', file: 'C:\\p\\b.ts' },
-		{ id: '3', file: 'c:/p/a.ts' },
+		{ id: '3', file: 'C:/p/a.ts' },
 	]);
 	assert.deepEqual(groups.map((list) => list.map((item) => item.id)), [['1', '3'], ['2']]);
 });
@@ -103,6 +110,32 @@ test('planRevert sem cópia do conteúdo anterior pula o arquivo', () => {
 	assert.deepEqual(planRevert(big, big, 'y'), { kind: 'skip', reason: 'unknown' });
 });
 
+test('contiguousTail pega todas as edições quando não há nada no meio', () => {
+	const tail = contiguousTail([entry('a', 'v1', 'v2\n'), entry('bb', 'v2\r\n', 'v3'), entry('ccc', 'v3', 'v4')]);
+	assert.deepEqual(tail.map((item) => item.id), ['a', 'bb', 'ccc']);
+});
+
+test('contiguousTail para onde o arquivo foi mudado entre duas edições', () => {
+	// Claude: v1→v2; usuário: v2→v2+minha; Claude: v2+minha→v3.
+	const tail = contiguousTail([entry('a', 'v1', 'v2'), entry('bb', 'v2 + minha', 'v3')]);
+	assert.deepEqual(tail.map((item) => item.id), ['bb']);
+	// Recusar volta para o estado com a mudança do usuário, não para v1.
+	assert.deepEqual(planRevert(tail[0], tail[tail.length - 1], 'v3'), { kind: 'write', text: 'v2 + minha' });
+});
+
+test('contiguousTail não confia em snapshot grande no meio', () => {
+	const middle = entry('bb', 'v2', 'v3');
+	middle.before = { exists: true, text: null, large: true };
+	const tail = contiguousTail([entry('a', 'v1', 'v2'), middle]);
+	assert.deepEqual(tail.map((item) => item.id), ['bb']);
+	assert.equal(planRevert(tail[0], tail[0], 'v3').kind, 'skip');
+});
+
+test('contiguousTail distingue arquivo apagado de arquivo vazio', () => {
+	const tail = contiguousTail([entry('a', 'x', undefined), entry('bb', '', 'y')]);
+	assert.deepEqual(tail.map((item) => item.id), ['bb']);
+});
+
 test('trimLog não mexe enquanto o log está abaixo do limite', () => {
 	assert.equal(trimLog(['{"id":"a"}', '{"id":"b"}'], 5, () => true), undefined);
 });
@@ -123,4 +156,46 @@ test('trimLog mantém linha que não é JSON (o hook pode estar escrevendo)', ()
 	const kept = trimLog(['{"id":"a","time":"1"}', '{"id":"b","time":"2"}', '{"id":"c'], 2, () => true);
 	assert.ok(kept.includes('{"id":"c'));
 	assert.ok(!kept.includes('{"id":"a","time":"1"}'));
+});
+
+const HASH = 'a'.repeat(40);
+
+test('resolveSnapshot preenche o texto a partir do blob', () => {
+	const blobs = new Map([[HASH, 'conteúdo']]);
+	const get = (hash) => blobs.get(hash);
+	assert.deepEqual(resolveSnapshot({ exists: true, text: null, large: false, hash: HASH }, get), {
+		exists: true, text: 'conteúdo', large: false, hash: HASH,
+	});
+	// Log antigo, com o texto dentro da linha: fica como está.
+	assert.equal(resolveSnapshot(snap('inline'), get).text, 'inline');
+	assert.equal(resolveSnapshot(null, get), null);
+});
+
+test('resolveSnapshot sem o blob deixa o snapshot desconhecido (recusar pula o arquivo)', () => {
+	const before = resolveSnapshot({ exists: true, text: null, large: false, hash: HASH }, () => undefined);
+	assert.equal(before.text, null);
+	const missing = entry('a', 'x', 'y');
+	missing.before = before;
+	assert.deepEqual(planRevert(missing, missing, 'y'), { kind: 'skip', reason: 'unknown' });
+	assert.equal(textOf(before), undefined);
+});
+
+test('resolveSnapshot ignora hash que não é sha1 (não monta caminho com texto do log)', () => {
+	let asked = false;
+	resolveSnapshot({ exists: true, text: null, large: false, hash: '../../segredo' }, () => {
+		asked = true;
+		return 'x';
+	});
+	assert.equal(asked, false);
+});
+
+test('referencedBlobs junta os hashes citados no log', () => {
+	const other = 'b'.repeat(40);
+	const lines = [
+		JSON.stringify({ id: '1', before: { exists: true, text: null, large: false, hash: HASH }, after: null }),
+		JSON.stringify({ id: '2', before: { exists: false, text: null, large: false }, after: { exists: true, hash: other } }),
+		'{"id":"3","before":{"hash":"incomple',
+		'',
+	];
+	assert.deepEqual([...referencedBlobs(lines)].sort(), [HASH, other]);
 });

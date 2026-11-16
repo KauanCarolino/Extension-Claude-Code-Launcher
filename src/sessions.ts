@@ -3,7 +3,6 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 declare const require: (id: string) => any;
-declare const process: { env: Record<string, string | undefined> };
 
 const fs = require('fs');
 const path = require('path');
@@ -144,26 +143,41 @@ declare const Buffer: { alloc(size: number): { toString(encoding: string): strin
 const REASON_TAIL_BYTES = 4 * 1024 * 1024;
 const MAX_REASON_CHARS = 4000;
 
-/**
- * Texto que o Claude escreveu logo antes da chamada `toolUseId`. Blocos "text"
- * têm prioridade; sem eles vale o último "thinking" não vazio, que é onde
- * modelos mais novos guardam a mensagem entre ferramentas. Devolve null se a
- * chamada ainda não está no transcript.
- */
-export function findReasonInTranscript(transcriptPath: string, toolUseId: string): string | null {
-	let size: number;
-	try {
-		size = fs.statSync(transcriptPath).size;
-	} catch {
-		return null;
-	}
-	const text = readRange(transcriptPath, Math.max(0, size - REASON_TAIL_BYTES), size);
+export interface RequestInfo {
+	/** Identifica a mensagem do usuário dentro da conversa. */
+	id: string;
+	text: string;
+}
+
+export interface TranscriptMeta {
+	/**
+	 * Para cada chamada de ferramenta, o texto que o Claude escreveu logo antes
+	 * dela. Blocos "text" têm prioridade; sem eles vale o último "thinking" não
+	 * vazio, que é onde modelos mais novos guardam a mensagem entre ferramentas.
+	 */
+	reasons: Map<string, string>;
+	/** Para cada chamada de ferramenta, a mensagem do usuário que a originou (o "pedido"). */
+	requests: Map<string, RequestInfo>;
+}
+
+/** Explicação e pedido de cada chamada de ferramenta, numa só passada pelo texto do transcript. */
+export function parseTranscriptMeta(text: string, transcriptPath: string): TranscriptMeta {
+	const reasons = new Map<string, string>();
+	const requests = new Map<string, RequestInfo>();
 	let texts: string[] = [];
 	let progress = '';
+	let current: RequestInfo | null = null;
 	for (const entry of parseLines(text)) {
 		if (entry.type === 'user') {
 			texts = [];
 			progress = '';
+			// Respostas de ferramentas e mensagens internas não contam como pedido.
+			if (!entry.isMeta && entry.message) {
+				const prompt = promptText(entry.message.content);
+				if (prompt) {
+					current = { id: String(entry.uuid ?? `${transcriptPath}:${prompt}`), text: clip(prompt, MAX_REQUEST) };
+				}
+			}
 			continue;
 		}
 		if (entry.type !== 'assistant' || !entry.message) {
@@ -172,59 +186,84 @@ export function findReasonInTranscript(transcriptPath: string, toolUseId: string
 		const content = entry.message.content;
 		const blocks = typeof content === 'string' ? [{ type: 'text', text: content }] : Array.isArray(content) ? content : [];
 		for (const block of blocks) {
+			if (!block) {
+				continue;
+			}
 			if (block.type === 'text' && typeof block.text === 'string' && block.text.trim()) {
 				texts.push(block.text.trim());
 			} else if (block.type === 'thinking' && typeof block.thinking === 'string' && block.thinking.trim()) {
 				progress = block.thinking.trim();
-			} else if (block.type === 'tool_use' && block.id === toolUseId) {
+			} else if (block.type === 'tool_use' && typeof block.id === 'string') {
 				const reason = texts.length > 0 ? texts.join('\n\n') : progress;
-				return reason.length > MAX_REASON_CHARS ? `${reason.slice(0, MAX_REASON_CHARS)}…` : reason;
+				reasons.set(block.id, reason.length > MAX_REASON_CHARS ? `${reason.slice(0, MAX_REASON_CHARS)}…` : reason);
+				if (current) {
+					requests.set(block.id, current);
+				}
 			}
 		}
 	}
-	return null;
+	return { reasons, requests };
 }
 
-export interface RequestInfo {
-	/** Identifica a mensagem do usuário dentro da conversa. */
-	id: string;
-	text: string;
-}
+const metaCache = new Map<string, { size: number; mtime: number; meta: TranscriptMeta }>();
+const MAX_META_CACHE = 20;
 
 /**
- * Para cada chamada de ferramenta no fim do transcript, a mensagem do usuário
- * que a originou (o "pedido"). Respostas de ferramentas e mensagens internas
- * não contam como pedido.
+ * Lê o fim do transcript sem travar o editor. Guarda o resultado e só relê
+ * quando o arquivo muda. Transcript inexistente devolve mapas vazios.
  */
-export function findRequestsInTranscript(transcriptPath: string): Map<string, RequestInfo> {
-	const result = new Map<string, RequestInfo>();
-	let size: number;
+export async function readTranscriptMeta(transcriptPath: string): Promise<TranscriptMeta> {
+	let stat: { size: number; mtimeMs: number };
 	try {
-		size = fs.statSync(transcriptPath).size;
+		stat = await fs.promises.stat(transcriptPath);
 	} catch {
-		return result;
+		return { reasons: new Map(), requests: new Map() };
 	}
-	const text = readRange(transcriptPath, Math.max(0, size - REASON_TAIL_BYTES), size);
-	let current: RequestInfo | null = null;
-	for (const entry of parseLines(text)) {
-		if (entry.type === 'user' && !entry.isMeta && entry.message) {
-			const prompt = promptText(entry.message.content);
-			if (prompt) {
-				current = { id: String(entry.uuid ?? `${transcriptPath}:${prompt}`), text: clip(prompt, MAX_REQUEST) };
-			}
-			continue;
-		}
-		if (entry.type !== 'assistant' || !entry.message || !current) {
-			continue;
-		}
-		const content = entry.message.content;
-		for (const block of Array.isArray(content) ? content : []) {
-			if (block && block.type === 'tool_use' && typeof block.id === 'string') {
-				result.set(block.id, current);
-			}
-		}
+	const cached = metaCache.get(transcriptPath);
+	if (cached && cached.size === stat.size && cached.mtime === stat.mtimeMs) {
+		return cached.meta;
 	}
-	return result;
+	let text = '';
+	let handle: any;
+	try {
+		handle = await fs.promises.open(transcriptPath, 'r');
+		const start = Math.max(0, stat.size - REASON_TAIL_BYTES);
+		const buffer = Buffer.alloc(stat.size - start);
+		await handle.read(buffer, 0, stat.size - start, start);
+		text = buffer.toString('utf8');
+	} catch {
+		return { reasons: new Map(), requests: new Map() };
+	} finally {
+		await handle?.close().catch(() => undefined);
+	}
+	const meta = parseTranscriptMeta(text, transcriptPath);
+	metaCache.delete(transcriptPath);
+	metaCache.set(transcriptPath, { size: stat.size, mtime: stat.mtimeMs, meta });
+	while (metaCache.size > MAX_META_CACHE) {
+		metaCache.delete(metaCache.keys().next().value as string);
+	}
+	return meta;
+}
+
+function readTranscriptTailSync(transcriptPath: string): string | undefined {
+	try {
+		const size = fs.statSync(transcriptPath).size;
+		return readRange(transcriptPath, Math.max(0, size - REASON_TAIL_BYTES), size);
+	} catch {
+		return undefined;
+	}
+}
+
+/** Texto que o Claude escreveu logo antes da chamada `toolUseId`; null se ela ainda não está no transcript. */
+export function findReasonInTranscript(transcriptPath: string, toolUseId: string): string | null {
+	const text = readTranscriptTailSync(transcriptPath);
+	return text === undefined ? null : parseTranscriptMeta(text, transcriptPath).reasons.get(toolUseId) ?? null;
+}
+
+/** Para cada chamada de ferramenta no fim do transcript, o pedido do usuário que a originou. */
+export function findRequestsInTranscript(transcriptPath: string): Map<string, RequestInfo> {
+	const text = readTranscriptTailSync(transcriptPath);
+	return text === undefined ? new Map() : parseTranscriptMeta(text, transcriptPath).requests;
 }
 
 const MAX_REQUEST = 160;

@@ -1,18 +1,28 @@
 import * as vscode from 'vscode';
 import { computeDiff, DiffResult, Hunk } from './diff';
-import { fileKey, groupByFile, normalizeEol, planRevert, RawEntry, Status, trimLog } from './logic';
-import { findReasonInTranscript, findRequestsInTranscript, RequestInfo } from './sessions';
+import {
+	contiguousTail, fileKey, groupByFile, isBlobHash, normalizeEol, planRevert, RawEntry, referencedBlobs, resolveSnapshot,
+	Status, trimLog,
+} from './logic';
+import { readTranscriptMeta, RequestInfo } from './sessions';
 
 export type { RawEntry, Snapshot } from './logic';
 
 const HOOK_FILE = 'launcher-record-change.js';
 const LOG_DIR = ['.claude', 'launcher-changes'];
 const LOG_PATH = [...LOG_DIR, 'log.jsonl'];
+const BLOB_DIR = [...LOG_DIR, 'blobs'];
+const PENDING_DIR = [...LOG_DIR, 'pending'];
+/** Aceito/recusado de cada edição, compartilhado entre editores (Cursor e VS Code). */
+const STATUS_PATH = [...LOG_DIR, 'status.json'];
+/** Explicação e pedido já achados no transcript, para não depender dele depois. */
+const META_PATH = [...LOG_DIR, 'meta.json'];
 const SETTINGS_PATH = ['.claude', 'settings.local.json'];
 const MATCHER = 'Edit|Write|MultiEdit|NotebookEdit';
 const SCHEME = 'claude-launcher-change';
 const STATUS_KEY = 'claudeCodeLauncher.entryStatus';
 const LEGACY_REVIEWED_KEY = 'claudeCodeLauncher.reviewedEntries';
+const UNDO_KEY = 'claudeCodeLauncher.undoStack';
 const PENDING_CONTEXT = 'claudeCodeLauncher.hasPendingChanges';
 /** Comando interno de inline.ts: esquece a revisão aberta de um arquivo, sem marcar nada. */
 export const DROP_REVIEW_COMMAND = 'claude-code-launcher.dropReview';
@@ -23,6 +33,14 @@ const MAX_HISTORY = 60;
 const MAX_LOG_ENTRIES = 400;
 const MAX_STATUS = 3000;
 const MAX_META_ATTEMPTS = 10;
+/** Recusas que dá para desfazer, da mais recente para trás. */
+const MAX_UNDO = 5;
+/** Soma dos textos guardados para desfazer (caracteres), para o estado do editor não inchar. */
+const MAX_UNDO_CHARS = 8 * 1024 * 1024;
+/** Blobs sem referência só saem depois disso: o hook pode estar no meio de uma edição. */
+const BLOB_GRACE_MS = 10 * 60 * 1000;
+/** "pre" sem "post" (ferramenta que falhou, por exemplo) sai depois disso. */
+const PENDING_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 export function changeUri(entry: RawEntry, side: 'antes' | 'depois'): vscode.Uri {
 	return vscode.Uri.from({ scheme: SCHEME, path: `/${entry.id}/${side}/${basename(entry.file)}` });
@@ -98,7 +116,22 @@ export class ChangesController implements
 	private readonly requestCache = new Map<string, RequestInfo>();
 	private readonly metaAttempts = new Map<string, number>();
 	private readonly status: Map<string, Status>;
-	private lastUndo: Undo | undefined;
+	/** Sobe a cada setStatus: uma leitura de status.json mais antiga que isso é descartada. */
+	private statusVersion = 0;
+	private readonly undoStack: Undo[];
+	/** Diff e textos de cada edição (a edição não muda depois de gravada). */
+	private readonly viewCache = new Map<string, BaseView>();
+	private readonly summaryCache = new Map<string, FileSummary>();
+	/** Texto de cada blob já lido: hash → texto. */
+	private blobCache = new Map<string, string>();
+	/** Pasta do workspace (uri) de cujo log veio cada edição. */
+	private entryFolder = new Map<string, string>();
+	/** Último texto lido ou gravado de status.json e meta.json, por uri. */
+	private readonly stateText = new Map<string, string>();
+	private writeChain: Promise<void> = Promise.resolve();
+	private writeQueued = false;
+	private metaRunning = false;
+	private metaAgain = false;
 	/** Arquivos marcados no Explorer: chave → caminho real. */
 	private decorated = new Map<string, string>();
 	private readonly statusItem: vscode.StatusBarItem;
@@ -110,11 +143,14 @@ export class ChangesController implements
 
 	constructor(private readonly context: vscode.ExtensionContext) {
 		this.status = loadStatus(context.workspaceState);
+		this.undoStack = loadUndo(context.workspaceState);
 		this.statusItem = vscode.window.createStatusBarItem('claude-code-launcher.pending', vscode.StatusBarAlignment.Right, 99);
 		this.statusItem.name = 'Mudanças do Claude';
 		this.statusItem.command = 'claude-code-launcher.showChanges';
 
-		const watcher = vscode.workspace.createFileSystemWatcher('**/.claude/{launcher-changes/log.jsonl,settings.local.json}');
+		const watcher = vscode.workspace.createFileSystemWatcher(
+			'**/.claude/{launcher-changes/log.jsonl,launcher-changes/status.json,settings.local.json}',
+		);
 		const schedule = () => this.scheduleRefresh();
 		this.disposables.push(
 			this.entriesEmitter,
@@ -125,6 +161,9 @@ export class ChangesController implements
 			watcher.onDidChange(schedule),
 			watcher.onDidDelete(schedule),
 			vscode.workspace.onDidChangeWorkspaceFolders(() => {
+				// O caminho relativo mostrado no painel depende das pastas abertas.
+				this.viewCache.clear();
+				this.summaryCache.clear();
 				void this.repairHooks();
 				schedule();
 			}),
@@ -164,10 +203,9 @@ export class ChangesController implements
 		if (!changed) {
 			return;
 		}
-		while (this.status.size > MAX_STATUS) {
-			this.status.delete(this.status.keys().next().value as string);
-		}
-		void this.context.workspaceState.update(STATUS_KEY, Object.fromEntries(this.status));
+		this.statusVersion += 1;
+		this.saveStatusMemento();
+		this.queueStateWrite();
 		// Pode ser chamado no meio de uma pintura das marcas: avisa depois.
 		clearTimeout(this.publishTimer);
 		this.publishTimer = setTimeout(() => this.publish(), 0);
@@ -276,6 +314,7 @@ export class ChangesController implements
 			} catch {
 				// Nada registrado nesta pasta.
 			}
+			await this.collectBlobs(folder.uri, []);
 		}
 		await this.refresh();
 	}
@@ -309,12 +348,12 @@ export class ChangesController implements
 
 	/** Volta os arquivos de uma recusa para como estavam antes dela. */
 	async undoReject(): Promise<void> {
-		const undo = this.lastUndo;
+		const undo = this.undoStack.pop();
 		if (!undo) {
 			void vscode.window.showInformationMessage('Não há recusa para desfazer.');
 			return;
 		}
-		this.lastUndo = undefined;
+		this.saveUndo();
 		const failed: string[] = [];
 		for (const item of undo.items) {
 			const uri = vscode.Uri.file(item.file);
@@ -393,13 +432,17 @@ export class ChangesController implements
 	 * Volta cada arquivo para antes da edição mais antiga do grupo. Cada grupo
 	 * tem as edições de um arquivo, da mais recente para a mais antiga.
 	 */
-	private async revert(groups: RawEntry[][]): Promise<{ done: number; skipped: string[] }> {
+	private async revert(groups: RawEntry[][]): Promise<{ done: number; skipped: string[]; partial: string[] }> {
 		const items: UndoItem[] = [];
 		const ids: string[] = [];
 		const skipped: string[] = [];
+		const partial: string[] = [];
 		for (const list of groups) {
-			const newest = list[0];
-			const oldest = list[list.length - 1];
+			// Só a sequência contínua mais recente: se o arquivo mudou entre duas
+			// edições do Claude, voltar ao "antes" da mais antiga apagaria essa mudança.
+			const tail = contiguousTail([...list].reverse());
+			const newest = tail[tail.length - 1];
+			const oldest = tail[0];
 			const uri = vscode.Uri.file(newest.file);
 			try {
 				const current = await currentText(uri);
@@ -415,19 +458,22 @@ export class ChangesController implements
 				}
 				items.push({ file: newest.file, previous: current, restored: plan.kind === 'write' ? plan.text : undefined });
 				await vscode.commands.executeCommand(DROP_REVIEW_COMMAND, uri.toString());
-				ids.push(...list.map((entry) => entry.id));
+				ids.push(...tail.map((entry) => entry.id));
+				if (tail.length < list.length) {
+					partial.push(basename(newest.file));
+				}
 			} catch {
 				skipped.push(basename(newest.file));
 			}
 		}
 		if (ids.length > 0) {
-			this.lastUndo = { items, ids };
+			this.pushUndo({ items, ids });
 			this.setStatus(ids, 'rejected');
 		}
-		return { done: groups.length - skipped.length, skipped };
+		return { done: groups.length - skipped.length, skipped, partial };
 	}
 
-	private report({ done, skipped }: { done: number; skipped: string[] }): void {
+	private report({ done, skipped, partial }: { done: number; skipped: string[]; partial: string[] }): void {
 		if (done > 0) {
 			const message = done === 1
 				? '1 arquivo voltou a ser como era antes do Claude.'
@@ -444,6 +490,12 @@ export class ChangesController implements
 				`${one ? '1 arquivo ficou' : `${skipped.length} arquivos ficaram`} como ${one ? 'está' : 'estão'} porque `
 				+ `${one ? 'mudou' : 'mudaram'} depois do Claude ou não há cópia do conteúdo anterior: ${skipped.join(', ')}. `
 				+ 'Use "Ver no código" para recusar trecho a trecho.',
+			);
+		}
+		if (partial.length > 0) {
+			void vscode.window.showWarningMessage(
+				`Em ${partial.join(', ')} só recusei as últimas edições do Claude: o arquivo foi mudado entre elas e as `
+				+ 'anteriores, e voltar mais apagaria essa mudança. As edições anteriores continuam pendentes.',
 			);
 		}
 	}
@@ -542,9 +594,19 @@ export class ChangesController implements
 	}
 
 	private async refresh(): Promise<void> {
+		// Uma gravação de status.json em andamento precisa terminar antes da leitura.
+		await this.writeChain;
 		this.entries = await this.loadEntries();
 		this.enabled = await this.hooksEnabled();
+		const live = new Set(this.entries.map((entry) => entry.id));
+		for (const id of [...this.viewCache.keys()]) {
+			if (!live.has(id)) {
+				this.viewCache.delete(id);
+			}
+		}
+		this.summaryCache.clear();
 		this.publish();
+		void this.fillMeta();
 	}
 
 	/** Espalha o estado atual: marcas no editor, painel, Explorer e barra de status. */
@@ -584,7 +646,8 @@ export class ChangesController implements
 		const history: ViewEntry[] = this.entries.slice(0, MAX_HISTORY).map((entry) => {
 			const request = this.requestCache.get(entry.id);
 			return {
-				...toViewEntry(entry),
+				...this.viewOf(entry),
+				reason: this.reasonOf(entry),
 				status: this.status.get(entry.id) ?? null,
 				requestId: request?.id ?? null,
 				request: request?.text ?? null,
@@ -596,20 +659,87 @@ export class ChangesController implements
 			hasFolder: (vscode.workspace.workspaceFolders ?? []).length > 0,
 			enabled: this.enabled,
 			entries: history,
-			files: summarizeFiles(pending),
-			canUndo: Boolean(this.lastUndo),
+			files: groupByFile(pending).map((list) => this.summaryOf(list)),
+			canUndo: this.undoStack.length > 0,
 		});
+	}
+
+	/** Diff e textos da edição, calculados uma vez só. */
+	private viewOf(entry: RawEntry): BaseView {
+		let view = this.viewCache.get(entry.id);
+		if (!view) {
+			view = toViewEntry(entry);
+			this.viewCache.set(entry.id, view);
+		}
+		return view;
+	}
+
+	private reasonOf(entry: RawEntry): string | null {
+		return (entry.reason || this.reasonCache.get(entry.id) || '').trim() || null;
+	}
+
+	/**
+	 * Uma linha por arquivo, como a lista "N Files" do Cursor. Compara o conteúdo de
+	 * antes da primeira edição pendente com o de depois da última; quando falta
+	 * algum desses textos, soma os números de cada edição. `list` vem da mais
+	 * recente para a mais antiga.
+	 */
+	private summaryOf(list: readonly RawEntry[]): FileSummary {
+		const cacheKey = list.map((entry) => entry.id).join('|');
+		const cached = this.summaryCache.get(cacheKey);
+		if (cached) {
+			return cached;
+		}
+		const newest = list[0];
+		const oldest = list[list.length - 1];
+		const view = this.viewOf(newest);
+		const first = oldest.before;
+		const last = newest.after;
+		let added = 0;
+		let removed = 0;
+		if (list.length === 1) {
+			added = view.added + view.modified;
+			removed = view.removed + view.modified;
+		} else if (first && last && !first.large && !last.large && last.text !== null && !(first.exists && first.text === null)) {
+			const diff = computeDiff(first.text ?? '', last.text);
+			added = diff.added + diff.modified;
+			removed = diff.removed + diff.modified;
+		} else {
+			for (const item of list.map((entry) => this.viewOf(entry))) {
+				added += item.added + item.modified;
+				removed += item.removed + item.modified;
+			}
+		}
+		const summary: FileSummary = {
+			id: newest.id,
+			key: fileKey(newest.file),
+			file: view.file,
+			dir: view.dir,
+			added,
+			removed,
+			created: first !== null && !first.exists,
+			deleted: last !== null && !last.exists,
+		};
+		this.summaryCache.set(cacheKey, summary);
+		return summary;
 	}
 
 	private async loadEntries(): Promise<RawEntry[]> {
 		const all: RawEntry[] = [];
+		const entryFolder = new Map<string, string>();
+		const blobs = new Map<string, string>();
+		const statusFiles: Array<{ folder: string; saved: Record<string, unknown> | undefined }> = [];
+		const version = this.statusVersion;
+		let migrate = false;
 		for (const folder of vscode.workspace.workspaceFolders ?? []) {
 			const uri = vscode.Uri.joinPath(folder.uri, ...LOG_PATH);
 			let text = await readText(uri);
 			if (text === undefined) {
 				continue;
 			}
-			text = await this.rotate(uri, text);
+			text = await this.rotate(folder.uri, uri, text);
+			const folderKey = folder.uri.toString();
+			const entries: RawEntry[] = [];
 			for (const line of text.split('\n')) {
 				if (!line.trim()) {
 					continue;
@@ -617,21 +747,78 @@ export class ChangesController implements
 				try {
 					const entry = JSON.parse(line) as RawEntry;
 					if (entry && typeof entry.id === 'string' && typeof entry.file === 'string') {
-						all.push(entry);
+						entries.push(entry);
+						entryFolder.set(entry.id, folderKey);
 					}
 				} catch {
 					// Linha incompleta: o hook pode estar escrevendo neste momento.
 				}
 			}
+			await this.resolveBlobs(folder.uri, entries, blobs);
+			all.push(...entries);
+
+			const saved = await this.readState(vscode.Uri.joinPath(folder.uri, ...STATUS_PATH));
+			statusFiles.push({ folder: folderKey, saved });
+			migrate = migrate || (saved === undefined && entries.length > 0);
+			this.applySavedMeta(await this.readState(vscode.Uri.joinPath(folder.uri, ...META_PATH)));
 		}
+		this.blobCache = blobs;
+		this.entryFolder = entryFolder;
+
+		// status.json é a fonte da verdade quando existe; sem ele, vale o que o
+		// editor guardava (versões anteriores) e o arquivo é criado.
+		if (version === this.statusVersion) {
+			for (const { folder, saved } of statusFiles) {
+				if (!saved) {
+					continue;
+				}
+				for (const [id, owner] of entryFolder) {
+					if (owner !== folder) {
+						continue;
+					}
+					const value = saved[id];
+					if (value === 'accepted' || value === 'rejected') {
+						this.status.set(id, value);
+					} else {
+						this.status.delete(id);
+					}
+				}
+			}
+			this.saveStatusMemento();
+		}
+		if (migrate) {
+			this.queueStateWrite();
+		}
+
 		all.sort((a, b) => b.time.localeCompare(a.time));
-		const shown = new Set(all.slice(0, MAX_HISTORY).map((entry) => entry.id));
-		this.fillMeta(all.filter((entry) => shown.has(entry.id) || !this.status.has(entry.id)));
 		return all;
 	}
 
+	/** Preenche o texto dos snapshots que o log guarda só como hash. */
+	private async resolveBlobs(folder: vscode.Uri, entries: RawEntry[], blobs: Map<string, string>): Promise<void> {
+		const wanted = new Set<string>();
+		for (const entry of entries) {
+			for (const snapshot of [entry.before, entry.after]) {
+				if (snapshot && snapshot.text === null && isBlobHash(snapshot.hash) && !blobs.has(snapshot.hash)) {
+					wanted.add(snapshot.hash);
+				}
+			}
+		}
+		await Promise.all([...wanted].map(async (hash) => {
+			const text = this.blobCache.get(hash) ?? await readText(vscode.Uri.joinPath(folder, ...BLOB_DIR, `${hash}.txt`));
+			if (text !== undefined) {
+				blobs.set(hash, text);
+			}
+		}));
+		const get = (hash: string) => blobs.get(hash);
+		for (const entry of entries) {
+			entry.before = resolveSnapshot(entry.before, get);
+			entry.after = resolveSnapshot(entry.after, get);
+		}
+	}
+
 	/** Mantém o log abaixo de MAX_LOG_ENTRIES, tirando as edições revisadas mais antigas. */
-	private async rotate(uri: vscode.Uri, text: string): Promise<string> {
+	private async rotate(folder: vscode.Uri, uri: vscode.Uri, text: string): Promise<string> {
 		const kept = trimLog(text.split('\n'), MAX_LOG_ENTRIES, (id) => this.status.has(id));
 		if (!kept) {
 			return text;
@@ -644,64 +831,232 @@ export class ChangesController implements
 			}
 			const next = `${kept.join('\n')}\n${again.slice(text.length)}`;
 			await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(next));
+			await this.collectBlobs(folder, next.split('\n'));
 			return next;
 		} catch {
 			return text;
 		}
 	}
 
-	// O hook roda antes de o Claude Code gravar o texto da edição no transcript.
-	// Aqui a explicação e o pedido são buscados de novo; enquanto faltarem, tenta
-	// outra vez em alguns segundos, até MAX_META_ATTEMPTS vezes por edição.
-	private fillMeta(entries: RawEntry[]): void {
-		let missing = false;
-		const requestsByTranscript = new Map<string, Map<string, RequestInfo>>();
-		for (const entry of entries) {
-			if (!entry.transcript || !entry.toolUseId) {
-				continue;
-			}
-			const cachedReason = this.reasonCache.get(entry.id);
-			if (cachedReason !== undefined) {
-				entry.reason = cachedReason;
-			}
-			const needsReason = !entry.reason;
-			const needsRequest = !this.requestCache.has(entry.id);
-			if (!needsReason && !needsRequest) {
-				continue;
-			}
-			if ((this.metaAttempts.get(entry.id) ?? 0) >= MAX_META_ATTEMPTS) {
-				continue;
-			}
-			if (needsReason) {
-				const reason = findReasonInTranscript(entry.transcript, entry.toolUseId);
-				if (reason !== null) {
-					this.reasonCache.set(entry.id, reason);
-					entry.reason = reason;
+	/**
+	 * Apaga os blobs que nenhuma linha do log nem nenhum "pre" em andamento
+	 * cita. Blobs recentes ficam: o hook pode tê-los gravado agora há pouco.
+	 */
+	private async collectBlobs(folder: vscode.Uri, logLines: readonly string[]): Promise<void> {
+		try {
+			const now = Date.now();
+			const keep = referencedBlobs(logLines);
+			const pendingDir = vscode.Uri.joinPath(folder, ...PENDING_DIR);
+			for (const [name] of await readDirectory(pendingDir)) {
+				const uri = vscode.Uri.joinPath(pendingDir, name);
+				if (await olderThan(uri, now, PENDING_MAX_AGE_MS)) {
+					await vscode.workspace.fs.delete(uri).then(undefined, () => undefined);
+					continue;
+				}
+				const text = await readText(uri);
+				if (text !== undefined) {
+					referencedBlobs([text]).forEach((hash) => keep.add(hash));
 				}
 			}
-			if (needsRequest) {
-				let requests = requestsByTranscript.get(entry.transcript);
-				if (!requests) {
-					requests = findRequestsInTranscript(entry.transcript);
-					requestsByTranscript.set(entry.transcript, requests);
+			const blobDir = vscode.Uri.joinPath(folder, ...BLOB_DIR);
+			for (const [name] of await readDirectory(blobDir)) {
+				const hash = name.slice(0, 40);
+				if (keep.has(hash) && name === `${hash}.txt`) {
+					continue;
 				}
-				const request = requests.get(entry.toolUseId);
-				if (request) {
-					this.requestCache.set(entry.id, request);
+				const uri = vscode.Uri.joinPath(blobDir, name);
+				if (await olderThan(uri, now, BLOB_GRACE_MS)) {
+					await vscode.workspace.fs.delete(uri).then(undefined, () => undefined);
 				}
 			}
-			if (!entry.reason || !this.requestCache.has(entry.id)) {
-				const attempts = (this.metaAttempts.get(entry.id) ?? 0) + 1;
-				this.metaAttempts.set(entry.id, attempts);
-				missing = missing || attempts < MAX_META_ATTEMPTS;
+		} catch {
+			// A limpeza fica para a próxima vez.
+		}
+	}
+
+	/** Edições cuja explicação e pedido valem a pena buscar: as do histórico e as pendentes. */
+	private metaTargets(): RawEntry[] {
+		const shown = new Set(this.entries.slice(0, MAX_HISTORY).map((entry) => entry.id));
+		return this.entries.filter((entry) => shown.has(entry.id) || !this.status.has(entry.id));
+	}
+
+	private hasMeta(entry: RawEntry): boolean {
+		return (Boolean(entry.reason) || this.reasonCache.has(entry.id)) && this.requestCache.has(entry.id);
+	}
+
+	// O hook não lê o transcript (o Claude espera por ele, e o texto da edição
+	// pode nem estar gravado ainda). Aqui a explicação e o pedido são buscados;
+	// enquanto faltarem, tenta outra vez em alguns segundos, até
+	// MAX_META_ATTEMPTS vezes por edição. O que for achado vai para meta.json.
+	private async fillMeta(): Promise<void> {
+		if (this.metaRunning) {
+			this.metaAgain = true;
+			return;
+		}
+		this.metaRunning = true;
+		try {
+			const byTranscript = new Map<string, RawEntry[]>();
+			for (const entry of this.metaTargets()) {
+				if (!entry.transcript || !entry.toolUseId || this.hasMeta(entry)) {
+					continue;
+				}
+				if ((this.metaAttempts.get(entry.id) ?? 0) >= MAX_META_ATTEMPTS) {
+					continue;
+				}
+				const list = byTranscript.get(entry.transcript) ?? [];
+				list.push(entry);
+				byTranscript.set(entry.transcript, list);
+			}
+			let found = false;
+			let missing = false;
+			for (const [transcript, list] of byTranscript) {
+				const meta = await readTranscriptMeta(transcript);
+				for (const entry of list) {
+					const toolUseId = entry.toolUseId as string;
+					const reason = meta.reasons.get(toolUseId);
+					if (reason !== undefined && !this.reasonCache.has(entry.id)) {
+						this.reasonCache.set(entry.id, reason);
+						found = true;
+					}
+					const request = meta.requests.get(toolUseId);
+					if (request && !this.requestCache.has(entry.id)) {
+						this.requestCache.set(entry.id, request);
+						found = true;
+					}
+					if (!this.hasMeta(entry)) {
+						const attempts = (this.metaAttempts.get(entry.id) ?? 0) + 1;
+						this.metaAttempts.set(entry.id, attempts);
+						missing = missing || attempts < MAX_META_ATTEMPTS;
+					}
+				}
+			}
+			if (found) {
+				this.queueStateWrite();
+				this.publish();
+			}
+			if (missing) {
+				clearTimeout(this.metaTimer);
+				this.metaTimer = setTimeout(() => {
+					void this.fillMeta();
+				}, 3000);
+			}
+		} finally {
+			this.metaRunning = false;
+			if (this.metaAgain) {
+				this.metaAgain = false;
+				void this.fillMeta();
 			}
 		}
-		if (missing) {
-			clearTimeout(this.metaTimer);
-			this.metaTimer = setTimeout(() => {
-				void this.refresh();
-			}, 3000);
+	}
+
+	private applySavedMeta(saved: Record<string, unknown> | undefined): void {
+		for (const [id, value] of Object.entries(saved ?? {})) {
+			const item = value as { reason?: unknown; request?: { id?: unknown; text?: unknown } } | null;
+			if (!item || typeof item !== 'object') {
+				continue;
+			}
+			if (typeof item.reason === 'string' && !this.reasonCache.has(id)) {
+				this.reasonCache.set(id, item.reason);
+			}
+			const request = item.request;
+			if (request && typeof request.id === 'string' && typeof request.text === 'string' && !this.requestCache.has(id)) {
+				this.requestCache.set(id, { id: request.id, text: request.text });
+			}
 		}
+	}
+
+	// ---- Estado gravado: status.json, meta.json, undo -------------------------------
+
+	private async readState(uri: vscode.Uri): Promise<Record<string, unknown> | undefined> {
+		const text = await readText(uri);
+		if (text === undefined) {
+			return undefined;
+		}
+		this.stateText.set(uri.toString(), text);
+		try {
+			const parsed = JSON.parse(text);
+			return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+		} catch {
+			return {};
+		}
+	}
+
+	/** Grava status.json e meta.json em seguida, juntando pedidos feitos enquanto uma gravação espera. */
+	private queueStateWrite(): void {
+		if (this.writeQueued) {
+			return;
+		}
+		this.writeQueued = true;
+		this.writeChain = this.writeChain
+			.then(async () => {
+				this.writeQueued = false;
+				await this.writeStateFiles();
+			})
+			.catch(() => undefined);
+	}
+
+	private async writeStateFiles(): Promise<void> {
+		for (const folder of vscode.workspace.workspaceFolders ?? []) {
+			const folderKey = folder.uri.toString();
+			const status: Record<string, Status> = {};
+			const meta: Record<string, { reason: string | null; request: RequestInfo | null }> = {};
+			let count = 0;
+			for (const [id, owner] of this.entryFolder) {
+				if (owner !== folderKey) {
+					continue;
+				}
+				count += 1;
+				const value = this.status.get(id);
+				if (value) {
+					status[id] = value;
+				}
+				const reason = this.reasonCache.get(id);
+				const request = this.requestCache.get(id);
+				if (reason !== undefined || request) {
+					meta[id] = { reason: reason ?? null, request: request ?? null };
+				}
+			}
+			if (count === 0) {
+				continue;
+			}
+			await this.writeIfChanged(vscode.Uri.joinPath(folder.uri, ...STATUS_PATH), status);
+			await this.writeIfChanged(vscode.Uri.joinPath(folder.uri, ...META_PATH), meta);
+		}
+	}
+
+	private async writeIfChanged(uri: vscode.Uri, value: object): Promise<void> {
+		const text = `${JSON.stringify(value)}\n`;
+		if (this.stateText.get(uri.toString()) === text) {
+			return;
+		}
+		try {
+			await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(text));
+			this.stateText.set(uri.toString(), text);
+		} catch {
+			// Sem permissão de escrita: o estado do editor continua valendo.
+		}
+	}
+
+	private saveStatusMemento(): void {
+		while (this.status.size > MAX_STATUS) {
+			this.status.delete(this.status.keys().next().value as string);
+		}
+		void this.context.workspaceState.update(STATUS_KEY, Object.fromEntries(this.status));
+	}
+
+	private pushUndo(undo: Undo): void {
+		this.undoStack.push(undo);
+		let size = this.undoStack.reduce((total, item) => total + undoSize(item), 0);
+		while (this.undoStack.length > 1 && (this.undoStack.length > MAX_UNDO || size > MAX_UNDO_CHARS)) {
+			size -= undoSize(this.undoStack.shift() as Undo);
+		}
+		this.saveUndo();
+	}
+
+	private saveUndo(): void {
+		const fits = this.undoStack.reduce((total, item) => total + undoSize(item), 0) <= MAX_UNDO_CHARS;
+		// Uma recusa enorme ainda pode ser desfeita nesta sessão, mas não é guardada.
+		void this.context.workspaceState.update(UNDO_KEY, fits ? this.undoStack : []);
 	}
 
 	private async hooksEnabled(): Promise<boolean> {
@@ -855,7 +1210,7 @@ async function deleteFile(uri: vscode.Uri): Promise<void> {
 	}
 }
 
-function toViewEntry(entry: RawEntry): Omit<ViewEntry, 'status' | 'requestId' | 'request'> {
+function toViewEntry(entry: RawEntry): BaseView {
 	const relative = vscode.workspace.asRelativePath(entry.file, false).replace(/\\/g, '/');
 	const slash = relative.lastIndexOf('/');
 	const before = entry.before;
@@ -885,7 +1240,8 @@ function toViewEntry(entry: RawEntry): Omit<ViewEntry, 'status' | 'requestId' | 
 	if (before?.large || after?.large) {
 		return { ...base, summary: 'Arquivo grande demais (mais de 512 KB) para guardar o antes e o depois.' };
 	}
-	if (before === null || after === null || after.text === null) {
+	// Texto null num arquivo que existe: o blob dele sumiu (ou nunca foi guardado).
+	if (before === null || after === null || after.text === null || (before.exists && before.text === null)) {
 		return {
 			...base,
 			summary: 'Não foi possível capturar o conteúdo de antes desta edição.',
@@ -923,44 +1279,34 @@ interface FileSummary {
 	deleted: boolean;
 }
 
-/**
- * Uma linha por arquivo, como a lista "N Files" do Cursor. Compara o conteúdo de
- * antes da primeira edição pendente com o de depois da última; quando falta
- * algum desses textos, soma os números de cada edição.
- */
-function summarizeFiles(entries: readonly RawEntry[]): FileSummary[] {
-	const result: FileSummary[] = [];
-	for (const list of groupByFile(entries)) {
-		// `entries` vem da mais recente para a mais antiga.
-		const newest = list[0];
-		const oldest = list[list.length - 1];
-		const view = toViewEntry(newest);
-		const first = oldest.before;
-		const last = newest.after;
-		let added = 0;
-		let removed = 0;
-		if (first && last && !first.large && !last.large && last.text !== null) {
-			const diff = computeDiff(first.text ?? '', last.text);
-			added = diff.added + diff.modified;
-			removed = diff.removed + diff.modified;
-		} else {
-			for (const entry of list.map(toViewEntry)) {
-				added += entry.added + entry.modified;
-				removed += entry.removed + entry.modified;
-			}
-		}
-		result.push({
-			id: newest.id,
-			key: fileKey(newest.file),
-			file: view.file,
-			dir: view.dir,
-			added,
-			removed,
-			created: first !== null && !first.exists,
-			deleted: last !== null && !last.exists,
-		});
+type BaseView = Omit<ViewEntry, 'status' | 'requestId' | 'request'>;
+
+function loadUndo(memento: vscode.Memento): Undo[] {
+	const saved = memento.get<Undo[]>(UNDO_KEY, []);
+	if (!Array.isArray(saved)) {
+		return [];
 	}
-	return result;
+	return saved.filter((undo) => undo && Array.isArray(undo.items) && Array.isArray(undo.ids)).slice(-MAX_UNDO);
+}
+
+function undoSize(undo: Undo): number {
+	return undo.items.reduce((total, item) => total + (item.previous?.length ?? 0) + (item.restored?.length ?? 0), 0);
+}
+
+async function readDirectory(uri: vscode.Uri): Promise<[string, vscode.FileType][]> {
+	try {
+		return await vscode.workspace.fs.readDirectory(uri);
+	} catch {
+		return [];
+	}
+}
+
+async function olderThan(uri: vscode.Uri, now: number, age: number): Promise<boolean> {
+	try {
+		return now - (await vscode.workspace.fs.stat(uri)).mtime > age;
+	} catch {
+		return false;
+	}
 }
 
 function actionLabel(tool: string | null | undefined, created: boolean): string {

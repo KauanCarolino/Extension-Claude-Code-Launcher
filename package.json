@@ -2,7 +2,7 @@
   "name": "claude-code-launcher",
   "displayName": "Claude Code Launcher",
   "description": "Abre o chat oficial do Claude Code e mostra, de forma didática, o que ele mudou em cada arquivo.",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "publisher": "kauan",
   "license": "MIT",
   "repository": {

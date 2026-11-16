@@ -67,16 +67,19 @@ class LauncherViewProvider implements vscode.WebviewViewProvider {
 		if (!this.view?.visible) {
 			return;
 		}
-		const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+		const folders = localFolders();
 		const openTabs = claudeTabs().map(({ tab, key }) => ({ key, label: tab.label, active: tab.isActive }));
 		const openLabels = new Set(openTabs.map((tab) => tab.label));
-		const sessions = folder
-			? listSessions(folder, RECENT_SESSIONS).map((session) => ({ ...session, open: openLabels.has(session.title) }))
-			: [];
+		// Com várias pastas abertas, junta as conversas de todas.
+		const sessions = folders
+			.flatMap((folder) => listSessions(folder, RECENT_SESSIONS))
+			.sort((a, b) => b.updated - a.updated)
+			.slice(0, RECENT_SESSIONS)
+			.map((session) => ({ ...session, open: openLabels.has(session.title) }));
 		void this.view.webview.postMessage({
 			type: 'state',
 			installed: isClaudeInstalled(),
-			hasFolder: Boolean(folder),
+			hasFolder: folders.length > 0,
 			openTabs,
 			sessions,
 		});
@@ -529,13 +532,32 @@ function createNonce(): string {
 	return nonce;
 }
 
+/** Pastas do workspace no disco local (as conversas do Claude Code ficam indexadas por esse caminho). */
+function localFolders(): string[] {
+	return (vscode.workspace.workspaceFolders ?? [])
+		.filter((folder) => folder.uri.scheme === 'file')
+		.map((folder) => folder.uri.fsPath);
+}
+
+/** Observa as conversas de cada pasta aberta e refaz os observadores quando as pastas mudam. */
 function watchSessions(context: vscode.ExtensionContext): void {
-	const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-	if (!folder) {
-		return;
-	}
-	const pattern = new vscode.RelativePattern(vscode.Uri.file(sessionsDir(folder)), '*.jsonl');
-	const watcher = vscode.workspace.createFileSystemWatcher(pattern);
+	let watchers: vscode.Disposable[] = [];
 	const refresh = () => provider?.refresh(1500);
-	context.subscriptions.push(watcher, watcher.onDidCreate(refresh), watcher.onDidChange(refresh), watcher.onDidDelete(refresh));
+	const setup = () => {
+		watchers.forEach((watcher) => watcher.dispose());
+		watchers = [];
+		for (const folder of localFolders()) {
+			const pattern = new vscode.RelativePattern(vscode.Uri.file(sessionsDir(folder)), '*.jsonl');
+			const watcher = vscode.workspace.createFileSystemWatcher(pattern);
+			watchers.push(watcher, watcher.onDidCreate(refresh), watcher.onDidChange(refresh), watcher.onDidDelete(refresh));
+		}
+	};
+	setup();
+	context.subscriptions.push(
+		vscode.workspace.onDidChangeWorkspaceFolders(() => {
+			setup();
+			provider?.refresh(0);
+		}),
+		{ dispose: () => watchers.forEach((watcher) => watcher.dispose()) },
+	);
 }

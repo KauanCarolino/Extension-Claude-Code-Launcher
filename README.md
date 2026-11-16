@@ -4,7 +4,7 @@ Extensão para o Cursor e o VS Code que abre o chat oficial do Claude Code e mos
 
 O chat é o da extensão oficial **Claude Code** (`anthropic.claude-code`), com as ferramentas e as permissões dela. Esta extensão não coloca um botão dentro do painel do Agent do Cursor e não substitui esse painel.
 
-Versão atual do pacote: `claude-code-launcher-0.6.0.vsix`.
+Versão atual do pacote: `claude-code-launcher-0.7.0.vsix`.
 
 ## Requisitos
 
@@ -15,7 +15,7 @@ Versão atual do pacote: `claude-code-launcher-0.6.0.vsix`.
 ## Instalar
 
 1. Em Extensions, abra o menu `...` e escolha **Install from VSIX**.
-2. Selecione `claude-code-launcher-0.6.0.vsix`.
+2. Selecione `claude-code-launcher-0.7.0.vsix`.
 3. Na primeira abertura do chat, aceite instalar o Claude Code oficial, se ele ainda não estiver presente.
 
 Para desenvolver a partir deste repositório, abra a pasta no Cursor e use **Run Extension** (F5). O código TypeScript em `src/` é compilado para `out/`.
@@ -45,7 +45,7 @@ A view **Claude Code**, na barra de atividades, mostra:
 
 - **+ Nova conversa em aba**
 - **Abas abertas**: clique numa linha para ir até a aba; **×** fecha essa aba
-- **Conversas recentes**: as 15 conversas mais recentes do projeto aberto. Clique para retomar a conversa numa aba. Uma conversa já aberta leva até a aba existente.
+- **Conversas recentes**: as 15 conversas mais recentes do projeto aberto (com várias pastas no workspace, de todas elas). Clique para retomar a conversa numa aba. Uma conversa já aberta leva até a aba existente.
 
 Os títulos vêm dos transcripts do Claude Code em `~/.claude/projects/` (ou em `CLAUDE_CONFIG_DIR`, se essa variável existir). A lista usa o título escolhido por você, senão o título gerado pelo Claude, senão a primeira mensagem. Sem uma pasta aberta, as conversas recentes não aparecem.
 
@@ -61,7 +61,7 @@ Aceitar e recusar:
 - **✓ Aceitar todos** mantém tudo como o Claude deixou e esvazia o bloco. O histórico continua, com a marca **aceita**.
 - **✕ Recusar todos** pede confirmação e volta cada arquivo para como era antes do Claude: o texto anterior é restaurado, arquivos criados por ele vão para a lixeira e arquivos apagados por ele são recriados. O histórico ganha a marca **recusada**.
 - Recusar nunca mexe num arquivo que mudou depois da última edição do Claude, nem num arquivo sem cópia do conteúdo anterior (mais de 512 KB). Esses ficam no bloco e um aviso lista quais foram. Dá para recusá-los trecho a trecho em **Ver no código**.
-- Depois de recusar, o aviso tem **Desfazer**, e a barra do painel mostra **↶ Desfazer recusa** até a próxima recusa. Desfazer só devolve arquivos que continuam como a recusa deixou.
+- Depois de recusar, o aviso tem **Desfazer**, e a barra do painel mostra **↶ Desfazer recusa**. Dá para desfazer as 5 últimas recusas, da mais recente para trás, inclusive depois de recarregar a janela. Desfazer só devolve arquivos que continuam como a recusa deixou.
 
 Quando nada está pendente, o bloco some e o painel diz que tudo foi revisado.
 
@@ -96,9 +96,18 @@ O registro só vale para conversas iniciadas depois de ativar. Um arquivo com ma
 
 **Ativar** grava um hook `PreToolUse` e `PostToolUse` em `.claude/settings.local.json` do projeto. O hook chama `node` e não altera o que o Claude faz: se falhar, a edição segue. **Desligar** remove só esses hooks e deixa o resto do arquivo como está. Se o JSON estiver inválido, o arquivo não é modificado.
 
-O histórico fica em `.claude/launcher-changes/log.jsonl`. A pasta tem um `.gitignore` com `*`, para nada dela entrar no git. O script do hook é copiado para essa mesma pasta (`launcher-record-change.js`), então o registro continua funcionando se o projeto for aberto em outro editor (Cursor ou VS Code). Ao abrir o projeto, a extensão atualiza essa cópia e corrige o caminho no `settings.local.json` se ele apontar para outro lugar, como nas versões anteriores, que usavam o armazenamento global do editor.
+O histórico fica em `.claude/launcher-changes/`, com um `.gitignore` com `*`, para nada dela entrar no git:
 
-Aceitar e recusar ficam guardados no estado do projeto no editor, não no log.
+| Arquivo | Conteúdo |
+| --- | --- |
+| `log.jsonl` | Uma linha por edição: arquivo, ferramenta, conversa e o hash do conteúdo de antes e de depois |
+| `blobs/<hash>.txt` | O texto de cada versão. Edições seguidas do mesmo arquivo reaproveitam o mesmo blob; blobs que nenhuma edição cita saem quando o log é podado ou limpo |
+| `status.json` | Aceito ou recusado de cada edição |
+| `meta.json` | O que o Claude disse antes de cada edição e o pedido que a originou, já lidos do transcript |
+
+O hook só guarda os arquivos e sai, sem ler o transcript da conversa; a explicação e o pedido são lidos pela extensão em segundo plano. Logs de versões anteriores, com o texto dentro de cada linha, continuam funcionando. O script do hook é copiado para essa mesma pasta (`launcher-record-change.js`), então o registro continua funcionando se o projeto for aberto em outro editor (Cursor ou VS Code). Ao abrir o projeto, a extensão atualiza essa cópia e corrige o caminho no `settings.local.json` se ele apontar para outro lugar, como nas versões anteriores, que usavam o armazenamento global do editor.
+
+Como aceitar e recusar ficam em `status.json`, a revisão é a mesma no Cursor e no VS Code. Na primeira abertura depois de atualizar, o que estava guardado no editor é copiado para esse arquivo.
 
 ## Marcas no código
 

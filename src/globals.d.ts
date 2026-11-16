@@ -11,3 +11,5 @@ declare class TextEncoder {
 
 declare function setTimeout(callback: () => void, ms: number): unknown;
 declare function clearTimeout(handle: unknown): void;
+
+declare const process: { platform: string; env: Record<string, string | undefined> };
