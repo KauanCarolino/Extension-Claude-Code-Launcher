@@ -11,6 +11,7 @@
 
 	const saved = readSaved();
 	const openCards = new Set(saved.openCards || []);
+	const openCaptureHealth = new Set(Array.isArray(saved.openCaptureHealth) ? saved.openCaptureHealth.filter(Number.isSafeInteger) : []);
 	const expandedHunks = new Set();
 	let filesOpen = saved.filesOpen !== false;
 	let legendOpen = Boolean(saved.legendOpen);
@@ -40,7 +41,7 @@
 	}
 
 	function save() {
-		vscode.setState({ openCards: [...openCards].slice(-100), filesOpen, legendOpen, layout });
+		vscode.setState({ openCards: [...openCards].slice(-100), openCaptureHealth: [...openCaptureHealth].slice(-100), filesOpen, legendOpen, layout });
 	}
 
 	// ---- Helpers ---------------------------------------------------------------------
@@ -163,6 +164,33 @@
 				root.append(banner('warning', message, 'warning'));
 			}
 		}
+		if (Array.isArray(state.captureHealth)) {
+			for (const health of state.captureHealth) { root.append(renderCaptureHealth(health)); }
+		}
+	}
+
+	function renderCaptureHealth(health) {
+		const box = el('details', 'legend capture-health');
+		box.open = openCaptureHealth.has(health.workspace);
+		box.addEventListener('toggle', () => {
+			if (box.open) { openCaptureHealth.add(health.workspace); } else { openCaptureHealth.delete(health.workspace); }
+			save();
+		});
+		const summary = el('summary');
+		summary.dataset.focusKey = 'capture-health:' + health.workspace;
+		summary.append(icon('pulse'), el('span', null, 'Diagnóstico de captura — pasta ' + health.workspace));
+		box.append(summary);
+		box.append(el('p', null, health.configurationLabel));
+		box.append(el('p', null, health.capabilityLabel + (health.version ? ' Versão: ' + health.version + '.' : '')));
+		box.append(el('p', null, health.evidenceLabel));
+		const event = (label, value) => {
+			box.append(el('p', null, value ? label + ': ' + value.at + ' · ' + value.label : label + ': sem evidência conhecida.'));
+			if (value) { box.append(el('p', null, value.guidance)); box.append(el('p', null, value.content)); }
+		};
+		event('Última tentativa observada conhecida', health.observation);
+		event('Última captura concluída conhecida', health.completion);
+		box.append(el('p', null, health.coverageLabel));
+		return box;
 	}
 
 	function banner(name, text, kind, action) {
@@ -314,17 +342,17 @@
 	// Na tela maior não há título de view, então elas vêm para cá.
 	function renderToolbar(state) {
 		const bar = el('header', 'toolbar');
+		const configured = Array.isArray(state.captureHealth)
+			? state.captureHealth.some((health) => health.configuration === 'configured') : state.enabled;
 		const lead = el('div', 'toolbar-lead');
 		if (state.wide) {
 			lead.append(el('h1', 'page-title', 'Mudanças do Claude'));
 		}
 		if (state.hasFolder) {
-			const status = el('span', 'status ' + (state.enabled ? 'on' : 'off'));
+			const status = el('span', 'status ' + (configured ? 'on' : 'off'));
 			status.append(el('span', 'status-dot'));
-			status.append(el('span', null, state.enabled ? 'Registrando' : 'Registro desligado'));
-			status.title = state.enabled
-				? 'Cada edição do Claude neste projeto fica guardada aqui'
-				: 'As edições do Claude não estão sendo registradas';
+			status.append(el('span', null, configured ? 'Registro configurado' : 'Registro desligado ou indisponível'));
+			status.title = 'Configuração e execução são evidências distintas. Consulte o diagnóstico de captura.';
 			lead.append(status);
 		}
 		bar.append(lead);
@@ -358,7 +386,7 @@
 				actions.append(button({ className: 'icon-btn', icon: 'unlock', command: 'releaseWriter', title: 'Liberar a revisão para outra janela', ariaLabel: 'Liberar a revisão para outra janela', focusKey: 'release' }));
 			}
 		}
-		if (state.hasFolder && state.enabled) {
+		if (state.hasFolder && configured) {
 			actions.append(button({ className: 'icon-btn', icon: 'debug-pause', command: 'disable', title: 'Desligar o registro', ariaLabel: 'Desligar o registro', focusKey: 'disable' }));
 		}
 		bar.append(actions);

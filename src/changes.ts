@@ -10,7 +10,8 @@ import { ReviewStore } from './review-store';
 import { withCaptureMaintenance, recoverCaptureMaintenance } from './maintenance';
 import { executeDecision, ResourceAdapter, undoItem } from './reversal';
 import { applyHookPlan, configFingerprint, HookCapability, inspectHookConfiguration, planHooks, SettingsRead, HookPlan } from './hooks';
-import { assessResourceScope, assessStoragePath, CAPTURE_POLICY_FILE, makeCapturePolicy, readLogFile, readVerifiedBlob, safeReadText, transcriptAllowed, validateMessage, validateSavedMeta, retentionCandidates, CapturePolicy, validateCapturePolicy, validateRawEntry, CAPTURE_STATUS_FILE, collectContentHashes } from './history';
+import { assessResourceScope, assessStoragePath, CAPTURE_POLICY_FILE, makeCapturePolicy, readLogFile, readVerifiedBlob, safeReadText, transcriptAllowed, validateMessage, validateSavedMeta, retentionCandidates, CapturePolicy, validateCapturePolicy, validateRawEntry, collectContentHashes, CaptureDiagnostics, readCaptureDiagnostics } from './history';
+import { captureHealth, CaptureConfiguration, retainCaptureEvidence } from './capture-health';
 declare const require: (name: string) => any;
 const nodeFs = require('node:fs');
 const nodePath = require('node:path');
@@ -150,6 +151,8 @@ export class ChangesController implements
 	private disposal: Promise<void> = Promise.resolve();
 	private readonly backgroundTasks = new Set<Promise<unknown>>();
 	private readonly captureWarnings = new Map<string, string>();
+	private readonly captureEvidence = new Map<string, CaptureDiagnostics>();
+	private readonly captureHealthStates = new Map<string, ReturnType<typeof captureHealth>>();
 	private readonly activeOperations = new Set<Promise<unknown>>();
 	private readonly hookWarnings = new Map<string, string>();
 	private readonly resourceAliases = new Map<string, string>();
@@ -187,6 +190,7 @@ export class ChangesController implements
 		const watcher = vscode.workspace.createFileSystemWatcher(
 			'**/.claude/{launcher-changes/log.jsonl,launcher-changes/status.json,launcher-changes/review-state.v1.json,launcher-changes/capture-status.json,settings.local.json}',
 		);
+		const diagnosticWatcher = vscode.workspace.createFileSystemWatcher('**/.claude/launcher-changes/capture-diagnostics/v2/**/*.json');
 		const schedule = () => this.scheduleRefresh();
 		this.disposables.push(
 			this.entriesEmitter,
@@ -196,6 +200,10 @@ export class ChangesController implements
 			watcher.onDidCreate(schedule),
 			watcher.onDidChange(schedule),
 			watcher.onDidDelete(schedule),
+			diagnosticWatcher,
+			diagnosticWatcher.onDidCreate(schedule),
+			diagnosticWatcher.onDidChange(schedule),
+			diagnosticWatcher.onDidDelete(schedule),
 			vscode.workspace.onDidChangeWorkspaceFolders(() => {
 				this.metaEpoch += 1;
 				// O caminho relativo mostrado no painel depende das pastas abertas.
@@ -205,7 +213,13 @@ export class ChangesController implements
 				schedule();
 			}),
 		);
-		this.disposables.push(vscode.workspace.onDidChangeConfiguration((event) => { if (event.affectsConfiguration('claudeCodeLauncher')) { void this.repairHooks().catch(() => undefined); } }));
+		this.disposables.push(vscode.workspace.onDidChangeConfiguration((event) => {
+			if (event.affectsConfiguration('claudeCodeLauncher') || event.affectsConfiguration('claudeCode.claudeProcessWrapper')) {
+				this.metaEpoch += 1;
+				this.scheduleRefresh();
+				void this.repairHooks().catch(() => undefined);
+			}
+		}));
 		this.scheduleRefresh();
 	}
 
@@ -441,24 +455,32 @@ export class ChangesController implements
 			await Promise.allSettled([...this.activeOperations, ...this.backgroundTasks]); await this.refreshing; await this.writeChain;
 			for (const folder of vscode.workspace.workspaceFolders ?? []) {
 				const store = this.stores.get(folder.uri.toString());
+				const forgetCapture = () => {
+					const key = folder.uri.toString();
+					this.captureEvidence.delete(key); this.captureHealthStates.delete(key); this.captureWarnings.delete(key);
+				};
 				try {
 					if (!store?.writable) { throw new ReviewError('readOnlyOwner'); }
 					await this.readCapturePolicy(folder);
 					await withCaptureMaintenance(store, async () => {
 						await this.writeCapturePolicy(folder, true);
 						if (Object.values(store.get().operations).some((op) => !['complete', 'blocked'].includes(op.stage))) { throw new ReviewError('needsReconciliation'); }
-						const owned = /^(?:log\.jsonl|status\.json|meta\.json|capture-status\.json|review-state\.v1\.json(?:\.prev)?|blobs|pending|completed|review-blobs|review-migration-backups|settings-backups|quarantine-index)$/;
+						const owned = /^(?:log\.jsonl|status\.json|meta\.json|capture-status\.json|capture-diagnostics|review-state\.v1\.json(?:\.prev)?|blobs|pending|completed|review-blobs|review-migration-backups|settings-backups|quarantine-index)$/;
 						for (const name of await nodeFs.promises.readdir(store.directory)) {
-							if (owned.test(name)) { await removeOwnedTree(nodePath.join(store.directory, name), store.root, () => this.disposed); }
+							if (owned.test(name)) {
+								await removeOwnedTree(nodePath.join(store.directory, name), store.root, () => this.disposed);
+								if (name === 'capture-diagnostics') { forgetCapture(); }
+							}
 						}
 					});
+					forgetCapture();
 					await store.close(); this.stores.delete(folder.uri.toString()); this.storeErrors.delete(folder.uri.toString()); this.logCache.delete(folder.uri.toString());
 				} catch (error) { failed.push(`${folder.name} (${errorCode(error)})`); }
 			}
 			if (!failed.length) { await this.context.workspaceState.update(UNDO_KEY, []); await this.context.workspaceState.update(STATUS_KEY, {}); await this.context.workspaceState.update(LEGACY_REVIEWED_KEY, []); this.undoStack.splice(0); }
 		} catch (error) { failed.push(`estado local (${errorCode(error)})`); }
 		finally {
-			this.endMaintenance(); this.reasonCache.clear(); this.requestCache.clear(); this.blobCache.clear(); this.viewCache.clear(); this.comparisonTexts.clear(); this.captureWarnings.clear();
+			this.endMaintenance(); this.reasonCache.clear(); this.requestCache.clear(); this.blobCache.clear(); this.viewCache.clear(); this.comparisonTexts.clear();
 		}
 		await this.refresh();
 		if (failed.length) { void vscode.window.showWarningMessage(`Limpeza parcial/bloqueada: ${failed.join(', ')}. Confira os dados restantes; a captura pode estar pausada para recuperação.`); }
@@ -757,6 +779,7 @@ export class ChangesController implements
 	}
 
 	private scheduleRefresh(): void {
+		if (this.disposed) { return; }
 		clearTimeout(this.refreshTimer);
 		this.refreshTimer = setTimeout(() => {
 			void this.refresh();
@@ -837,7 +860,8 @@ export class ChangesController implements
 		const hasFolder = (vscode.workspace.workspaceFolders ?? []).length > 0;
 		let description: string | undefined;
 		if (hasFolder) {
-			description = this.readOnlyReason() ? 'Somente leitura' : this.enabled ? 'Registrando' : 'Registro desligado';
+			const configured = [...this.captureHealthStates.values()].some((health) => health.configuration === 'configured');
+			description = this.readOnlyReason() ? 'Somente leitura' : configured ? 'Registro configurado' : 'Registro desligado ou indisponível';
 		}
 		this.view.description = description;
 		this.view.badge = pending > 0
@@ -848,7 +872,8 @@ export class ChangesController implements
 	/** Contextos que decidem quais botões aparecem no título da view Mudanças. */
 	private updateViewContexts(): void {
 		const readOnly = Boolean(this.readOnlyReason());
-		void vscode.commands.executeCommand('setContext', 'claudeCodeLauncher.changeLogEnabled', this.enabled);
+		const configured = [...this.captureHealthStates.values()].some((health) => health.configuration === 'configured');
+		void vscode.commands.executeCommand('setContext', 'claudeCodeLauncher.changeLogEnabled', configured);
 		void vscode.commands.executeCommand('setContext', 'claudeCodeLauncher.hasChangeHistory', this.entries.length > 0);
 		void vscode.commands.executeCommand('setContext', 'claudeCodeLauncher.canUndoReject', !readOnly && this.canUndoReject());
 		void vscode.commands.executeCommand('setContext', 'claudeCodeLauncher.reviewReadOnly', readOnly);
@@ -872,6 +897,10 @@ export class ChangesController implements
 			wide,
 			hasFolder: (vscode.workspace.workspaceFolders ?? []).length > 0,
 			enabled: this.enabled,
+			captureHealth: (vscode.workspace.workspaceFolders ?? []).flatMap((folder) => {
+				const health = this.captureHealthStates.get(folder.uri.toString());
+				return health ? [{ workspace: folder.index + 1, ...health }] : [];
+			}),
 			entries: history,
 			files: this.pendingGroups().map((list) => this.summaryOf(list)),
 			canUndo: this.canUndoReject(),
@@ -946,6 +975,7 @@ export class ChangesController implements
 	private async loadEntries(): Promise<RawEntry[]> {
 		const all: RawEntry[] = []; const folders = vscode.workspace.workspaceFolders ?? [];
 		const currentFolders = new Set(folders.filter((folder) => folder.uri.scheme === 'file').map((folder) => folder.uri.toString()));
+		for (const key of this.captureEvidence.keys()) { if (!currentFolders.has(key)) { this.captureEvidence.delete(key); this.captureHealthStates.delete(key); this.captureWarnings.delete(key); } }
 		for (const [key, store] of this.stores) { if (!currentFolders.has(key)) { await store.close(); this.stores.delete(key); } }
 		this.entryFolder.clear(); this.ordinals.clear(); this.resourceAliases.clear(); this.coverageMessage = null;
 		const collisions = new Set<string>(); const blobs = new Map<string, string>();
@@ -977,9 +1007,7 @@ export class ChangesController implements
 				this.entryFolder.set(entry.id, key); this.ordinals.set(entry.id, ordinal); all.push(entry);
 			}
 			this.applySavedMeta(await this.readState(vscode.Uri.joinPath(folder.uri, ...META_PATH)));
-			const capture = await safeReadText(nodePath.join(folder.uri.fsPath, ...LOG_DIR, CAPTURE_STATUS_FILE), folder.uri.fsPath, 64 * 1024);
-			this.captureWarnings.delete(key);
-			if (capture.kind === 'content') { try { const value = JSON.parse(capture.text.replace(/^\uFEFF/, '')); if (value?.schemaVersion === 1 && ['paused', 'quotaExceeded', 'invalidPolicy', 'storageUnavailable'].includes(value.state)) { this.captureWarnings.set(key, `Captura ${value.state}: revise a política e o armazenamento local.`); } else { this.captureWarnings.delete(key); } } catch { this.captureWarnings.set(key, 'Diagnóstico da captura incompatível.'); } }
+			await this.loadCaptureHealth(folder);
 
 			if (entries.length || await existsLocal(nodePath.join(folder.uri.fsPath, ...LOG_DIR, 'review-state.v1.json'))) {
 				try {
@@ -1275,6 +1303,26 @@ export class ChangesController implements
 		this.stateText.set(uri.toString(), text);
 	}
 
+
+	private async loadCaptureHealth(folder: vscode.WorkspaceFolder): Promise<void> {
+		const epoch = this.metaEpoch, key = folder.uri.toString();
+		const diagnostic = await readCaptureDiagnostics(nodePath.join(folder.uri.fsPath, ...LOG_DIR), folder.uri.fsPath);
+		const capability = await this.hookCapability();
+		const inspected = inspectHookConfiguration(await this.readSettings(folder), this.scriptPath(folder), this.knownHookPaths());
+		if (this.disposed || this.maintenance || epoch !== this.metaEpoch
+			|| !(vscode.workspace.workspaceFolders ?? []).some((current) => current.uri.toString() === key)) { return; }
+		const diagnostics = retainCaptureEvidence(this.captureEvidence.get(key), diagnostic);
+		this.captureEvidence.set(key, diagnostics);
+		const disabled = vscode.workspace.getConfiguration('claudeCodeLauncher').get<string>('hookExecutionMode', 'auto') === 'disabled';
+		const configuration: CaptureConfiguration = disabled ? 'disabled' : !inspected.valid ? 'unknown' : inspected.active ? 'configured' : 'notConfigured';
+		const health = captureHealth(configuration, capability, diagnostics);
+		this.captureHealthStates.set(key, health);
+		this.captureWarnings.delete(key);
+		const latest = diagnostics.latestObservation;
+		if (latest && !['capturePrepared', 'captureRecorded', 'excludedByPolicy'].includes(latest.code)) {
+			this.captureWarnings.set(key, health.observation?.guidance || 'Captura não confirmada; confira o diagnóstico local.');
+		}
+	}
 
 	private async hooksEnabled(): Promise<boolean> {
 		if (vscode.workspace.getConfiguration('claudeCodeLauncher').get<string>('hookExecutionMode', 'auto') === 'disabled') { return false; }

@@ -11,6 +11,17 @@ const MAX_FILE_BYTES = 512 * 1024;
 // Two valid 512 KiB Edit strings can expand past 1 MiB when serialized as JSON.
 const MAX_INPUT_BYTES = 8 * 1024 * 1024;
 const CAPTURE_MAINTENANCE_FILE = 'capture-maintenance.lock';
+const CAPTURE_DIAGNOSTICS_DIR = 'capture-diagnostics/v2';
+const MAX_DIAGNOSTIC_BYTES = 2048;
+const MAX_DIAGNOSTIC_FILES = 128;
+const RETAIN_DIAGNOSTIC_FILES = 32;
+const DIAGNOSTIC_STAGES = ['input', 'scope', 'policy', 'inventory', 'snapshot', 'pending', 'append', 'completion', 'maintenance'];
+const DIAGNOSTIC_CODES = [
+	'capturePrepared', 'captureRecorded', 'capturePaused', 'captureMaintenance', 'captureGenerationChanged',
+	'quotaExceeded', 'invalidPolicy', 'excludedByPolicy', 'resourceOutsideScope', 'inputBudgetExceeded',
+	'storagePermissionDenied', 'storageReadOnly', 'storageFull', 'storageInventoryBudget', 'unsafeStorageType',
+	'blobIntegrityFailed', 'pendingGenerationChanged', 'invalidPending', 'storageUnavailable',
+];
 const DEFAULT_EXCLUDED_PATTERNS = [
 	'**/.env', '**/.env.*', '**/*.pem', '**/*.key', '**/*.p12', '**/*.pfx',
 	'**/id_rsa', '**/id_ed25519', '**/credentials.json',
@@ -105,10 +116,10 @@ function storage(root, io = fs) {
 			return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(buffer.subarray(0, length));
 		} finally { if (fd !== undefined) { io.closeSync(fd); } }
 	}
-	function writeNew(file, text) {
+	function writeNew(file, text, durable = false) {
 		checked(file);
 		const fd = io.openSync(file, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), 0o600);
-		try { io.writeFileSync(fd, text, 'utf8'); }
+		try { io.writeFileSync(fd, text, 'utf8'); if (durable) { io.fsyncSync(fd); } }
 		finally { io.closeSync(fd); }
 	}
 	return { root: canonicalRoot, checked, directory, read, writeNew };
@@ -176,18 +187,89 @@ function maintenanceExists(store, dir, io) {
 	catch (error) { if (isMissing(error)) { return false; } throw error; }
 }
 
+function diagnosticTime(options) {
+	const candidate = options.now ? options.now() : Date.now();
+	const value = new Date(candidate);
+	return Number.isFinite(value.getTime()) && value.getTime() >= 0 ? value.toISOString() : new Date().toISOString();
+}
+function diagnosticErrorCode(error) {
+	if (error && ['EACCES', 'EPERM'].includes(error.code)) { return 'storagePermissionDenied'; }
+	if (error && error.code === 'EROFS') { return 'storageReadOnly'; }
+	if (error && ['ENOSPC', 'EDQUOT'].includes(error.code)) { return 'storageFull'; }
+	const known = { storageInventoryBudget: 'storageInventoryBudget', unsafeStorageType: 'unsafeStorageType',
+		blobIntegrityFailed: 'blobIntegrityFailed', pendingGenerationChanged: 'pendingGenerationChanged', invalidPending: 'invalidPending' };
+	return error && Object.hasOwn(known, error.message) ? known[error.message] : 'storageUnavailable';
+}
+function snapshotCoverage(snapshots) {
+	if (snapshots.every((snapshot) => snapshot === null)) { return 'unknown'; }
+	return snapshots.some((snapshot) => snapshot === null || snapshot.large
+		|| snapshot.exists && !/^[a-f0-9]{40}$/.test(snapshot.hash)) ? 'limited' : 'complete';
+}
+function diagnosticNames(directory, io) {
+	const directoryHandle = io.opendirSync(directory, { bufferSize: 16 });
+	const names = [];
+	try {
+		for (let index = 0; index <= MAX_DIAGNOSTIC_FILES; index += 1) {
+			const entry = directoryHandle.readSync();
+			if (entry === null) { return { names, complete: true }; }
+			if (index === MAX_DIAGNOSTIC_FILES) { return { names, complete: false }; }
+			names.push(entry.name);
+		}
+	} finally { directoryHandle.closeSync(); }
+}
+function diagnosticFilename(event) { return `${event.observedAt.replace(/[-:.]/g, '')}-${event.id}.json`; }
+function validDiagnostic(event, now) {
+	if (!plain(event) || Object.keys(event).length !== 8 || Object.keys(event).some((key) =>
+		!['schemaVersion', 'id', 'kind', 'phase', 'stage', 'code', 'contentCoverage', 'observedAt'].includes(key))) { return false; }
+	const time = typeof event.observedAt === 'string' ? Date.parse(event.observedAt) : NaN;
+	return event.schemaVersion === 2 && typeof event.id === 'string' && /^[a-f0-9]{32}$/.test(event.id) && ['observation', 'completion'].includes(event.kind)
+		&& ['pre', 'post'].includes(event.phase) && DIAGNOSTIC_STAGES.includes(event.stage) && DIAGNOSTIC_CODES.includes(event.code)
+		&& ['complete', 'limited', 'none', 'unknown'].includes(event.contentCoverage)
+		&& Number.isFinite(time) && time >= 0 && time <= now + 5 * 60 * 1000 && new Date(time).toISOString() === event.observedAt
+		&& (event.kind !== 'completion' || (event.phase === 'post' && event.stage === 'append' && event.code === 'captureRecorded'))
+		&& (event.code !== 'captureRecorded' || (event.phase === 'post' && event.stage === 'append'))
+		&& (event.code !== 'capturePrepared' || (event.phase === 'pre' && event.stage === 'pending'));
+}
+function pruneDiagnostics(own, directory, dir, io, now) {
+	if (maintenanceExists(own, dir, io)) { return; }
+	const inventory = diagnosticNames(directory, io);
+	if (!inventory.complete) { return; }
+	const names = inventory.names;
+	const valid = [];
+	for (const name of names) {
+		if (!/^\d{8}T\d{9}Z-[a-f0-9]{32}\.json$/.test(name)) { continue; }
+		try {
+			const event = JSON.parse(own.read(path.join(directory, name), MAX_DIAGNOSTIC_BYTES));
+			if (validDiagnostic(event, now) && diagnosticFilename(event) === name
+				&& event.kind === (path.basename(directory) === 'completions' ? 'completion' : 'observation')) { valid.push(name); }
+		} catch { /* Unknown evidence is never a deletion candidate. */ }
+	}
+	for (const name of valid.sort().reverse().slice(RETAIN_DIAGNOSTIC_FILES)) {
+		if (maintenanceExists(own, dir, io)) { return; }
+		const file = own.checked(path.join(directory, name));
+		// Revalidate before deletion; a replaced/unknown file is preserved.
+		try {
+			const event = JSON.parse(own.read(file, MAX_DIAGNOSTIC_BYTES));
+			if (validDiagnostic(event, now) && diagnosticFilename(event) === name
+				&& event.kind === (path.basename(directory) === 'completions' ? 'completion' : 'observation')) { io.unlinkSync(file); }
+		} catch { /* Preserve evidence if its identity is no longer known. */ }
+	}
+}
+
 function capture(phase, input, options = {}) {
 	if (!['pre', 'post'].includes(phase) || !plain(input) || !plain(input.tool_input)) { return { state: 'ignored' }; }
 	const io = options.fs || fs;
 	const env = options.env || process.env;
+	const diagnostic = options.diagnostic || {};
+	const stage = (value) => { diagnostic.stage = value; };
 	const rawFile = input.tool_input.file_path || input.tool_input.notebook_path;
 	const requestedRoot = env.CLAUDE_PROJECT_DIR || input.cwd || options.cwd || process.cwd();
 	if (!string(rawFile, 8192) || !string(requestedRoot, 8192)
 		|| !['Edit', 'Write', 'MultiEdit', 'NotebookEdit'].includes(input.tool_name)) { return { state: 'ignored' }; }
 	let store;
-	let activeFile;
 	let processing;
 	try {
+		stage('scope');
 		store = storage(requestedRoot, io);
 		const suppliedFile = path.isAbsolute(rawFile) ? rawFile : path.resolve(input.cwd || store.root, rawFile);
 		const lexicalRoot = path.resolve(requestedRoot);
@@ -206,14 +288,20 @@ function capture(phase, input, options = {}) {
 		const activeDir = path.join(dir, 'active'); store.directory(activeDir);
 		const lease = path.join(activeDir, `${process.pid}-${crypto.randomBytes(8).toString('hex')}.json`);
 		store.writeNew(lease, JSON.stringify({ schemaVersion: 1, operation: key, pid: process.pid }));
-		activeFile = lease;
+		// Keep one continuous producer lease through diagnostic publication and pruning.
+		diagnostic.releaseLease = () => { store.checked(lease); io.unlinkSync(lease); };
+		stage('maintenance');
 		if (maintenanceExists(store, dir, io)) { return { state: 'paused', code: 'captureMaintenance' }; }
+		stage('policy');
 		let policy = DEFAULT_POLICY;
 		try {
 			const parsed = JSON.parse(store.read(path.join(dir, 'capture-policy.json'), 64 * 1024).replace(/^\uFEFF/, ''));
 			if (!validatePolicy(parsed)) { return { state: 'blocked', code: 'invalidPolicy' }; }
 			policy = parsed;
-		} catch (error) { if (!isMissing(error)) { return { state: 'blocked', code: 'invalidPolicy' }; } }
+		} catch (error) { if (!isMissing(error)) {
+			const code = diagnosticErrorCode(error); if (code !== 'storageUnavailable') { diagnostic.code = code; }
+			return { state: 'blocked', code: 'invalidPolicy' };
+		} }
 		if (maintenanceExists(store, dir, io)) { return { state: 'paused', code: 'captureMaintenance' }; }
 		if (policy.paused) { return { state: 'paused', code: 'capturePaused' }; }
 		const relative = path.relative(store.root, absolute).replace(/\\/g, '/');
@@ -223,6 +311,7 @@ function capture(phase, input, options = {}) {
 		const ignore = path.join(dir, '.gitignore');
 		try { store.writeNew(ignore, '*\n'); }
 		catch (error) { if (!error || error.code !== 'EEXIST') { throw error; } }
+		stage('inventory');
 		if (storageBytes(dir, io) + 2 * MAX_FILE_BYTES + 16384 > policy.maxStorageBytes) {
 			return { state: 'paused', code: 'quotaExceeded' };
 		}
@@ -259,20 +348,27 @@ function capture(phase, input, options = {}) {
 			return { exists: true, text: null, large: false, hash };
 		}
 		if (phase === 'pre') {
+			stage('pending');
 			let previous;
 			try { previous = store.read(pendingFile, 4096); }
 			catch (error) { if (!isMissing(error)) { throw error; } }
 			if (previous !== undefined) { return { state: 'duplicate' }; }
+			stage('snapshot');
 			const before = snapshot(readSmall(absolute, io));
+			diagnostic.contentCoverage = snapshotCoverage([before]);
+			stage('pending');
 			store.writeNew(pendingFile, JSON.stringify({ before, schemaVersion: 1, generation: policy.generation }));
 			return { state: 'prepared' };
 		}
+		stage('pending');
 		processing = path.join(pendingDir, `${key}.post`);
 		try { store.writeNew(processing, '{}'); }
 		catch (error) { if (error && error.code === 'EEXIST') { processing = undefined; return { state: 'duplicate' }; } throw error; }
+		stage('snapshot');
 		const afterText = readSmall(absolute, io);
 		const after = snapshot(afterText);
 		let before;
+		stage('pending');
 		try {
 			const pending = JSON.parse(store.read(pendingFile, 4096));
 			if (!plain(pending) || pending.schemaVersion !== 1 || pending.generation !== policy.generation) { throw new Error('pendingGenerationChanged'); }
@@ -283,74 +379,111 @@ function capture(phase, input, options = {}) {
 			if (!isMissing(error)) { throw error; }
 			before = snapshot(rebuildBefore(input.tool_name, input.tool_input, afterText));
 		}
+		diagnostic.contentCoverage = snapshotCoverage([before, after]);
 		const entry = {
 			schemaVersion: 1, id: key, time: new Date().toISOString(), session: input.session_id || null,
 			tool: input.tool_name, file: absolute, before, after, reason: null,
 			transcript: string(input.transcript_path, 8192) ? input.transcript_path : null,
 			toolUseId: string(input.tool_use_id, 256) ? input.tool_use_id : null,
 		};
+		stage('policy');
 		try {
 			const latest = JSON.parse(store.read(path.join(dir, 'capture-policy.json'), 64 * 1024).replace(/^\uFEFF/, ''));
 			if (!validatePolicy(latest) || latest.paused || latest.generation !== policy.generation) { return { state: 'paused', code: 'captureGenerationChanged' }; }
 		} catch (error) { if (!isMissing(error) || policy.generation !== 'legacy-default') { throw error; } }
+		stage('maintenance');
 		if (maintenanceExists(store, dir, io)) { return { state: 'paused', code: 'captureMaintenance' }; }
+		stage('append');
 		const log = store.checked(path.join(dir, 'log.jsonl'));
 		const fd = io.openSync(log, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND
 			| (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0), 0o600);
 		try {
 			if (!io.fstatSync(fd).isFile()) { throw new Error('unsafeStorageType'); }
 			io.writeFileSync(fd, `${JSON.stringify(entry)}\n`, 'utf8');
+			io.fsyncSync(fd);
 		} finally { io.closeSync(fd); }
+		diagnostic.appendConfirmedAt = diagnosticTime(options);
+		stage('completion');
 		store.writeNew(completed, JSON.stringify({ id: key, time: entry.time }));
 		try { store.checked(pendingFile); io.unlinkSync(pendingFile); }
 		catch (error) { if (!isMissing(error)) { throw error; } }
 		return { state: 'recorded' };
-	} catch {
+	} catch (error) {
+		diagnostic.code = diagnosticErrorCode(error);
 		return { state: 'blocked', code: 'storageUnavailable' };
 	} finally {
-		for (const file of [processing, activeFile]) {
+		for (const file of [processing]) {
 			if (file && store) { try { store.checked(file); io.unlinkSync(file); } catch { /* Preserve unknown recovery. */ } }
 		}
 	}
 }
 
-function writeStatus(input, result, options) {
-	if (!plain(input) || !plain(input.tool_input) || ['ignored', 'duplicate', 'excluded'].includes(result.state)) { return; }
+function writeStatus(input, result, options, diagnostic = {}) {
+	if (!plain(input) || !plain(input.tool_input) || ['ignored', 'duplicate'].includes(result.state)) { return; }
 	const io = options.fs || fs;
 	const env = options.env || process.env;
 	const root = env.CLAUDE_PROJECT_DIR || input.cwd || options.cwd;
 	if (!string(root, 8192)) { return; }
 	let own;
 	let activeFile;
-	let temp;
+	const created = [];
 	try {
 		own = storage(root, io);
 		const dir = path.join(own.root, '.claude', 'launcher-changes');
 		own.directory(dir);
-		const activeDir = path.join(dir, 'active'); own.directory(activeDir);
-		const lease = path.join(activeDir, `${process.pid}-status-${crypto.randomBytes(8).toString('hex')}.json`);
-		own.writeNew(lease, JSON.stringify({ schemaVersion: 1, pid: process.pid, diagnostic: true }));
-		activeFile = lease;
+		if (!diagnostic.releaseLease) {
+			const activeDir = path.join(dir, 'active'); own.directory(activeDir);
+			const lease = path.join(activeDir, `${process.pid}-status-${crypto.randomBytes(8).toString('hex')}.json`);
+			own.writeNew(lease, JSON.stringify({ schemaVersion: 1, pid: process.pid, diagnostic: true }));
+			activeFile = lease;
+		}
 		if (maintenanceExists(own, dir, io)) { return; }
-		const file = own.checked(path.join(dir, 'capture-status.json'));
-		const candidate = path.join(dir, `.capture-status-${crypto.randomBytes(8).toString('hex')}.tmp`);
-		const state = result.code === 'quotaExceeded' ? 'quotaExceeded' : result.code === 'invalidPolicy' ? 'invalidPolicy'
-			: result.state === 'blocked' ? 'storageUnavailable' : result.state === 'paused' ? 'paused' : 'active';
-		own.writeNew(candidate, `${JSON.stringify({ schemaVersion: 1, state, code: result.code || 'captureReady', updatedAt: new Date().toISOString() })}\n`);
-		temp = candidate;
-		if (maintenanceExists(own, dir, io)) { return; }
-		io.renameSync(temp, file);
+		const phase = options.phase === 'post' ? 'post' : 'pre';
+		const code = diagnostic.code || result.code || (result.state === 'prepared' ? 'capturePrepared' : result.state === 'recorded' ? 'captureRecorded' : 'storageUnavailable');
+		const stages = { capturePrepared: 'pending', captureRecorded: 'append', captureMaintenance: 'maintenance',
+			capturePaused: 'policy', captureGenerationChanged: 'policy', quotaExceeded: 'inventory', invalidPolicy: 'policy',
+			excludedByPolicy: 'policy', resourceOutsideScope: 'scope', inputBudgetExceeded: 'input' };
+		const observation = { schemaVersion: 2, id: crypto.randomBytes(16).toString('hex'), kind: 'observation', phase,
+			stage: stages[code] || diagnostic.stage || 'input', code,
+			contentCoverage: diagnostic.contentCoverage || 'none', observedAt: diagnosticTime(options) };
+		const events = [];
+		if (diagnostic.appendConfirmedAt) {
+			events.push({ ...observation, id: crypto.randomBytes(16).toString('hex'), kind: 'completion', phase: 'post',
+				stage: 'append', code: 'captureRecorded', observedAt: diagnostic.appendConfirmedAt });
+		}
+		events.push(observation);
+		for (const event of events) {
+			if (!validDiagnostic(event, Date.now()) || maintenanceExists(own, dir, io)) { continue; }
+			const directory = path.join(dir, ...CAPTURE_DIAGNOSTICS_DIR.split('/'), event.kind === 'completion' ? 'completions' : 'observations');
+			own.directory(directory);
+			const inventory = diagnosticNames(directory, io);
+			if (!inventory.complete || inventory.names.length >= MAX_DIAGNOSTIC_FILES || maintenanceExists(own, dir, io)) { continue; }
+			const file = path.join(directory, diagnosticFilename(event));
+			own.writeNew(file, `${JSON.stringify(event)}\n`, true); created.push(file);
+			if (maintenanceExists(own, dir, io)) { return; }
+			pruneDiagnostics(own, directory, dir, io, Date.now());
+		}
 	} catch { /* Diagnostics must not turn an observation failure into an effect elsewhere. */ }
 	finally {
-		for (const file of [temp, activeFile]) {
+		if (own) {
+			try { const dir = path.join(own.root, '.claude', 'launcher-changes'); if (maintenanceExists(own, dir, io)) {
+				for (const file of created) { try { own.checked(file); io.unlinkSync(file); } catch { /* Only own created events may be removed. */ } }
+			} } catch { /* Preserve unknown evidence. */ }
+		}
+		for (const file of [activeFile]) {
 			if (file && own) { try { own.checked(file); io.unlinkSync(file); } catch { /* Never remove another producer's lease. */ } }
 		}
 	}
 }
 function run(phase, input, options = {}) {
-	const result = capture(phase, input, options);
-	writeStatus(input, result, options);
-	return result;
+	const diagnostic = { stage: 'input', contentCoverage: 'none' };
+	try {
+		const result = capture(phase, input, { ...options, diagnostic });
+		writeStatus(input, result, { ...options, phase }, diagnostic);
+		return result;
+	} finally {
+		if (diagnostic.releaseLease) { try { diagnostic.releaseLease(); } catch { /* Preserve unknown recovery. */ } }
+	}
 }
 function main() {
 	let raw = '';
@@ -366,11 +499,12 @@ function main() {
 		if (!exceeded) {
 			try { run(process.argv[2], JSON.parse(raw)); } catch { /* No private exception output. */ }
 		} else if (string(process.env.CLAUDE_PROJECT_DIR, 8192)) {
-			writeStatus({ tool_input: {} }, { state: 'blocked', code: 'inputBudgetExceeded' }, {});
+			writeStatus({ tool_input: {} }, { state: 'blocked', code: 'inputBudgetExceeded' }, { phase: process.argv[2] });
 		}
 		process.exitCode = 0;
 	});
 	process.stdin.on('error', () => { process.exitCode = 0; });
 }
-module.exports = { run, validatePolicy, excluded, storage, readSmall, storageBytes, rebuildBefore, DEFAULT_POLICY, MAX_FILE_BYTES, MAX_INPUT_BYTES, CAPTURE_MAINTENANCE_FILE };
+module.exports = { run, validatePolicy, excluded, storage, readSmall, storageBytes, rebuildBefore, DEFAULT_POLICY, MAX_FILE_BYTES, MAX_INPUT_BYTES,
+	CAPTURE_MAINTENANCE_FILE, CAPTURE_DIAGNOSTICS_DIR, DIAGNOSTIC_STAGES, DIAGNOSTIC_CODES };
 if (require.main === module) { main(); }

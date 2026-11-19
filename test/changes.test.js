@@ -15,7 +15,7 @@ const hooks = require('../out/hooks.js');
 /** Actual compiled controller, with only editor/IO boundaries replaced by explicit adapters. */
 function fixture(t, options = {}) {
 	const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'launcher-changes-')));
-	const warnings = [], messages = [], memento = new Map(), settings = new Map([
+	const warnings = [], messages = [], executedCommands = [], memento = new Map(), settings = new Map([
 		['claudeCodeLauncher.hookExecutionMode', options.mode || 'exec'],
 		['claudeCodeLauncher.historyRetentionDays', 30],
 	]);
@@ -34,11 +34,11 @@ function fixture(t, options = {}) {
 		dispose() { this.listeners = []; }
 	}
 	const folder = { uri: Uri.file(root), name: 'fixture', index: 0 };
-	const configurationHandlers = [], workspaceHandlers = [];
+	const configurationHandlers = [], workspaceHandlers = [], watchers = [];
 	const vscode = {
 		Uri, EventEmitter, StatusBarAlignment: { Right: 2 }, ThemeColor: class {},
-		commands: { executeCommand: async () => undefined },
-		extensions: { getExtension: () => undefined },
+		commands: { executeCommand: async (...args) => { executedCommands.push(args); return undefined; } },
+		extensions: { getExtension: () => options.extension },
 		window: {
 			createStatusBarItem: () => ({ show() {}, hide() {}, dispose() {} }),
 			showWarningMessage: async (message, ...args) => { warnings.push(message); return options.confirm === false ? undefined : args.find((arg) => typeof arg === 'string'); },
@@ -50,7 +50,11 @@ function fixture(t, options = {}) {
 			getWorkspaceFolder: (uri) => uri.fsPath === root || uri.fsPath.startsWith(root + path.sep) ? folder : undefined,
 			asRelativePath: (file) => path.relative(root, file),
 			getConfiguration: (section) => ({ get: (key, fallback) => settings.has(section + '.' + key) ? settings.get(section + '.' + key) : fallback }),
-			createFileSystemWatcher: () => ({ ...disposable(), onDidCreate: () => disposable(), onDidChange: () => disposable(), onDidDelete: () => disposable() }),
+			createFileSystemWatcher: (pattern) => {
+				const watcher = { pattern, created: [], changed: [], deleted: [] }; watchers.push(watcher);
+				return { ...disposable(), onDidCreate: (fn) => { watcher.created.push(fn); return disposable(); },
+					onDidChange: (fn) => { watcher.changed.push(fn); return disposable(); }, onDidDelete: (fn) => { watcher.deleted.push(fn); return disposable(); } };
+			},
 			onDidChangeWorkspaceFolders: (handler) => { workspaceHandlers.push(handler); return disposable(); },
 			onDidChangeConfiguration: (handler) => { configurationHandlers.push(handler); return disposable(); },
 		},
@@ -79,9 +83,9 @@ function fixture(t, options = {}) {
 		return sourceRequire(id);
 	}, module, module.exports);
 	class ControlledController extends module.exports.ChangesController {
-		scheduleRefresh() { /* Each test explicitly drives a refresh or a method. */ }
-		async refresh() { /* No autonomous IO outside this test's scenario. */ }
-		publish() { /* post() is exercised explicitly by the state tests. */ }
+		scheduleRefresh() { if (options.autoRefresh) { super.scheduleRefresh(); } }
+		async refresh() { if (options.autoRefresh) { return super.refresh(); } }
+		publish() { if (options.autoRefresh) { super.publish(); } }
 	}
 	const controller = new ControlledController(context);
 	const stores = new Set();
@@ -111,7 +115,7 @@ function fixture(t, options = {}) {
 		return plan.nextText;
 	}
 	return { root, dir, folder, controller, context, settings, warnings, messages, store, policy, configuredHooks,
-		workspaceHandlers, controllerHistory, Uri };
+		workspaceHandlers, configurationHandlers, watchers, controllerHistory, executedCommands, Uri };
 }
 
 function entry(root, id, name = id + '.txt', time = '2026-11-19T12:00:00.000Z') {
@@ -123,6 +127,21 @@ function writeLog(f, entries) {
 }
 function readLog(f) {
 	return fs.readFileSync(path.join(f.dir, 'log.jsonl'), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line));
+}
+let diagnosticNumber = 0;
+function writeDiagnostic(f, fields = {}) {
+	const value = { schemaVersion: 2, id: (++diagnosticNumber).toString(16).padStart(32, '0'), kind: 'observation',
+		phase: 'pre', stage: 'policy', code: 'capturePaused', contentCoverage: 'none',
+		observedAt: new Date().toISOString(), ...fields };
+	const directory = path.join(f.dir, ...history.CAPTURE_DIAGNOSTICS_DIR.split('/'), value.kind === 'completion' ? 'completions' : 'observations');
+	fs.mkdirSync(directory, { recursive: true });
+	fs.writeFileSync(path.join(directory, history.captureDiagnosticFilename(value)), JSON.stringify(value));
+	return value;
+}
+async function until(predicate, message) {
+	const deadline = Date.now() + 5000;
+	while (Date.now() < deadline) { if (predicate()) { return; } await new Promise((resolve) => setTimeout(resolve, 20)); }
+	assert.fail(message);
 }
 
 test('controller preflight blocks unknown capability before writing a policy or hook script', async (t) => {
@@ -293,18 +312,116 @@ test('retention removes only old reviewed records without undo, and log replacem
 test('capture quota is reflected in effective state, while active capture does not erase configuration warnings', async (t) => {
 	const f = fixture(t); f.configuredHooks(); f.policy(); writeLog(f, [entry(f.root, 'ordinary')]);
 	const key = f.folder.uri.toString(); f.controller.hookWarnings.set(key, 'configuration warning retained');
-	const status = path.join(f.dir, history.CAPTURE_STATUS_FILE);
-	fs.writeFileSync(status, JSON.stringify({ schemaVersion: 1, state: 'quotaExceeded', code: 'quotaExceeded' }));
+	writeDiagnostic(f, { stage: 'inventory', code: 'quotaExceeded' });
 	f.controller.entries = await f.controller.loadEntries();
 	assert.equal(await f.controller.hooksEnabled(), false);
 	const states = []; f.controller.post({ postMessage: async (state) => { states.push(state); } }, false);
-	assert.ok(states[0].coverageMessage.includes('quotaExceeded'));
+	assert.equal(states[0].captureHealth[0].observation.code, 'quotaExceeded');
+	assert.ok(states[0].coverageMessage.includes('Orçamento atingido'));
 	assert.ok(states[0].coverageMessage.includes('configuration warning retained'));
-	fs.writeFileSync(status, JSON.stringify({ schemaVersion: 1, state: 'active', code: 'captureReady' }));
+	writeDiagnostic(f, { phase: 'post', stage: 'append', code: 'captureRecorded', contentCoverage: 'complete' });
 	f.controller.entries = await f.controller.loadEntries();
 	assert.equal(f.controller.captureWarnings.has(key), false);
 	assert.equal(f.controller.hookWarnings.get(key), 'configuration warning retained');
 	assert.equal(await f.controller.hooksEnabled(), true);
+});
+
+test('configured hooks without an event do not publish a completed capture and unknown capability remains distinct', async (t) => {
+	const f = fixture(t); f.configuredHooks(); f.policy();
+	await f.controller.loadEntries();
+	const states = []; f.controller.post({ postMessage: async (state) => { states.push(state); } }, false);
+	assert.equal(states[0].captureHealth[0].configuration, 'configured');
+	assert.equal(states[0].captureHealth[0].completion, null);
+	assert.equal(states[0].captureHealth[0].observation, null);
+	f.settings.set('claudeCodeLauncher.hookExecutionMode', 'auto');
+	await f.controller.loadEntries();
+	states.length = 0; f.controller.post({ postMessage: async (state) => { states.push(state); } }, false);
+	assert.equal(states[0].captureHealth[0].capability, 'unknown');
+	assert.equal(states[0].captureHealth[0].configuration, 'configured');
+	assert.equal(states[0].captureHealth[0].completion, null);
+});
+
+test('native view title and menu context identify configuration without asserting observed capture', async (t) => {
+	const f = fixture(t); f.configuredHooks(); f.policy();
+	await f.controller.loadEntries();
+	f.controller.view = { webview: { postMessage: async () => undefined } };
+	f.controller.enabled = false;
+	f.controller.updateViewChrome(); f.controller.updateViewContexts();
+	assert.equal(f.controller.view.description, 'Registro configurado');
+	assert.equal(f.controller.captureHealthStates.get(f.folder.uri.toString()).completion, null);
+	assert.ok(f.executedCommands.some(([command, context, value]) => command === 'setContext'
+		&& context === 'claudeCodeLauncher.changeLogEnabled' && value === true));
+});
+
+test('diagnostic-only watcher events refresh the published state without appending a history record', async (t) => {
+	const f = fixture(t, { autoRefresh: true }); f.configuredHooks(); f.policy();
+	const states = []; f.controller.view = { webview: { postMessage: async (state) => { states.push(state); } } };
+	await until(() => states.length > 0, 'initial capture state did not publish');
+	const watcher = f.watchers.find((item) => item.pattern.includes('capture-diagnostics/v2'));
+	assert.ok(watcher && watcher.created.length && watcher.changed.length && watcher.deleted.length);
+	writeDiagnostic(f, { stage: 'snapshot', code: 'storagePermissionDenied', contentCoverage: 'unknown' });
+	watcher.created.forEach((handler) => handler());
+	await until(() => states.some((state) => state.captureHealth[0]?.observation?.code === 'storagePermissionDenied'), 'diagnostic-only update was not published');
+	assert.equal(fs.existsSync(path.join(f.dir, 'log.jsonl')), false);
+	assert.equal(states.at(-1).captureHealth[0].completion, null);
+});
+
+test('incompatible reloads retain prior completion and late diagnostic reads cannot repopulate a new epoch', async (t) => {
+	const f = fixture(t); f.configuredHooks(); f.policy();
+	const completed = writeDiagnostic(f, { kind: 'completion', phase: 'post', stage: 'append', code: 'captureRecorded', contentCoverage: 'complete' });
+	await f.controller.loadEntries();
+	const bucket = path.join(f.dir, ...history.CAPTURE_DIAGNOSTICS_DIR.split('/'), 'completions');
+	fs.writeFileSync(path.join(bucket, 'unknown.json'), JSON.stringify({ schemaVersion: 99, text: '/private/never-publish-this' }));
+	await f.controller.loadEntries();
+	let state; f.controller.post({ postMessage: async (value) => { state = value; } }, false);
+	assert.equal(state.captureHealth[0].completion.at, completed.observedAt);
+	assert.equal(state.captureHealth[0].partial, true);
+	assert.equal(JSON.stringify(state.captureHealth).includes('never-publish-this'), false);
+	let release, started;
+	const began = new Promise((resolve) => { started = resolve; });
+	f.controllerHistory.readCaptureDiagnostics = async () => { started(); return new Promise((resolve) => { release = resolve; }); };
+	const loading = f.controller.loadCaptureHealth(f.folder); await began;
+	f.controller.metaEpoch += 1; f.controller.captureEvidence.clear(); f.controller.captureHealthStates.clear();
+	release(history.projectCaptureDiagnostics([completed])); await loading;
+	assert.equal(f.controller.captureEvidence.size, 0);
+	assert.equal(f.controller.captureHealthStates.size, 0);
+});
+
+test('configuration and wrapper changes refresh capability without relying on hook or log writes', async (t) => {
+	const options = { autoRefresh: true, mode: 'auto' }; const f = fixture(t, options);
+	const extensionPath = path.join(f.root, 'official-fixture'); fs.mkdirSync(extensionPath);
+	fs.writeFileSync(path.join(extensionPath, 'claude-code-settings.schema.json'), JSON.stringify({ properties: {
+		hooks: { additionalProperties: { items: { properties: { hooks: { items: { anyOf: [{ properties: {
+			type: { const: 'command' }, command: { type: 'string' }, args: { type: 'array', items: { type: 'string' } },
+		} }] } } } } } },
+	} }));
+	options.extension = { extensionPath, packageJSON: { version: '2.1.326' } };
+	const states = []; f.controller.view = { webview: { postMessage: async (state) => { states.push(state); } } };
+	await until(() => states.at(-1)?.captureHealth[0]?.capability === 'confirmed', 'installed schema capability did not publish');
+	f.settings.set('claudeCodeLauncher.hookExecutionMode', 'disabled');
+	f.configurationHandlers.forEach((handler) => handler({ affectsConfiguration: (name) => name === 'claudeCodeLauncher' }));
+	await until(() => states.at(-1)?.captureHealth[0]?.capability === 'unsupported', 'configuration-only change did not refresh');
+	f.settings.set('claudeCodeLauncher.hookExecutionMode', 'auto');
+	f.settings.set('claudeCode.claudeProcessWrapper', '/private/fixture-wrapper');
+	f.configurationHandlers.forEach((handler) => handler({ affectsConfiguration: (name) => name === 'claudeCode.claudeProcessWrapper' }));
+	await until(() => states.at(-1)?.captureHealth[0]?.capability === 'unknown', 'wrapper-only change did not refresh');
+	assert.equal(JSON.stringify(states.at(-1).captureHealth).includes('fixture-wrapper'), false);
+	assert.equal(fs.existsSync(path.join(f.dir, 'log.jsonl')), false);
+	assert.equal(fs.existsSync(path.join(f.root, '.claude', 'settings.local.json')), false);
+});
+
+test('blocked purge preserves dated capture evidence for the root whose data could not be removed', async (t) => {
+	const f = fixture(t); f.configuredHooks(); f.policy(); const store = await f.store();
+	const completed = writeDiagnostic(f, { kind: 'completion', phase: 'post', stage: 'append', code: 'captureRecorded', contentCoverage: 'complete' });
+	await f.controller.loadEntries(); await store.close();
+	await f.controller.clearAllReviewData();
+	assert.equal(f.controller.captureEvidence.get(f.folder.uri.toString()).lastCompletion.observedAt, completed.observedAt);
+	f.controllerHistory.readCaptureDiagnostics = async () => history.projectCaptureDiagnostics([], ['readUnavailable']);
+	await f.controller.loadCaptureHealth(f.folder);
+	let state; f.controller.post({ postMessage: async (value) => { state = value; } }, false);
+	assert.equal(state.captureHealth[0].completion.at, completed.observedAt);
+	assert.equal(state.captureHealth[0].partial, true);
+	assert.ok(f.warnings.some((message) => message.includes('Limpeza parcial/bloqueada')));
 });
 
 test('dispose retains writer ownership until the registered maintenance completes', async (t) => {
