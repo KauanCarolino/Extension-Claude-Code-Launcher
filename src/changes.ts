@@ -156,6 +156,7 @@ export class ChangesController implements
 	private readonly activeOperations = new Set<Promise<unknown>>();
 	private readonly hookWarnings = new Map<string, string>();
 	private readonly resourceAliases = new Map<string, string>();
+	private readonly ambiguousResources = new Set<string>();
 	private refreshing: Promise<void> | undefined;
 	private refreshAgain = false;
 	/** Diff e textos de cada edição (a edição não muda depois de gravada). */
@@ -262,14 +263,14 @@ export class ChangesController implements
 	}
 
 	getSharedReview(file: string): SharedReview | undefined {
-		file = this.resourceKey(file);
-		const review = this.sharedReviews.get(file);
+		const key = this.resourceKey(file);
+		const review = this.sharedReviews.get(key ?? this.resourceAliases.get(file) ?? file);
 		return review && copyReview(review);
 	}
 
 	async executeReviewDecision(file: string, request: ReviewDecisionRequest, batchId?: string): Promise<void> {
 		if (this.disposed || this.maintenance) { throw new ReviewError('maintenanceInProgress'); }
-		file = this.resourceKey(file);
+		const key = this.resourceKey(file); if (key === undefined) { throw new ReviewError('ambiguousContext'); } file = key;
 		const store = this.fileStores.get(file);
 		if (!store) { throw new ReviewError('reviewUnavailable'); }
 		try {
@@ -286,7 +287,8 @@ export class ChangesController implements
 	}
 
 	async compareReview(file: string): Promise<void> {
-		file = this.resourceKey(file); if (!(await this.canOpenResource(file))) { throw new ReviewError('resourceOutsideScope'); }
+		const resource = this.resourceKey(file); if (resource === undefined) { throw new ReviewError('ambiguousContext'); } file = resource;
+		if (!(await this.canOpenResource(file))) { throw new ReviewError('resourceOutsideScope'); }
 		const review = this.getSharedReview(file);
 		if (!review || review.base.kind === 'unavailable') { throw new ReviewError('unknownSnapshot'); }
 		const key = crypto.randomUUID() as string;
@@ -295,13 +297,16 @@ export class ChangesController implements
 		await vscode.commands.executeCommand('vscode.diff', vscode.Uri.from({ scheme: SCHEME, path: `/review/${key}` }), vscode.Uri.file(file), `${basename(file)} (revisão pendente ↔ arquivo atual)`, { preview: true });
 	}
 
-	private resourceKey(file: string): string {
-		const known = this.resourceAliases.get(file); if (known) { return known; }
+	private resourceKey(file: string): string | undefined {
+		if (this.ambiguousResources.has(file)) { return undefined; }
+		const known = this.resourceAliases.get(file); if (known) { return this.ambiguousResources.has(known) ? undefined : known; }
 		for (const folder of vscode.workspace.workspaceFolders ?? []) {
 			const store = this.stores.get(folder.uri.toString()); if (!store || folder.uri.scheme !== 'file') { continue; }
 			const relative = nodePath.relative(folder.uri.fsPath, file);
 			if (relative !== '..' && !relative.startsWith('..' + nodePath.sep) && !nodePath.isAbsolute(relative)) {
-				const candidate = nodePath.join(store.root, relative); if (this.sharedReviews.has(candidate)) { return candidate; }
+				const candidate = nodePath.join(store.root, relative);
+				if (this.ambiguousResources.has(candidate)) { return undefined; }
+				if (this.sharedReviews.has(candidate)) { return candidate; }
 			}
 		}
 		return file;
@@ -317,16 +322,33 @@ export class ChangesController implements
 	private readonly comparisonTexts = new Map<string, string>();
 
 	private synchronizeViews(): void {
-		this.sharedReviews.clear(); this.fileStores.clear(); this.status.clear();
+		this.sharedReviews.clear(); this.fileStores.clear(); this.status.clear(); this.ambiguousResources.clear();
 		for (const store of this.stores.values()) {
 			const state = store.get();
 			for (const [id, status] of Object.entries(state.statuses)) { this.status.set(id, status); }
 			for (const file of Object.keys(state.reviews)) {
 				const review = activeReview(state, file);
 				if (!review) { continue; }
-				if (this.fileStores.has(file)) { this.sharedReviews.set(file, { ...review, phase: 'blocked', blockReason: 'ambiguousContext' }); this.fileStores.delete(file); continue; }
+				if (this.fileStores.has(file) || this.ambiguousResources.has(file)) { this.ambiguousResources.add(file); this.sharedReviews.set(file, { ...review, phase: 'blocked', blockReason: 'ambiguousContext' }); this.fileStores.delete(file); continue; }
 				this.fileStores.set(file, store);
 				this.sharedReviews.set(file, store.writable ? review : { ...review, phase: 'blocked', blockReason: store.blockReason || 'readOnlyOwner' });
+			}
+		}
+		// URI.fsPath is the editor's spelling (notably the Windows drive letter).
+		// Keep persisted keys/context untouched and never fold directory/file case.
+		const aliases = new Map<string, Set<string>>();
+		for (const file of this.sharedReviews.keys()) {
+			const alias = vscode.Uri.file(file).fsPath;
+			const candidates = aliases.get(alias) ?? new Set<string>(); candidates.add(file);
+			const prior = this.resourceAliases.get(alias); if (prior && prior !== file && this.sharedReviews.has(prior)) { candidates.add(prior); }
+			aliases.set(alias, candidates);
+		}
+		for (const [alias, candidates] of aliases) {
+			if (candidates.size === 1) { this.resourceAliases.set(alias, candidates.values().next().value!); continue; }
+			this.ambiguousResources.add(alias); this.resourceAliases.delete(alias);
+			for (const file of candidates) {
+				this.ambiguousResources.add(file); this.fileStores.delete(file);
+				const review = this.sharedReviews.get(file); if (review) { this.sharedReviews.set(file, { ...review, phase: 'blocked', blockReason: 'ambiguousContext' }); }
 			}
 		}
 	}
@@ -998,6 +1020,7 @@ export class ChangesController implements
 				const canonical = await canonicalResource(raw.file, folder.uri.fsPath);
 				if (!canonical) { this.coverageMessage = 'Recursos fora das raízes autorizadas permanecem somente leitura.'; continue; }
 				this.resourceAliases.set(raw.file, canonical);
+				this.resourceAliases.set(vscode.Uri.file(canonical).fsPath, canonical);
 				entries.push({ ...raw, file: canonical, before: raw.before && { ...raw.before }, after: raw.after && { ...raw.after } });
 			}
 			await this.resolveBlobs(folder.uri, entries, blobs);

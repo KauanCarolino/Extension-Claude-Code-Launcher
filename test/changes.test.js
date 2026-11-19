@@ -7,10 +7,11 @@ const os = require('node:os');
 const path = require('node:path');
 const vm = require('node:vm');
 const { createRequire } = require('node:module');
-const { ReviewStore } = require('../out/review-store.js');
-const { ingestEntries } = require('../out/review.js');
-const history = require('../out/history.js');
-const hooks = require('../out/hooks.js');
+const OUT = process.env.LAUNCHER_TEST_OUT || path.resolve(__dirname, '../out');
+const { ReviewStore } = require(path.join(OUT, 'review-store.js'));
+const { ingestEntries } = require(path.join(OUT, 'review.js'));
+const history = require(path.join(OUT, 'history.js'));
+const hooks = require(path.join(OUT, 'hooks.js'));
 
 /** Actual compiled controller, with only editor/IO boundaries replaced by explicit adapters. */
 function fixture(t, options = {}) {
@@ -23,7 +24,7 @@ function fixture(t, options = {}) {
 	class Uri {
 		constructor(file, scheme = 'file') { this.fsPath = file; this.path = file; this.scheme = scheme; }
 		toString() { return this.scheme + '://' + this.fsPath; }
-		static file(file) { return new Uri(path.resolve(file)); }
+		static file(file) { return new Uri(options.uriFilePath ? options.uriFilePath(file) : path.resolve(file)); }
 		static joinPath(base, ...parts) { return new Uri(path.join(base.fsPath, ...parts), base.scheme); }
 		static from(value) { return new Uri(value.path, value.scheme); }
 	}
@@ -69,7 +70,7 @@ function fixture(t, options = {}) {
 			},
 		},
 	};
-	const source = path.resolve(__dirname, '../out/changes.js');
+	const source = path.join(OUT, 'changes.js');
 	const sourceRequire = createRequire(source);
 	const sessionModule = sourceRequire('./sessions');
 	const module = { exports: {} };
@@ -80,6 +81,7 @@ function fixture(t, options = {}) {
 		if (id === './history') { return controllerHistory; }
 		if (id === './sessions') { return { ...sessionModule, sessionsDir: () => path.join(root, 'sessions'), ...(options.sessions || {}) }; }
 		if (id === 'node:fs' && options.nodeFs) { return options.nodeFs; }
+		if (id === 'node:path' && options.nodePath) { return options.nodePath; }
 		return sourceRequire(id);
 	}, module, module.exports);
 	class ControlledController extends module.exports.ChangesController {
@@ -143,6 +145,90 @@ async function until(predicate, message) {
 	while (Date.now() < deadline) { if (predicate()) { return; } await new Promise((resolve) => setTimeout(resolve, 20)); }
 	assert.fail(message);
 }
+
+function windowsProjection(t) {
+	const root = String.raw`d:\Fixture\workspace`;
+	const uriFilePath = file => /^[A-Za-z]:[\\/]/.test(file) ? file.replace(/^[A-Z]:/, drive => drive.toLowerCase()) : path.resolve(file);
+	const f = fixture(t, { nodePath: path.win32, uriFilePath });
+	f.folder.uri = new f.Uri(root);
+	return { ...f, windowsRoot: root };
+}
+/** Pure store boundary; decisions still execute the real reversal module. */
+function projectedStore(root, file, id = 'windows-entry') {
+	const state = { schemaVersion: 1, generation: 0, contextId: root, reviews: {}, statuses: {}, operations: {}, undo: [],
+		legacyProjection: { phase: 'complete', observedHash: null, targetHash: null, targetGeneration: 0 } };
+	ingestEntries(state, [{ id, time: '2026-11-19T12:00:00.000Z', file,
+		before: { exists: true, large: false, text: 'before\r\n' }, after: { exists: true, large: false, text: 'after\r\n' } }]);
+	return { root, writable: true, get: () => structuredClone(state), update: async mutate => { mutate(state); state.generation += 1; }, close: async () => {}, state };
+}
+
+test('Windows URI drive aliases resolve persisted reviews without new entries and dispatch the canonical decision', async t => {
+	const f = windowsProjection(t), canonical = String.raw`D:\Fixture\workspace\crlf.txt`, document = String.raw`d:\Fixture\workspace\crlf.txt`;
+	const store = projectedStore(f.windowsRoot, canonical);
+	f.controller.stores.set(f.folder.uri.toString(), store);
+	f.controller.synchronizeViews();
+	assert.deepEqual(f.controller.getEntries(), [], 'the alias is also rebuilt for persisted state without a new log entry');
+	assert.equal(f.controller.getSharedReview(document).file, canonical);
+	assert.equal(f.controller.getSharedReview(document).phase, 'pending');
+	let content = { kind: 'text', text: 'after\r\n' }; const writes = [];
+	f.controller.resourceAdapter = () => ({ read: async file => { assert.equal(file, canonical); return content; },
+		readPersisted: async file => { assert.equal(file, canonical); return content; },
+		write: async (file, target) => { writes.push(file); content = target; } });
+	await f.controller.executeReviewDecision(document, { action: 'reject', revision: 1 });
+	assert.deepEqual(writes, [canonical]);
+	assert.equal(content.text, 'before\r\n');
+	assert.equal(store.state.statuses['windows-entry'], 'rejected');
+	assert.equal(store.state.contextId, f.windowsRoot);
+	assert.deepEqual(Object.keys(store.state.reviews), [canonical]);
+});
+
+test('Windows URI aliases preserve directory and filename case and reject unrelated resources', async t => {
+	const f = windowsProjection(t), upper = String.raw`D:\Fixture\workspace\Case\File.txt`, lower = String.raw`D:\Fixture\workspace\case\file.txt`;
+	const store = projectedStore(f.windowsRoot, upper, 'upper');
+	const other = projectedStore(f.windowsRoot, lower, 'lower');
+	store.state.reviews[lower] = other.state.reviews[lower];
+	f.controller.stores.set(f.folder.uri.toString(), store); f.controller.synchronizeViews();
+	assert.equal(f.controller.getSharedReview(String.raw`d:\Fixture\workspace\Case\File.txt`).firstId, 'upper');
+	assert.equal(f.controller.getSharedReview(String.raw`d:\Fixture\workspace\case\file.txt`).firstId, 'lower');
+	let effects = 0; f.controller.resourceAdapter = () => { effects += 1; throw new Error('unrelated resource must not reach the executor'); };
+	for (const file of [String.raw`d:\Fixture\workspace\Case\file.txt`, String.raw`E:\Fixture\workspace\Case\File.txt`, String.raw`D:\Fixture\workspace-other\Case\File.txt`]) {
+		assert.equal(f.controller.getSharedReview(file), undefined);
+		await assert.rejects(f.controller.executeReviewDecision(file, { action: 'reject' }), /reviewUnavailable/);
+	}
+	assert.equal(effects, 0);
+});
+
+test('ambiguous URI aliases and two or three owners stay blocked and a removed conflict is recomputed', async t => {
+	const f = windowsProjection(t), canonical = String.raw`D:\Fixture\workspace\crlf.txt`, document = String.raw`d:\Fixture\workspace\crlf.txt`;
+	let effects = 0; f.controller.resourceAdapter = () => { effects += 1; throw new Error('ambiguous review must not reach the executor'); };
+	for (const count of [2, 3]) {
+		f.controller.stores.clear();
+		for (let index = 0; index < count; index += 1) { f.controller.stores.set('context-' + index, projectedStore(f.windowsRoot, canonical, 'entry-' + index)); }
+		f.controller.synchronizeViews();
+		assert.equal(f.controller.getSharedReview(canonical).blockReason, 'ambiguousContext');
+		assert.equal(f.controller.getSharedReview(document).phase, 'blocked');
+		assert.equal(f.controller.fileStores.has(canonical), false);
+		await assert.rejects(f.controller.executeReviewDecision(document, { action: 'reject' }), /ambiguousContext/);
+	}
+	f.controller.stores.clear();
+	f.controller.stores.set('upper-context', projectedStore(f.windowsRoot, canonical, 'upper'));
+	f.controller.stores.set('lower-context', projectedStore(f.windowsRoot, document, 'lower'));
+	f.controller.synchronizeViews();
+	for (const file of [canonical, document]) {
+		assert.equal(f.controller.getSharedReview(file).blockReason, 'ambiguousContext');
+		assert.equal(f.controller.fileStores.has(file), false);
+		await assert.rejects(f.controller.executeReviewDecision(file, { action: 'reject' }), /ambiguousContext/);
+	}
+	assert.equal(effects, 0);
+	f.controller.stores.delete('lower-context'); f.controller.synchronizeViews();
+	assert.equal(f.controller.getSharedReview(document).phase, 'pending');
+	assert.equal(f.controller.fileStores.has(canonical), true);
+	// A prior alias whose review left the projection must not keep a false conflict alive.
+	f.controller.stores.clear(); f.controller.stores.set('lower-context', projectedStore(f.windowsRoot, document, 'only-lower'));
+	f.controller.synchronizeViews();
+	assert.equal(f.controller.getSharedReview(document).firstId, 'only-lower');
+	assert.equal(f.controller.getSharedReview(document).phase, 'pending');
+});
 
 test('controller preflight blocks unknown capability before writing a policy or hook script', async (t) => {
 	const f = fixture(t, { mode: 'auto' });
