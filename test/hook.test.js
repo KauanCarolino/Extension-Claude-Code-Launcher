@@ -188,13 +188,73 @@ test('permission errors are unknown, confirmed absence is separate, and special-
 
 test('simulated storage-link metadata is rejected before any file open or write', () => {
 	let opens = 0;
-	const own = hook.storage('/virtual', {
+	const root = path.resolve(path.sep, 'virtual');
+	const linked = path.join(root, '.claude');
+	const own = hook.storage(root, {
 		realpathSync: (file) => file,
-		lstatSync: (file) => ({ isSymbolicLink: () => file === '/virtual/.claude', isDirectory: () => true, isFile: () => false }),
+		lstatSync: (file) => ({ isSymbolicLink: () => file === linked, isDirectory: () => true, isFile: () => false }),
 		openSync: () => { opens += 1; },
 	});
-	assert.throws(() => own.read('/virtual/.claude/log.jsonl', 100), /unsafeStorageType/);
+	assert.throws(() => own.read(path.join(linked, 'log.jsonl'), 100), /unsafeStorageType/);
 	assert.equal(opens, 0);
+});
+
+test('snapshot timestamp refresh uses portable write access without destructive flags or content changes', () => {
+	const root = project();
+	const file = path.join(root, 'ordinary.txt');
+	const content = 'ordinary content\r\n';
+	fs.writeFileSync(file, content);
+	const descriptors = new Map();
+	const refreshed = [];
+	const io = {
+		...fs,
+		openSync(file, flags, mode) {
+			const fd = fs.openSync(file, flags, mode);
+			descriptors.set(fd, { file, flags });
+			return fd;
+		},
+		closeSync(fd) { descriptors.delete(fd); return fs.closeSync(fd); },
+		futimesSync(fd, atime, mtime) {
+			const opened = descriptors.get(fd);
+			assert.ok(opened);
+			assert.equal(path.dirname(opened.file), fs.realpathSync(path.join(changesDir(root), 'blobs')));
+			// Model the Windows requirement: a read-only handle cannot update attributes.
+			if ((opened.flags & fs.constants.O_RDWR) !== fs.constants.O_RDWR) {
+				throw Object.assign(new Error('write access required for timestamp refresh'), { code: 'EPERM' });
+			}
+			assert.equal(opened.flags & (fs.constants.O_CREAT | fs.constants.O_TRUNC | fs.constants.O_APPEND), 0);
+			if (fs.constants.O_NOFOLLOW) { assert.notEqual(opened.flags & fs.constants.O_NOFOLLOW, 0); }
+			assert.equal(fs.readFileSync(opened.file, 'utf8'), content);
+			refreshed.push(opened.file);
+			return fs.futimesSync(fd, atime, mtime);
+		},
+	};
+	const input = edit(root, file, 'portable-timestamps');
+	const options = { fs: io, env: { CLAUDE_PROJECT_DIR: root } };
+	assert.equal(hook.run('pre', input, options).state, 'prepared');
+	assert.equal(hook.run('post', input, options).state, 'recorded');
+	assert.equal(refreshed.length, 2, 'new and reused snapshots both refresh the existing blob');
+	assert.equal(refreshed[0], refreshed[1]);
+	const [entry] = readLog(root);
+	assert.equal(blob(root, entry.before.hash), content);
+	assert.equal(blob(root, entry.after.hash), content);
+});
+
+test('timestamp refresh errors keep capture blocked instead of recording an unrefreshed snapshot', () => {
+	const root = project();
+	const file = path.join(root, 'ordinary.txt');
+	fs.writeFileSync(file, 'ordinary content');
+	let refreshes = 0;
+	const io = {
+		...fs,
+		futimesSync() { refreshes += 1; throw Object.assign(new Error('fixture access denied'), { code: 'EACCES' }); },
+	};
+	assert.deepEqual(hook.run('pre', edit(root, file, 'denied-timestamps'), { fs: io, env: { CLAUDE_PROJECT_DIR: root } }),
+		{ state: 'blocked', code: 'storageUnavailable' });
+	assert.equal(refreshes, 1);
+	assert.equal(fs.existsSync(path.join(changesDir(root), 'log.jsonl')), false);
+	assert.deepEqual(fs.readdirSync(path.join(changesDir(root), 'pending')), []);
+	assert.deepEqual(fs.readdirSync(path.join(changesDir(root), 'active')), []);
 });
 
 test('fallback does not invent a before for an ambiguous or empty replacement', () => {

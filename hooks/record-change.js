@@ -249,7 +249,8 @@ function capture(phase, input, options = {}) {
 			let fd;
 			try {
 				store.checked(file);
-				fd = io.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+				// Windows requires write access on the existing handle to update file times.
+				fd = io.openSync(file, fs.constants.O_RDWR | (fs.constants.O_NOFOLLOW || 0));
 				if (!io.fstatSync(fd).isFile()) { throw new Error('unsafeStorageType'); }
 				const now = new Date(); io.futimesSync(fd, now, now);
 			} finally { if (fd !== undefined) { io.closeSync(fd); } }

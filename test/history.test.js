@@ -90,11 +90,15 @@ function virtualPaths(linkAt, denialAt) {
 	};
 }
 test('resource and storage policies evaluate simulated scope and links without external effects', async () => {
-	assert.equal((await h.assessResourceScope('/other/a.txt', '/workspace', virtualPaths())).allowed, false);
-	assert.equal((await h.assessResourceScope('/workspace/a.txt', '/workspace', virtualPaths())).allowed, true);
-	assert.equal((await h.assessResourceScope('/workspace/a.txt', '/workspace', virtualPaths(undefined, '/workspace'))).allowed, false);
-	assert.equal((await h.assessStoragePath('/workspace/data/a.txt', '/workspace', virtualPaths('/workspace/data'))).code, 'unsafeStorageType');
-	assert.equal((await h.assessStoragePath('/workspace/data/a.txt', '/workspace', virtualPaths())).allowed, true);
+	const root = path.resolve(path.sep, 'workspace');
+	const file = path.join(root, 'a.txt');
+	const data = path.join(root, 'data');
+	const stored = path.join(data, 'a.txt');
+	assert.equal((await h.assessResourceScope(path.resolve(path.sep, 'other', 'a.txt'), root, virtualPaths())).allowed, false);
+	assert.equal((await h.assessResourceScope(file, root, virtualPaths())).allowed, true);
+	assert.equal((await h.assessResourceScope(file, root, virtualPaths(undefined, root))).allowed, false);
+	assert.equal((await h.assessStoragePath(stored, root, virtualPaths(data))).code, 'unsafeStorageType');
+	assert.equal((await h.assessStoragePath(stored, root, virtualPaths())).allowed, true);
 });
 
 test('blob digest mismatch never resolves a snapshot reference', () => {
