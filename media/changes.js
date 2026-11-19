@@ -17,6 +17,10 @@
 	let layout = saved.layout === 'split' ? 'split' : 'unified';
 	let firstRender = !saved.openCards;
 	let lastState = null;
+	/** Outra janela é a dona da revisão (ou o estado não abriu): nada que mude a revisão funciona. */
+	let readOnly = false;
+	const MUTATIONS = new Set(['enable', 'disable', 'clear', 'purge', 'clearAllReviewData',
+		'acceptAll', 'rejectAll', 'acceptFile', 'rejectFile', 'rejectRequest', 'undoReject']);
 
 	window.addEventListener('message', (event) => {
 		if (event.data && event.data.type === 'state') {
@@ -87,6 +91,9 @@
 		if (options.pressed !== undefined) {
 			node.setAttribute('aria-pressed', String(options.pressed));
 		}
+		if (options.disabled || (readOnly && MUTATIONS.has(options.command))) {
+			node.disabled = true;
+		}
 		node.addEventListener('click', (event) => {
 			event.preventDefault();
 			event.stopPropagation();
@@ -108,6 +115,10 @@
 	// ---- Render ----------------------------------------------------------------------
 
 	function render(state) {
+		if (!Array.isArray(state.entries)) {
+			return;
+		}
+		readOnly = Boolean(state.readOnlyReason) || state.readOnly === true;
 		const scroll = window.scrollY;
 		const focus = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.focusKey : null;
 
@@ -118,6 +129,7 @@
 		if (state.wide) {
 			root.append(renderToolbar(state));
 		}
+		renderNotices(state);
 
 		if (!state.hasFolder) {
 			root.append(emptyState('folder-opened', 'Nenhuma pasta aberta', 'Abra uma pasta de projeto para registrar as mudanças do Claude.'));
@@ -134,13 +146,44 @@
 		}
 	}
 
+	/** Avisos da extensão: revisão só para leitura, cobertura parcial e captura. */
+	function renderNotices(state) {
+		if (state.readOnlyReason) {
+			const recover = state.wide ? null : button({
+				className: 'btn-secondary btn-sm',
+				icon: 'unlock',
+				label: 'Recuperar acesso…',
+				command: 'recoverWriter',
+				focusKey: 'recover',
+			});
+			root.append(banner('lock', 'Revisão só para leitura: ' + state.readOnlyReason, 'warning', recover));
+		}
+		for (const message of [state.coverageMessage, state.captureMessage]) {
+			if (message) {
+				root.append(banner('warning', message, 'warning'));
+			}
+		}
+	}
+
+	function banner(name, text, kind, action) {
+		const box = el('div', 'banner ' + (kind || ''));
+		box.append(icon(name));
+		const body = el('div', 'banner-body');
+		body.append(el('p', null, text));
+		if (action) {
+			body.append(action);
+		}
+		box.append(body);
+		return box;
+	}
+
 	function renderContent(state) {
 		if (!state.enabled) {
 			root.append(renderIntro());
 		}
 		if (state.files && state.files.length > 0) {
 			root.append(renderFiles(state));
-		} else if (state.entries.length > 0) {
+		} else if (state.entries.length > 0 && !state.coverageMessage && !readOnly) {
 			const done = el('p', 'all-reviewed');
 			done.append(icon('pass'), el('span', null, 'Nada para revisar'));
 			done.title = 'Todas as mudanças do Claude já foram aceitas ou recusadas';
@@ -207,6 +250,9 @@
 		if (entry.reason) {
 			tooltip.push('', 'Claude: ' + entry.reason);
 		}
+		if (entry.blockedReason) {
+			tooltip.push('', entry.blockedReason);
+		}
 		tooltip.push('', entry.canCompare ? 'Clique para ver no código' : 'Clique para abrir o arquivo');
 		const main = button({
 			className: 'entry-main',
@@ -222,6 +268,9 @@
 		} else if (entry.status === 'rejected') {
 			marker.append(icon('discard'));
 			marker.title = 'Recusada';
+		} else if (entry.status === 'mixed') {
+			marker.append(icon('pass'));
+			marker.title = 'Revisada: partes aceitas e recusadas';
 		} else {
 			marker.append(el('span', 'pending-dot'));
 			marker.title = 'Para revisar';
@@ -299,7 +348,15 @@
 		}
 		actions.append(button({ className: 'icon-btn', icon: 'refresh', command: 'refresh', title: 'Atualizar', ariaLabel: 'Atualizar', focusKey: 'refresh' }));
 		if (state.entries.length > 0) {
-			actions.append(button({ className: 'icon-btn', icon: 'trash', command: 'clear', title: 'Limpar o histórico', ariaLabel: 'Limpar o histórico', focusKey: 'clear' }));
+			actions.append(button({ className: 'icon-btn', icon: 'trash', command: 'clear', title: 'Limpar histórico revisado (as pendências ficam)', ariaLabel: 'Limpar histórico revisado', focusKey: 'clear' }));
+		}
+		if (state.hasFolder) {
+			actions.append(button({ className: 'icon-btn', icon: 'clear-all', command: 'clearAllReviewData', title: 'Limpeza completa: apaga todos os dados locais de revisão…', ariaLabel: 'Limpeza completa', focusKey: 'purge' }));
+			if (readOnly) {
+				actions.append(button({ className: 'icon-btn', icon: 'lock', command: 'recoverWriter', title: 'Recuperar acesso à revisão…', ariaLabel: 'Recuperar acesso à revisão', focusKey: 'recover' }));
+			} else if (state.reviewWriter) {
+				actions.append(button({ className: 'icon-btn', icon: 'unlock', command: 'releaseWriter', title: 'Liberar a revisão para outra janela', ariaLabel: 'Liberar a revisão para outra janela', focusKey: 'release' }));
+			}
 		}
 		if (state.hasFolder && state.enabled) {
 			actions.append(button({ className: 'icon-btn', icon: 'debug-pause', command: 'disable', title: 'Desligar o registro', ariaLabel: 'Desligar o registro', focusKey: 'disable' }));
@@ -341,6 +398,7 @@
 		box.append(head);
 		box.append(el('p', null, 'Cada arquivo que o Claude editar fica guardado aqui: o que saiu, o que entrou e o motivo que ele deu. Você aceita ou recusa cada mudança.'));
 		box.append(el('p', 'muted small', 'Isso adiciona um hook em .claude/settings.local.json deste projeto e vale para conversas iniciadas depois de ativar.'));
+		box.append(el('p', 'muted small', 'Versões de arquivos e pedidos ficam salvos neste projeto. Confira as exclusões de privacidade nas configurações antes de ativar.'));
 		box.append(button({ className: 'btn-primary', icon: 'record', label: 'Ativar registro', command: 'enable', focusKey: 'enable' }));
 		return box;
 	}
@@ -410,13 +468,24 @@
 			main.append(renderStats(file, false));
 			row.append(main);
 
+			// Se o arquivo mudou desde que a lista foi montada, a extensão recusa a ação.
+			const identity = { key: file.key };
+			if (Number.isSafeInteger(file.revision) && file.revision >= 0) {
+				identity.revision = file.revision;
+			}
+			const blocked = Boolean(file.blockedReason);
+			if (blocked) {
+				row.classList.add('blocked');
+				main.title += '\n' + file.blockedReason;
+			}
 			const rowActions = el('span', 'file-actions');
 			rowActions.append(button({
 				className: 'icon-btn accept',
 				icon: 'check',
 				command: 'acceptFile',
-				extra: { key: file.key },
-				title: 'Aceitar as mudanças neste arquivo',
+				extra: identity,
+				disabled: blocked,
+				title: blocked ? file.blockedReason : 'Aceitar as mudanças neste arquivo',
 				ariaLabel: 'Aceitar ' + file.file,
 				focusKey: 'accept:' + file.key,
 			}));
@@ -424,8 +493,9 @@
 				className: 'icon-btn reject',
 				icon: 'close',
 				command: 'rejectFile',
-				extra: { key: file.key },
-				title: 'Recusar: volta este arquivo para como era antes do Claude',
+				extra: identity,
+				disabled: blocked,
+				title: blocked ? file.blockedReason : 'Recusar: volta este arquivo para como era antes do Claude',
 				ariaLabel: 'Recusar ' + file.file,
 				focusKey: 'reject:' + file.key,
 			}));
@@ -481,7 +551,7 @@
 
 		const meta = el('div', 'request-meta');
 		// Só aparece ao passar o mouse ou focar: é uma ação rara, não precisa ocupar a tela.
-		if (same.some((item) => item.status !== 'rejected')) {
+		if (!readOnly && same.some((item) => item.status !== 'rejected')) {
 			meta.append(button({
 				className: compact ? 'icon-btn request-undo' : 'btn-ghost btn-sm request-undo',
 				icon: 'discard',
@@ -520,6 +590,11 @@
 		} else if (entry.status === 'rejected') {
 			const tag = el('span', 'status-tag rejected');
 			tag.append(icon('discard'), el('span', null, 'recusada'));
+			title.append(tag);
+		} else if (entry.status === 'mixed') {
+			const tag = el('span', 'status-tag mixed');
+			tag.append(icon('pass'), el('span', null, 'em partes'));
+			tag.title = 'Revisada: partes aceitas e partes recusadas';
 			title.append(tag);
 		}
 		head.append(title);
@@ -580,6 +655,9 @@
 			text.append(el('p', null, entry.note));
 			note.append(text);
 			body.append(note);
+		}
+		if (entry.blockedReason) {
+			body.append(banner('lock', entry.blockedReason, 'warning'));
 		}
 
 		entry.hunks.forEach((hunk, index) => body.append(renderHunk(entry, hunk, index)));

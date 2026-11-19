@@ -117,6 +117,10 @@
 		const focus = captureFocus();
 
 		root.replaceChildren();
+		// Parte das conversas não pôde ser lida (transcript inacessível, por exemplo).
+		if (state.coverageMessage) {
+			root.append(renderHint('warning', state.coverageMessage, 'notice'));
+		}
 		if (!state.installed) {
 			root.append(renderNotInstalled());
 		} else {
@@ -227,8 +231,8 @@
 		return section;
 	}
 
-	function renderHint(name, text) {
-		const box = el('div', 'hint-box');
+	function renderHint(name, text, extraClass) {
+		const box = el('div', 'hint-box' + (extraClass ? ' ' + extraClass : ''));
 		box.append(icon(name), el('span', null, text));
 		return box;
 	}

@@ -940,3 +940,18 @@ body.wide .toolbar {
 	margin-top: var(--space-3);
 	color: var(--vscode-textLink-foreground);
 }
+
+/* ---- Estados da revisão vindos da extensão ------------------------------------------ */
+
+.status-tag.mixed,
+.entry-row.mixed .entry-status {
+	color: var(--mod-fg);
+}
+
+.file-row.blocked .file-name {
+	color: var(--muted);
+}
+
+.banner .banner-body button {
+	margin-top: 6px;
+}

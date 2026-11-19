@@ -141,3 +141,14 @@ body {
 .hint-box .codicon {
 	margin-top: 1px;
 }
+
+.hint-box.notice {
+	margin-bottom: 10px;
+	border-radius: var(--radius);
+	background: color-mix(in srgb, var(--vscode-editorWarning-foreground, var(--mod-fg)) 10%, transparent);
+	color: var(--vscode-foreground);
+}
+
+.hint-box.notice .codicon {
+	color: var(--vscode-editorWarning-foreground, var(--mod-fg));
+}

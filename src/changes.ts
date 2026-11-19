@@ -4,7 +4,19 @@ import {
 	contiguousTail, fileKey, groupByFile, isBlobHash, normalizeEol, planRevert, RawEntry, referencedBlobs, resolveSnapshot,
 	Status, trimLog,
 } from './logic';
-import { readTranscriptMeta, RequestInfo } from './sessions';
+import { readTranscriptMeta, RequestInfo, sessionsDir } from './sessions';
+import { activeReview, copyReview, ingestEntries, ReviewContent, ReviewDecisionRequest, ReviewError, ReviewResolution, SharedReview, sameContent } from './review';
+import { ReviewStore } from './review-store';
+import { withCaptureMaintenance, recoverCaptureMaintenance } from './maintenance';
+import { executeDecision, ResourceAdapter, undoItem } from './reversal';
+import { applyHookPlan, configFingerprint, HookCapability, inspectHookConfiguration, planHooks, SettingsRead, HookPlan } from './hooks';
+import { assessResourceScope, assessStoragePath, CAPTURE_POLICY_FILE, makeCapturePolicy, readLogFile, readVerifiedBlob, safeReadText, transcriptAllowed, validateMessage, validateSavedMeta, retentionCandidates, CapturePolicy, validateCapturePolicy, validateRawEntry, CAPTURE_STATUS_FILE, collectContentHashes } from './history';
+declare const require: (name: string) => any;
+const nodeFs = require('node:fs');
+const nodePath = require('node:path');
+const crypto = require('node:crypto');
+const Bytes = require('node:buffer').Buffer;
+const Utf8Decoder = require('node:util').TextDecoder;
 
 export type { RawEntry, Snapshot } from './logic';
 
@@ -60,7 +72,7 @@ interface ViewEntry {
 	hunks: Hunk[];
 	note: string | null;
 	canCompare: boolean;
-	status: Status | null;
+	status: ReviewResolution | null;
 	requestId: string | null;
 	request: string | null;
 }
@@ -78,7 +90,7 @@ interface Undo {
 	ids: string[];
 }
 
-type Message = { command?: string; id?: string; key?: string; request?: string };
+type Message = { command?: string; id?: string; key?: string; request?: string; revision?: number };
 
 export function registerChanges(context: vscode.ExtensionContext): ChangesController {
 	const controller = new ChangesController(context);
@@ -94,9 +106,12 @@ export function registerChanges(context: vscode.ExtensionContext): ChangesContro
 		vscode.commands.registerCommand('claude-code-launcher.acceptEverything', () => controller.acceptEverything()),
 		vscode.commands.registerCommand('claude-code-launcher.rejectEverything', () => controller.rejectEverything()),
 		vscode.commands.registerCommand('claude-code-launcher.undoReject', () => controller.undoReject()),
+		vscode.commands.registerCommand('claude-code-launcher.clearAllReviewData', () => controller.clearAllReviewData()),
+		vscode.commands.registerCommand('claude-code-launcher.releaseReviewWriter', () => controller.releaseReviewWriter()),
+		vscode.commands.registerCommand('claude-code-launcher.recoverReviewWriter', () => controller.recoverReviewWriter()),
 		vscode.commands.registerCommand('claude-code-launcher.refreshChanges', () => controller.refresh()),
 	);
-	void controller.repairHooks();
+	void controller.repairHooks().catch(() => undefined);
 	return controller;
 }
 
@@ -116,10 +131,30 @@ export class ChangesController implements
 	private readonly reasonCache = new Map<string, string>();
 	private readonly requestCache = new Map<string, RequestInfo>();
 	private readonly metaAttempts = new Map<string, number>();
-	private readonly status: Map<string, Status>;
+	private readonly status: Map<string, ReviewResolution>;
 	/** Sobe a cada setStatus: uma leitura de status.json mais antiga que isso é descartada. */
 	private statusVersion = 0;
 	private readonly undoStack: Undo[];
+	private readonly stores = new Map<string, ReviewStore>();
+	private readonly storeErrors = new Map<string, string>();
+	private readonly sharedReviews = new Map<string, SharedReview>();
+	private readonly fileStores = new Map<string, ReviewStore>();
+	private readonly logCache = new Map<string, { cursor: { offset: number; line: number }; entries: RawEntry[]; size: number; mtime: number; inode: number; rejections: number; partialReason?: string }>();
+	private readonly ordinals = new Map<string, number>();
+	private coverageMessage: string | null = null;
+	private disposed = false;
+	private maintenance = false;
+	private metaEpoch = 0;
+	private maintenanceCompletion: Promise<void> | undefined;
+	private completeMaintenance: (() => void) | undefined;
+	private disposal: Promise<void> = Promise.resolve();
+	private readonly backgroundTasks = new Set<Promise<unknown>>();
+	private readonly captureWarnings = new Map<string, string>();
+	private readonly activeOperations = new Set<Promise<unknown>>();
+	private readonly hookWarnings = new Map<string, string>();
+	private readonly resourceAliases = new Map<string, string>();
+	private refreshing: Promise<void> | undefined;
+	private refreshAgain = false;
 	/** Diff e textos de cada edição (a edição não muda depois de gravada). */
 	private readonly viewCache = new Map<string, BaseView>();
 	private readonly summaryCache = new Map<string, FileSummary>();
@@ -143,14 +178,14 @@ export class ChangesController implements
 	readonly onDidChangeFileDecorations = this.decorationEmitter.event;
 
 	constructor(private readonly context: vscode.ExtensionContext) {
-		this.status = loadStatus(context.workspaceState);
+		this.status = new Map(loadStatus(context.workspaceState));
 		this.undoStack = loadUndo(context.workspaceState);
 		this.statusItem = vscode.window.createStatusBarItem('claude-code-launcher.pending', vscode.StatusBarAlignment.Right, 99);
 		this.statusItem.name = 'Mudanças do Claude';
 		this.statusItem.command = 'claude-code-launcher.showChanges';
 
 		const watcher = vscode.workspace.createFileSystemWatcher(
-			'**/.claude/{launcher-changes/log.jsonl,launcher-changes/status.json,settings.local.json}',
+			'**/.claude/{launcher-changes/log.jsonl,launcher-changes/status.json,launcher-changes/review-state.v1.json,launcher-changes/capture-status.json,settings.local.json}',
 		);
 		const schedule = () => this.scheduleRefresh();
 		this.disposables.push(
@@ -162,6 +197,7 @@ export class ChangesController implements
 			watcher.onDidChange(schedule),
 			watcher.onDidDelete(schedule),
 			vscode.workspace.onDidChangeWorkspaceFolders(() => {
+				this.metaEpoch += 1;
 				// O caminho relativo mostrado no painel depende das pastas abertas.
 				this.viewCache.clear();
 				this.summaryCache.clear();
@@ -169,14 +205,29 @@ export class ChangesController implements
 				schedule();
 			}),
 		);
+		this.disposables.push(vscode.workspace.onDidChangeConfiguration((event) => { if (event.affectsConfiguration('claudeCodeLauncher')) { void this.repairHooks().catch(() => undefined); } }));
 		this.scheduleRefresh();
 	}
 
 	dispose(): void {
-		clearTimeout(this.refreshTimer);
-		clearTimeout(this.publishTimer);
-		clearTimeout(this.metaTimer);
+		if (this.disposed) { return; }
+		this.disposed = true; this.metaEpoch += 1;
+		clearTimeout(this.refreshTimer); clearTimeout(this.publishTimer); clearTimeout(this.metaTimer);
 		this.disposables.forEach((disposable) => disposable.dispose());
+		const pending = [...this.activeOperations, ...this.backgroundTasks, this.writeChain, this.refreshing, this.maintenanceCompletion].filter((work): work is Promise<unknown> => work !== undefined);
+		this.disposal = Promise.allSettled(pending).then(async () => { await Promise.allSettled([...this.stores.values()].map((store) => store.close())); });
+	}
+	whenDisposed(): Promise<void> { return this.disposal; }
+	private beginMaintenance(): void {
+		if (this.disposed || this.maintenance) { throw new ReviewError('maintenanceInProgress'); }
+		this.maintenance = true;
+		this.maintenanceCompletion = new Promise((resolve) => { this.completeMaintenance = resolve; });
+	}
+	private endMaintenance(): void { this.maintenance = false; this.completeMaintenance?.(); this.completeMaintenance = undefined; this.maintenanceCompletion = undefined; }
+	private async background<T>(work: () => Promise<T>): Promise<T> {
+		if (this.disposed || this.maintenance) { throw new ReviewError('maintenanceInProgress'); }
+		const task = work(); this.backgroundTasks.add(task);
+		try { return await task; } finally { this.backgroundTasks.delete(task); }
 	}
 
 	// ---- Usado por inline.ts ----------------------------------------------------
@@ -189,27 +240,81 @@ export class ChangesController implements
 		return this.status.has(id);
 	}
 
-	/** Marca edições como aceitas ou recusadas; `undefined` volta para pendente. */
-	setStatus(ids: readonly string[], status: Status | undefined): void {
-		let changed = false;
-		for (const id of ids) {
-			if (status === undefined) {
-				changed = this.status.delete(id) || changed;
-			} else if (this.status.get(id) !== status) {
-				this.status.delete(id);
-				this.status.set(id, status);
-				changed = true;
+	/** Compatibility entry point; actual user decisions always use the shared executor. */
+	async setStatus(ids: readonly string[], status: Status | undefined): Promise<void> {
+		if (status === undefined) { throw new ReviewError('explicitReopenRequired'); }
+		const files = new Set(this.entries.filter((entry) => ids.includes(entry.id)).map((entry) => entry.file));
+		for (const file of files) { await this.executeReviewDecision(file, { action: status === 'accepted' ? 'accept' : 'reject' }); }
+	}
+
+	getSharedReview(file: string): SharedReview | undefined {
+		file = this.resourceKey(file);
+		const review = this.sharedReviews.get(file);
+		return review && copyReview(review);
+	}
+
+	async executeReviewDecision(file: string, request: ReviewDecisionRequest, batchId?: string): Promise<void> {
+		if (this.disposed || this.maintenance) { throw new ReviewError('maintenanceInProgress'); }
+		file = this.resourceKey(file);
+		const store = this.fileStores.get(file);
+		if (!store) { throw new ReviewError('reviewUnavailable'); }
+		try {
+			const operation = executeDecision(store, file, request, this.resourceAdapter(store), { batchId }); this.activeOperations.add(operation);
+			let outcome: 'committed' | 'recovered';
+			try { outcome = await operation; } finally { this.activeOperations.delete(operation); }
+			if (outcome === 'recovered') { throw new ReviewError('previousOperationRecovered'); }
+			this.synchronizeViews(); this.summaryCache.clear(); this.publish();
+		} catch (error) {
+			this.synchronizeViews(); this.publish();
+			void vscode.window.showWarningMessage(`A revisão não foi concluída: ${errorCode(error)}. O conteúdo e a recuperação disponíveis foram preservados. Se uma operação anterior foi recuperada, confira o resultado antes de repetir a nova ação.`);
+			throw error;
+		}
+	}
+
+	async compareReview(file: string): Promise<void> {
+		file = this.resourceKey(file); if (!(await this.canOpenResource(file))) { throw new ReviewError('resourceOutsideScope'); }
+		const review = this.getSharedReview(file);
+		if (!review || review.base.kind === 'unavailable') { throw new ReviewError('unknownSnapshot'); }
+		const key = crypto.randomUUID() as string;
+		this.comparisonTexts.set(key, review.base.kind === 'text' ? review.base.text : '');
+		if (this.comparisonTexts.size > 20) { this.comparisonTexts.delete(this.comparisonTexts.keys().next().value as string); }
+		await vscode.commands.executeCommand('vscode.diff', vscode.Uri.from({ scheme: SCHEME, path: `/review/${key}` }), vscode.Uri.file(file), `${basename(file)} (revisão pendente ↔ arquivo atual)`, { preview: true });
+	}
+
+	private resourceKey(file: string): string {
+		const known = this.resourceAliases.get(file); if (known) { return known; }
+		for (const folder of vscode.workspace.workspaceFolders ?? []) {
+			const store = this.stores.get(folder.uri.toString()); if (!store || folder.uri.scheme !== 'file') { continue; }
+			const relative = nodePath.relative(folder.uri.fsPath, file);
+			if (relative !== '..' && !relative.startsWith('..' + nodePath.sep) && !nodePath.isAbsolute(relative)) {
+				const candidate = nodePath.join(store.root, relative); if (this.sharedReviews.has(candidate)) { return candidate; }
 			}
 		}
-		if (!changed) {
-			return;
+		return file;
+	}
+	async canOpenResource(file: string): Promise<boolean> {
+		for (const folder of vscode.workspace.workspaceFolders ?? []) {
+			if (folder.uri.scheme !== 'file') { continue; }
+			try { if (await canonicalResource(file, folder.uri.fsPath)) { return true; } } catch { /* No authorization from a failed lookup. */ }
 		}
-		this.statusVersion += 1;
-		this.saveStatusMemento();
-		this.queueStateWrite();
-		// Pode ser chamado no meio de uma pintura das marcas: avisa depois.
-		clearTimeout(this.publishTimer);
-		this.publishTimer = setTimeout(() => this.publish(), 0);
+		return false;
+	}
+
+	private readonly comparisonTexts = new Map<string, string>();
+
+	private synchronizeViews(): void {
+		this.sharedReviews.clear(); this.fileStores.clear(); this.status.clear();
+		for (const store of this.stores.values()) {
+			const state = store.get();
+			for (const [id, status] of Object.entries(state.statuses)) { this.status.set(id, status); }
+			for (const file of Object.keys(state.reviews)) {
+				const review = activeReview(state, file);
+				if (!review) { continue; }
+				if (this.fileStores.has(file)) { this.sharedReviews.set(file, { ...review, phase: 'blocked', blockReason: 'ambiguousContext' }); this.fileStores.delete(file); continue; }
+				this.fileStores.set(file, store);
+				this.sharedReviews.set(file, store.writable ? review : { ...review, phase: 'blocked', blockReason: store.blockReason || 'readOnlyOwner' });
+			}
+		}
 	}
 
 	/** Arquivos (caminho completo) com mudanças pendentes que ainda existem, na ordem do painel. */
@@ -250,6 +355,7 @@ export class ChangesController implements
 
 	provideTextDocumentContent(uri: vscode.Uri): string {
 		const [, id, side] = uri.path.split('/');
+		if (id === 'review') { return this.comparisonTexts.get(side) ?? ''; }
 		const entry = this.entries.find((item) => item.id === id);
 		const snapshot = side === 'antes' ? entry?.before : entry?.after;
 		return snapshot?.text ?? '';
@@ -268,69 +374,115 @@ export class ChangesController implements
 
 	// ---- Registro (hooks) --------------------------------------------------------
 
-	async setEnabled(enable: boolean): Promise<void> {
+	async setEnabled(enable: boolean): Promise<void> { return this.background(() => this.configureHooks(enable)); }
+	private async configureHooks(enable: boolean): Promise<void> {
 		const folders = vscode.workspace.workspaceFolders ?? [];
-		if (folders.length === 0) {
-			void vscode.window.showWarningMessage('Abra uma pasta de projeto para registrar as mudanças do Claude.');
-			return;
-		}
+		if (!folders.length) { void vscode.window.showWarningMessage('Abra uma pasta de projeto para registrar as mudanças do Claude.'); return; }
+		const failed: string[] = [];
 		for (const folder of folders) {
-			if (enable) {
-				await this.installHookScript(folder);
-			}
-			await this.writeHooks(folder, enable);
+			try {
+				if (folder.uri.scheme !== 'file') { throw new ReviewError('unsupportedStore'); }
+				const plan = await this.prepareHookPlan(folder, enable);
+				if (plan.kind !== 'ready') { throw new ReviewError(plan.code || 'hookPlanBlocked'); }
+				await this.ensureStore(folder);
+				await this.readCapturePolicy(folder);
+				await this.writeCapturePolicy(folder, !enable);
+				if (enable) { await this.installHookScript(folder); }
+				await this.writeHooks(folder, enable, plan); this.hookWarnings.delete(folder.uri.toString());
+			} catch (error) { failed.push(`${folder.name} (${errorCode(error)})`); }
 		}
 		await this.refresh();
-		if (enable) {
-			void vscode.window.showInformationMessage(
-				'Registro de mudanças ativado. Ele vale para conversas do Claude Code iniciadas a partir de agora.',
-			);
-		}
+		if (failed.length) { void vscode.window.showWarningMessage(`Registro não concluído em: ${failed.join(', ')}.`); }
+		else { void vscode.window.showInformationMessage(enable ? 'Registro ativado para novas conversas, com política de cópias locais aplicada.' : 'Hooks próprios desligados; configurações alheias preservadas.'); }
 	}
 
-	/**
-	 * Mantém o hook funcionando: atualiza a cópia do script dentro do projeto e,
-	 * se o settings ainda aponta para outro lugar (versão antiga, que usava o
-	 * armazenamento global do editor), passa a apontar para essa cópia.
-	 */
-	async repairHooks(): Promise<void> {
+	async repairHooks(): Promise<void> { if (this.disposed || this.maintenance) { return; } return this.background(() => this.repairConfiguredHooks()); }
+	private async repairConfiguredHooks(): Promise<void> {
 		for (const folder of vscode.workspace.workspaceFolders ?? []) {
+			if (folder.uri.scheme !== 'file') { continue; }
 			try {
-				const text = await readText(vscode.Uri.joinPath(folder.uri, ...SETTINGS_PATH));
-				if (!text?.includes(HOOK_FILE)) {
-					continue;
-				}
-				await this.installHookScript(folder);
-				if (!text.includes(this.scriptPath(folder))) {
-					await this.writeHooks(folder, true);
-				}
-			} catch {
-				// Sem permissão de escrita, por exemplo: o registro segue como estava.
-			}
+				const read = await this.readSettings(folder);
+				const own = inspectHookConfiguration(read, this.scriptPath(folder), this.knownHookPaths());
+				if (!own.valid || !own.active) { continue; }
+				await this.ensureStore(folder);
+				const disabled = vscode.workspace.getConfiguration('claudeCodeLauncher').get<string>('hookExecutionMode', 'auto') === 'disabled';
+				const prior = await this.readCapturePolicy(folder);
+				const plan = await this.prepareHookPlan(folder, !disabled);
+				if (plan.kind !== 'ready') { throw new ReviewError(plan.code || 'hookPlanBlocked'); }
+				await this.writeCapturePolicy(folder, disabled || prior?.paused === true);
+				if (!disabled) { await this.installHookScript(folder); }
+				await this.writeHooks(folder, !disabled, plan); this.hookWarnings.delete(folder.uri.toString());
+			} catch (error) { this.hookWarnings.set(folder.uri.toString(), errorCode(error)); }
 		}
 	}
 
 	async clear(): Promise<void> {
-		if (this.entries.length > 0) {
-			const ok = await confirm(
-				'Limpar o histórico de mudanças do Claude?',
-				'Apaga o registro deste projeto, inclusive as mudanças ainda não revisadas. Os arquivos não são alterados, e o registro continua ligado.',
-				'Limpar',
-			);
-			if (!ok) {
-				return;
+		if (this.maintenance) { throw new ReviewError('maintenanceInProgress'); }
+		this.beginMaintenance();
+		const failed: string[] = [];
+		try {
+			await Promise.allSettled([...this.activeOperations, ...this.backgroundTasks]); await this.refreshing; await this.writeChain;
+			for (const folder of vscode.workspace.workspaceFolders ?? []) {
+				const store = this.stores.get(folder.uri.toString()); if (!store) { continue; }
+				try { await withCaptureMaintenance(store, async () => { await this.pruneReviewedLog(folder, store, true); }); }
+				catch (error) { failed.push(`${folder.name} (${errorCode(error)})`); }
 			}
-		}
-		for (const folder of vscode.workspace.workspaceFolders ?? []) {
-			try {
-				await vscode.workspace.fs.delete(vscode.Uri.joinPath(folder.uri, ...LOG_PATH));
-			} catch {
-				// Nada registrado nesta pasta.
+		} finally { this.endMaintenance(); }
+		await this.refresh();
+		if (failed.length) { void vscode.window.showWarningMessage(`Limpeza parcial/bloqueada: ${failed.join(', ')}.`); }
+		else { void vscode.window.showInformationMessage('Histórico revisado sem referência de recuperação foi limpo. Pendências, decisões parciais, pausa e undo foram preservados.'); }
+	}
+
+	async clearAllReviewData(): Promise<void> {
+		if (!(await confirm('Apagar todos os dados locais de revisão?', 'Isso remove histórico, cópias locais, metadados e recuperação de recusas. Os arquivos atuais e hooks de terceiros permanecem. Encerre conversas e outros escritores.', 'Apagar dados de revisão'))) { return; }
+		if (this.maintenance) { throw new ReviewError('maintenanceInProgress'); }
+		this.beginMaintenance(); this.metaEpoch += 1; const failed: string[] = [];
+		try {
+			await Promise.allSettled([...this.activeOperations, ...this.backgroundTasks]); await this.refreshing; await this.writeChain;
+			for (const folder of vscode.workspace.workspaceFolders ?? []) {
+				const store = this.stores.get(folder.uri.toString());
+				try {
+					if (!store?.writable) { throw new ReviewError('readOnlyOwner'); }
+					await this.readCapturePolicy(folder);
+					await withCaptureMaintenance(store, async () => {
+						await this.writeCapturePolicy(folder, true);
+						if (Object.values(store.get().operations).some((op) => !['complete', 'blocked'].includes(op.stage))) { throw new ReviewError('needsReconciliation'); }
+						const owned = /^(?:log\.jsonl|status\.json|meta\.json|capture-status\.json|review-state\.v1\.json(?:\.prev)?|blobs|pending|completed|review-blobs|review-migration-backups|settings-backups|quarantine-index)$/;
+						for (const name of await nodeFs.promises.readdir(store.directory)) {
+							if (owned.test(name)) { await removeOwnedTree(nodePath.join(store.directory, name), store.root, () => this.disposed); }
+						}
+					});
+					await store.close(); this.stores.delete(folder.uri.toString()); this.storeErrors.delete(folder.uri.toString()); this.logCache.delete(folder.uri.toString());
+				} catch (error) { failed.push(`${folder.name} (${errorCode(error)})`); }
 			}
-			await this.collectBlobs(folder.uri, []);
+			if (!failed.length) { await this.context.workspaceState.update(UNDO_KEY, []); await this.context.workspaceState.update(STATUS_KEY, {}); await this.context.workspaceState.update(LEGACY_REVIEWED_KEY, []); this.undoStack.splice(0); }
+		} catch (error) { failed.push(`estado local (${errorCode(error)})`); }
+		finally {
+			this.endMaintenance(); this.reasonCache.clear(); this.requestCache.clear(); this.blobCache.clear(); this.viewCache.clear(); this.comparisonTexts.clear(); this.captureWarnings.clear();
 		}
 		await this.refresh();
+		if (failed.length) { void vscode.window.showWarningMessage(`Limpeza parcial/bloqueada: ${failed.join(', ')}. Confira os dados restantes; a captura pode estar pausada para recuperação.`); }
+		else { void vscode.window.showInformationMessage('Dados locais de revisão removidos. A captura permanece pausada até você ativá-la novamente.'); }
 	}
+
+	async releaseReviewWriter(): Promise<void> {
+		this.beginMaintenance();
+		try {
+			await Promise.allSettled([...this.activeOperations, ...this.backgroundTasks]);
+			for (const store of this.stores.values()) { if (Object.values(store.get().operations).some((op) => !['complete', 'blocked'].includes(op.stage))) { throw new ReviewError('needsReconciliation'); } }
+			for (const store of this.stores.values()) { await store.close(); }
+		} finally { this.endMaintenance(); }
+		this.synchronizeViews(); this.publish();
+	}
+	async recoverReviewWriter(): Promise<void> {
+		this.beginMaintenance();
+		try {
+			await Promise.allSettled([...this.activeOperations, ...this.backgroundTasks]);
+			for (const store of this.stores.values()) { try { await store.recoverWriter(); await recoverCaptureMaintenance(store); } catch (error) { void vscode.window.showWarningMessage(error instanceof Error ? error.message : errorCode(error)); throw error; } }
+		} finally { this.endMaintenance(); }
+		await this.refresh();
+	}
+
 
 	// ---- Aceitar e recusar ---------------------------------------------------------
 
@@ -338,8 +490,8 @@ export class ChangesController implements
 	async acceptEverything(): Promise<void> {
 		const groups = this.pendingGroups();
 		if (groups.length > 0) {
-			await this.accept(groups);
-			void vscode.window.showInformationMessage(`Mudanças do Claude aceitas em ${countFiles(groups.length)}.`);
+			const done = await this.accept(groups);
+			if (done) { void vscode.window.showInformationMessage(`Mudanças do Claude aceitas em ${countFiles(done)}.`); }
 		}
 	}
 
@@ -359,69 +511,47 @@ export class ChangesController implements
 		}
 	}
 
-	/** Volta os arquivos de uma recusa para como estavam antes dela. */
+	/** Undo only successful individual items; conflicts retain their recovery. */
 	async undoReject(): Promise<void> {
-		const undo = this.undoStack.pop();
-		if (!undo) {
-			void vscode.window.showInformationMessage('Não há recusa para desfazer.');
-			return;
+		if (this.maintenance) { throw new ReviewError('maintenanceInProgress'); }
+		const all = [...this.stores.values()].flatMap((store) => store.get().undo.filter((item) => item.phase !== 'consumed').map((item) => ({ store, item })));
+		const last = all.sort((a, b) => String(a.item.completedAt || a.item.createdAt || '').localeCompare(String(b.item.completedAt || b.item.createdAt || ''))).at(-1);
+		if (!last) { void vscode.window.showInformationMessage('Não há recusa para desfazer.'); return; }
+		const batch = last.item.batchId || last.item.id; let done = 0; const failed: string[] = [];
+		for (const { store, item } of all.filter(({ item }) => (item.batchId || item.id) === batch).reverse()) {
+			const operation = undoItem(store, item.id, this.resourceAdapter(store)); this.activeOperations.add(operation);
+			try { await operation; done += 1; } catch (error) { failed.push(`${basename(item.file)} (${errorCode(error)})`); }
+			finally { this.activeOperations.delete(operation); }
 		}
-		this.saveUndo();
-		const failed: string[] = [];
-		for (const item of undo.items) {
-			const uri = vscode.Uri.file(item.file);
-			try {
-				const current = await currentText(uri);
-				const untouched = item.restored === undefined
-					? current === undefined
-					: current !== undefined && normalizeEol(current) === normalizeEol(item.restored);
-				if (!untouched) {
-					failed.push(basename(item.file));
-					continue;
-				}
-				if (item.previous !== undefined) {
-					await writeText(uri, item.previous);
-				} else if (current !== undefined) {
-					await deleteFile(uri);
-				}
-				await vscode.commands.executeCommand(DROP_REVIEW_COMMAND, uri.toString());
-			} catch {
-				failed.push(basename(item.file));
-			}
-		}
-		this.setStatus(undo.ids, undefined);
-		if (failed.length > 0) {
-			void vscode.window.showWarningMessage(
-				`Não desfiz a recusa em ${failed.join(', ')}: ${failed.length === 1 ? 'o arquivo mudou' : 'os arquivos mudaram'} depois dela.`,
-			);
-		} else {
-			void vscode.window.showInformationMessage('Recusa desfeita: as mudanças do Claude voltaram.');
+		this.synchronizeViews(); this.summaryCache.clear(); this.publish();
+		if (done) { void vscode.window.showInformationMessage(`Recusa desfeita em ${countFiles(done)}.`); }
+		if (failed.length) { void vscode.window.showWarningMessage(`Recuperação mantida para: ${failed.join(', ')}.`); }
+	}
+
+	private async acceptFile(key: string | undefined, revision?: number): Promise<void> {
+		const group = this.pendingGroups().find((list) => list[0].file === key);
+		if (group) {
+			await this.executeReviewDecision(group[0].file, { action: 'accept', revision });
 		}
 	}
 
-	private async acceptFile(key: string | undefined): Promise<void> {
-		const group = this.pendingGroups().find((list) => fileKey(list[0].file) === key);
+	private async rejectFile(key: string | undefined, revision?: number): Promise<void> {
+		const group = this.pendingGroups().find((list) => list[0].file === key);
 		if (group) {
-			await this.accept([group]);
-		}
-	}
-
-	private async rejectFile(key: string | undefined): Promise<void> {
-		const group = this.pendingGroups().find((list) => fileKey(list[0].file) === key);
-		if (group) {
-			this.report(await this.revert([group]));
+			await this.executeReviewDecision(group[0].file, { action: 'reject', revision });
 		}
 	}
 
 	/** Recusa tudo o que o Claude mudou para atender um pedido. */
 	private async rejectRequest(requestId: string | undefined): Promise<void> {
 		const entries = this.entries.filter(
-			(entry) => this.requestCache.get(entry.id)?.id === requestId && this.status.get(entry.id) !== 'rejected',
+			(entry) => this.requestCache.get(entry.id)?.id === requestId && !this.status.has(entry.id),
 		);
 		if (!requestId || entries.length === 0) {
 			return;
 		}
-		const groups = groupByFile(entries);
+		const requestIds = new Set(entries.map((entry) => entry.id));
+		const groups = this.pendingGroups().filter((list) => list.some((entry) => requestIds.has(entry.id)) && this.getSharedReview(list[0].file)?.ids.every((id) => requestIds.has(id)));
 		const text = this.requestCache.get(entries[0].id)?.text ?? '';
 		const ok = await confirm(
 			`Desfazer o pedido "${text}"?`,
@@ -434,56 +564,21 @@ export class ChangesController implements
 		}
 	}
 
-	private async accept(groups: RawEntry[][]): Promise<void> {
-		for (const list of groups) {
-			await vscode.commands.executeCommand(DROP_REVIEW_COMMAND, vscode.Uri.file(list[0].file).toString());
-		}
-		this.setStatus(groups.flat().map((entry) => entry.id), 'accepted');
+	private async accept(groups: RawEntry[][]): Promise<number> {
+		let done = 0; const batch = crypto.randomUUID() as string;
+		for (const list of groups) { try { await this.executeReviewDecision(list[0].file, { action: 'accept' }, batch); done += 1; } catch { /* Each failure was diagnosed. */ } }
+		return done;
 	}
 
-	/**
-	 * Volta cada arquivo para antes da edição mais antiga do grupo. Cada grupo
-	 * tem as edições de um arquivo, da mais recente para a mais antiga.
-	 */
 	private async revert(groups: RawEntry[][]): Promise<{ done: number; skipped: string[]; partial: string[] }> {
-		const items: UndoItem[] = [];
-		const ids: string[] = [];
-		const skipped: string[] = [];
-		const partial: string[] = [];
+		let done = 0; const skipped: string[] = []; const partial: string[] = []; const batch = crypto.randomUUID() as string;
 		for (const list of groups) {
-			// Só a sequência contínua mais recente: se o arquivo mudou entre duas
-			// edições do Claude, voltar ao "antes" da mais antiga apagaria essa mudança.
-			const tail = contiguousTail([...list].reverse());
-			const newest = tail[tail.length - 1];
-			const oldest = tail[0];
-			const uri = vscode.Uri.file(newest.file);
 			try {
-				const current = await currentText(uri);
-				const plan = planRevert(oldest, newest, current);
-				if (plan.kind === 'skip') {
-					skipped.push(basename(newest.file));
-					continue;
-				}
-				if (plan.kind === 'write') {
-					await writeText(uri, plan.text);
-				} else if (plan.kind === 'delete') {
-					await deleteFile(uri);
-				}
-				items.push({ file: newest.file, previous: current, restored: plan.kind === 'write' ? plan.text : undefined });
-				await vscode.commands.executeCommand(DROP_REVIEW_COMMAND, uri.toString());
-				ids.push(...tail.map((entry) => entry.id));
-				if (tail.length < list.length) {
-					partial.push(basename(newest.file));
-				}
-			} catch {
-				skipped.push(basename(newest.file));
-			}
+				await this.executeReviewDecision(list[0].file, { action: 'reject' }, batch); done += 1;
+				if (this.getSharedReview(list[0].file)) { partial.push(basename(list[0].file)); }
+			} catch { skipped.push(basename(list[0].file)); }
 		}
-		if (ids.length > 0) {
-			this.pushUndo({ items, ids });
-			this.setStatus(ids, 'rejected');
-		}
-		return { done: groups.length - skipped.length, skipped, partial };
+		return { done, skipped, partial };
 	}
 
 	private report({ done, skipped, partial }: { done: number; skipped: string[]; partial: string[] }): void {
@@ -513,20 +608,79 @@ export class ChangesController implements
 		}
 	}
 
+
+	private resourceAdapter(store: ReviewStore): ResourceAdapter {
+		return { read: (file) => this.observeResource(file, store.root, true), readPersisted: (file) => this.observeResource(file, store.root, false), write: (file, target, expected) => this.writeResource(file, store.root, target, expected) };
+	}
+	private async observeResource(file: string, root: string, buffer: boolean): Promise<ReviewContent> {
+		const scope = await assessResourceScope(file, root); if (!scope.allowed) { throw new ReviewError(scope.code || 'resourceOutsideScope'); }
+		const uri = vscode.Uri.file(file);
+		let disk: ReviewContent;
+		try {
+			const stat = await nodeFs.promises.lstat(file); if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 8 * 1024 * 1024) { throw new ReviewError('unsupportedResource'); }
+			const bytes = await nodeFs.promises.readFile(file);
+			disk = { kind: 'text', text: new Utf8Decoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes) };
+		} catch (error) { if ((error as { code?: string }).code === 'ENOENT') { disk = { kind: 'absent' }; } else { throw error; } }
+		if (buffer) {
+			const open = vscode.workspace.textDocuments.find((doc) => !doc.isClosed && doc.uri.toString() === uri.toString());
+			if (open && !(disk.kind === 'absent' && !open.isDirty)) { const text = open.getText(); return { kind: 'text', text: disk.kind === 'text' && disk.text.startsWith('\uFEFF') && !text.startsWith('\uFEFF') ? '\uFEFF' + text : text }; }
+		}
+		return disk;
+	}
+	private async writeResource(file: string, root: string, target: ReviewContent, expected: ReviewContent): Promise<void> {
+		if (this.disposed) { throw new ReviewError('cancelledBeforeEffect'); }
+		if (!sameContent(await this.observeResource(file, root, true), expected)) { throw new ReviewError('externalChange'); }
+		const uri = vscode.Uri.file(file);
+		if (file.toLowerCase().endsWith('.ipynb') || vscode.workspace.notebookDocuments.some((doc) => doc.uri.toString() === uri.toString())) { throw new ReviewError('unsupportedNotebook'); }
+		if (target.kind === 'unavailable') { throw new ReviewError('unknownSnapshot'); }
+		if (target.kind === 'absent') {
+			const open = vscode.workspace.textDocuments.find((doc) => doc.uri.toString() === uri.toString());
+			if (open?.isDirty) { throw new ReviewError('dirtyDocument'); }
+			if (expected.kind === 'absent') { return; }
+			if (this.disposed) { throw new ReviewError('cancelledBeforeEffect'); }
+			await vscode.workspace.fs.delete(uri, { useTrash: true }); return;
+		}
+		if (expected.kind === 'absent') {
+			await nodeFs.promises.mkdir(nodePath.dirname(file), { recursive: true });
+			const scope = await assessResourceScope(file, root); if (!scope.allowed) { throw new ReviewError('resourceOutsideScope'); }
+			if (this.disposed) { throw new ReviewError('cancelledBeforeEffect'); }
+			await nodeFs.promises.writeFile(file, target.text, { flag: 'wx', mode: 0o600 }); return;
+		}
+		const document = await vscode.workspace.openTextDocument(uri);
+		const current = await this.observeResource(file, root, true);
+		if (!sameContent(current, expected)) { throw new ReviewError('externalChange'); }
+		const disk = await this.observeResource(file, root, false);
+		if (disk.kind !== 'text' || disk.text.startsWith('\uFEFF') !== target.text.startsWith('\uFEFF')) { throw new ReviewError('unsupportedEncoding'); }
+		const text = target.text.replace(/^\uFEFF/, '');
+		if (document.getText() !== text) {
+			const version = document.version;
+			const edit = new vscode.WorkspaceEdit();
+			const clean = text.replace(/\r\n/g, '\n');
+			const eol = text.includes('\r\n') ? vscode.EndOfLine.CRLF : vscode.EndOfLine.LF;
+			edit.set(uri, [vscode.TextEdit.replace(document.validateRange(new vscode.Range(0, 0, document.lineCount, 0)), clean), vscode.TextEdit.setEndOfLine(eol)]);
+			if (this.disposed || document.version !== version || !(await vscode.workspace.applyEdit(edit))) { throw new ReviewError('applyFailed'); }
+		}
+		if (this.disposed) { throw new ReviewError('cancelledAfterEffect'); }
+		if (!(await document.save())) { throw new ReviewError('saveReturnedFalse'); }
+	}
+
 	// ---- Estado ---------------------------------------------------------------------
 
 	/** Edições pendentes agrupadas por arquivo, da mais recente para a mais antiga. */
 	private pendingGroups(): RawEntry[][] {
-		return groupByFile(this.entries.filter((entry) => !this.status.has(entry.id)));
+		const groups = new Map<string, RawEntry[]>();
+		for (const entry of this.entries) { if (!this.status.has(entry.id)) { const list = groups.get(entry.file) ?? []; list.push(entry); groups.set(entry.file, list); } }
+		return [...groups.values()];
 	}
 
 	private setupWebview(webview: vscode.Webview, wide: boolean): void {
 		webview.options = { enableScripts: true, localResourceRoots: [this.mediaUri()] };
 		webview.html = this.html(webview);
-		webview.onDidReceiveMessage((message: Message) => this.handleMessage(message, webview, wide));
+		webview.onDidReceiveMessage((message: unknown) => { void this.handleMessage(message, webview, wide).catch((error) => { void vscode.window.showWarningMessage(`A ação não foi concluída: ${errorCode(error)}.`); }); });
 	}
 
-	private async handleMessage(message: Message, webview: vscode.Webview, wide: boolean): Promise<void> {
+	private async handleMessage(value: unknown, webview: vscode.Webview, wide: boolean): Promise<void> {
+		const message = validateMessage(value, 'changes') as Message | undefined; if (!message) { return; }
 		switch (message.command) {
 			case 'ready':
 				this.post(webview, wide);
@@ -562,14 +716,17 @@ export class ChangesController implements
 				await this.rejectEverything();
 				return;
 			case 'acceptFile':
-				await this.acceptFile(message.key);
+				await this.acceptFile(message.key, message.revision);
 				return;
 			case 'rejectFile':
-				await this.rejectFile(message.key);
+				await this.rejectFile(message.key, message.revision);
 				return;
 			case 'rejectRequest':
 				await this.rejectRequest(message.request);
 				return;
+			case 'purge': case 'clearAllReviewData': await this.clearAllReviewData(); return;
+			case 'release': case 'releaseWriter': await this.releaseReviewWriter(); return;
+			case 'recover': case 'recoverWriter': await this.recoverReviewWriter(); return;
 			case 'undoReject':
 				await this.undoReject();
 				return;
@@ -589,7 +746,7 @@ export class ChangesController implements
 
 	private async openFile(id: string | undefined): Promise<void> {
 		const entry = this.entries.find((item) => item.id === id);
-		if (!entry) {
+		if (!entry || !(await this.canOpenResource(entry.file))) {
 			return;
 		}
 		try {
@@ -607,23 +764,25 @@ export class ChangesController implements
 	}
 
 	async refresh(): Promise<void> {
-		// Uma gravação de status.json em andamento precisa terminar antes da leitura.
-		await this.writeChain;
-		this.entries = await this.loadEntries();
-		this.enabled = await this.hooksEnabled();
-		const live = new Set(this.entries.map((entry) => entry.id));
-		for (const id of [...this.viewCache.keys()]) {
-			if (!live.has(id)) {
-				this.viewCache.delete(id);
-			}
-		}
-		this.summaryCache.clear();
-		this.publish();
-		void this.fillMeta();
+		if (this.disposed || this.maintenance) { return; }
+		if (this.refreshing) { this.refreshAgain = true; return this.refreshing; }
+		this.refreshing = (async () => {
+			do {
+				this.refreshAgain = false; await this.writeChain;
+				this.entries = await this.loadEntries(); this.enabled = await this.hooksEnabled();
+				await this.applyRetention();
+				if (this.disposed) { return; }
+				const live = new Set(this.entries.map((entry) => entry.id));
+				for (const id of this.viewCache.keys()) { if (!live.has(id)) { this.viewCache.delete(id); } }
+				this.summaryCache.clear(); this.publish(); void this.fillMeta().catch(() => undefined);
+			} while (this.refreshAgain && !this.disposed);
+		})().catch((error) => { this.coverageMessage = `Não foi possível atualizar parte da revisão: ${errorCode(error)}.`; if (!this.disposed) { this.publish(); } }).finally(() => { this.refreshing = undefined; });
+		return this.refreshing;
 	}
 
 	/** Espalha o estado atual: marcas no editor, painel, Explorer e barra de status. */
 	private publish(): void {
+		if (this.disposed) { return; }
 		this.entriesEmitter.fire();
 		if (this.view) {
 			this.post(this.view.webview, false);
@@ -656,6 +815,46 @@ export class ChangesController implements
 		this.updateViewContexts();
 	}
 
+	/** Há alguma recusa que ainda pode ser desfeita, em qualquer pasta. */
+	private canUndoReject(): boolean {
+		return [...this.stores.values()].some((store) => store.get().undo.some((item) => item.phase !== 'consumed'));
+	}
+
+	/** Alguma pasta está só para leitura (outra janela é a dona da revisão, ou o estado não abriu). */
+	private readOnlyReason(): string | null {
+		return [...this.storeErrors.values(), ...[...this.stores.values()].filter((store) => !store.writable).map((store) => store.blockReason)]
+			.filter(Boolean).join(', ') || null;
+	}
+
+	/**
+	 * O estado do registro fica ao lado do título da view, e os pendentes viram um
+	 * número no ícone da barra de atividades, como o Git faz.
+	 */
+	private updateViewChrome(pending = this.pendingGroups().length): void {
+		if (!this.view) {
+			return;
+		}
+		const hasFolder = (vscode.workspace.workspaceFolders ?? []).length > 0;
+		let description: string | undefined;
+		if (hasFolder) {
+			description = this.readOnlyReason() ? 'Somente leitura' : this.enabled ? 'Registrando' : 'Registro desligado';
+		}
+		this.view.description = description;
+		this.view.badge = pending > 0
+			? { value: pending, tooltip: `${capitalize(countFiles(pending))} com mudanças do Claude para revisar` }
+			: undefined;
+	}
+
+	/** Contextos que decidem quais botões aparecem no título da view Mudanças. */
+	private updateViewContexts(): void {
+		const readOnly = Boolean(this.readOnlyReason());
+		void vscode.commands.executeCommand('setContext', 'claudeCodeLauncher.changeLogEnabled', this.enabled);
+		void vscode.commands.executeCommand('setContext', 'claudeCodeLauncher.hasChangeHistory', this.entries.length > 0);
+		void vscode.commands.executeCommand('setContext', 'claudeCodeLauncher.canUndoReject', !readOnly && this.canUndoReject());
+		void vscode.commands.executeCommand('setContext', 'claudeCodeLauncher.reviewReadOnly', readOnly);
+		void vscode.commands.executeCommand('setContext', 'claudeCodeLauncher.reviewWriter', !readOnly && this.stores.size > 0);
+	}
+
 	private post(webview: vscode.Webview, wide: boolean): void {
 		const pending = this.entries.filter((entry) => !this.status.has(entry.id));
 		const history: ViewEntry[] = this.entries.slice(0, MAX_HISTORY).map((entry) => {
@@ -674,8 +873,11 @@ export class ChangesController implements
 			hasFolder: (vscode.workspace.workspaceFolders ?? []).length > 0,
 			enabled: this.enabled,
 			entries: history,
-			files: groupByFile(pending).map((list) => this.summaryOf(list)),
-			canUndo: this.undoStack.length > 0,
+			files: this.pendingGroups().map((list) => this.summaryOf(list)),
+			canUndo: this.canUndoReject(),
+			coverageMessage: [this.coverageMessage, ...this.hookWarnings.values(), ...this.captureWarnings.values()].filter(Boolean).join(' ') || null,
+			reviewWriter: [...this.stores.values()].every((store) => store.writable),
+			readOnlyReason: this.readOnlyReason(),
 		});
 	}
 
@@ -699,7 +901,7 @@ export class ChangesController implements
 	 * algum desses textos, soma os números de cada edição. `list` vem da mais
 	 * recente para a mais antiga.
 	 */
-	private summaryOf(list: readonly RawEntry[]): FileSummary {
+	private summaryOf(list: readonly RawEntry[]): FileSummary & { revision?: number } {
 		const cacheKey = list.map((entry) => entry.id).join('|');
 		const cached = this.summaryCache.get(cacheKey);
 		if (cached) {
@@ -708,8 +910,9 @@ export class ChangesController implements
 		const newest = list[0];
 		const oldest = list[list.length - 1];
 		const view = this.viewOf(newest);
-		const first = oldest.before;
-		const last = newest.after;
+		const shared = this.getSharedReview(newest.file);
+		const first = shared && shared.base.kind !== 'unavailable' ? { exists: shared.base.kind === 'text', text: shared.base.kind === 'text' ? shared.base.text : '', large: false } : oldest.before;
+		const last = shared && shared.expected.kind !== 'unavailable' ? { exists: shared.expected.kind === 'text', text: shared.expected.kind === 'text' ? shared.expected.text : '', large: false } : newest.after;
 		let added = 0;
 		let removed = 0;
 		if (list.length === 1) {
@@ -725,9 +928,10 @@ export class ChangesController implements
 				removed += item.removed + item.modified;
 			}
 		}
-		const summary: FileSummary = {
+		const summary: FileSummary & { revision?: number } = {
 			id: newest.id,
-			key: fileKey(newest.file),
+			key: newest.file,
+			revision: this.getSharedReview(newest.file)?.revision,
 			file: view.file,
 			dir: view.dir,
 			added,
@@ -740,76 +944,123 @@ export class ChangesController implements
 	}
 
 	private async loadEntries(): Promise<RawEntry[]> {
-		const all: RawEntry[] = [];
-		const entryFolder = new Map<string, string>();
-		const blobs = new Map<string, string>();
-		const statusFiles: Array<{ folder: string; saved: Record<string, unknown> | undefined }> = [];
-		const version = this.statusVersion;
-		let migrate = false;
-		for (const folder of vscode.workspace.workspaceFolders ?? []) {
-			const uri = vscode.Uri.joinPath(folder.uri, ...LOG_PATH);
-			let text = await readText(uri);
-			if (text === undefined) {
-				continue;
+		const all: RawEntry[] = []; const folders = vscode.workspace.workspaceFolders ?? [];
+		const currentFolders = new Set(folders.filter((folder) => folder.uri.scheme === 'file').map((folder) => folder.uri.toString()));
+		for (const [key, store] of this.stores) { if (!currentFolders.has(key)) { await store.close(); this.stores.delete(key); } }
+		this.entryFolder.clear(); this.ordinals.clear(); this.resourceAliases.clear(); this.coverageMessage = null;
+		const collisions = new Set<string>(); const blobs = new Map<string, string>();
+		for (const folder of folders) {
+			if (folder.uri.scheme !== 'file') { this.coverageMessage = 'Revisão em provider não validado: somente leitura.'; continue; }
+			const key = folder.uri.toString(), log = nodePath.join(folder.uri.fsPath, ...LOG_PATH);
+			let stat: any; try { stat = await nodeFs.promises.lstat(log); } catch (error) { if ((error as { code?: string }).code !== 'ENOENT') { this.coverageMessage = 'Parte do histórico não pôde ser lida.'; } }
+			let cache = this.logCache.get(key);
+			if (!stat || !cache || cache.inode !== stat.ino || stat.size < cache.cursor.offset || stat.size === cache.size && stat.mtimeMs !== cache.mtime) { cache = { cursor: { offset: 0, line: 0 }, entries: [], size: -1, mtime: -1, inode: stat?.ino ?? 0, rejections: 0 }; }
+			if (stat && (cache.size !== stat.size || cache.mtime !== stat.mtimeMs || cache.cursor.offset < stat.size)) {
+				const parsed = await readLogFile(log, folder.uri.fsPath, { cursor: cache.cursor, maxEntries: 1000, maxBytes: 8 * 1024 * 1024 });
+				cache.entries.push(...parsed.entries); cache.rejections += parsed.rejections.length; cache.partialReason = parsed.coverage.status === 'partial' ? parsed.coverage.reason || 'partial' : undefined; cache.cursor = parsed.cursor; cache.size = stat.size; cache.mtime = stat.mtimeMs; cache.inode = stat.ino;
+				if (parsed.coverage.status === 'partial' || parsed.rejections.length) { this.coverageMessage = 'Histórico parcial: há registros incompatíveis, incompletos ou leitura pendente de orçamento.'; }
+				if (parsed.coverage.reason === 'budget' && parsed.cursor.offset > 0 && parsed.cursor.offset < stat.size) { this.scheduleRefresh(); }
 			}
-			text = await this.rotate(folder.uri, uri, text);
-			const folderKey = folder.uri.toString();
+			this.logCache.set(key, cache);
+			if (cache.rejections || cache.partialReason) { this.coverageMessage = 'Histórico parcial: registros incompatíveis/incompletos foram preservados ou aguardam leitura.'; }
 			const entries: RawEntry[] = [];
-			for (const line of text.split('\n')) {
-				if (!line.trim()) {
-					continue;
-				}
-				try {
-					const entry = JSON.parse(line) as RawEntry;
-					if (entry && typeof entry.id === 'string' && typeof entry.file === 'string') {
-						entries.push(entry);
-						entryFolder.set(entry.id, folderKey);
-					}
-				} catch {
-					// Linha incompleta: o hook pode estar escrevendo neste momento.
-				}
+			for (const raw of cache.entries) {
+				const canonical = await canonicalResource(raw.file, folder.uri.fsPath);
+				if (!canonical) { this.coverageMessage = 'Recursos fora das raízes autorizadas permanecem somente leitura.'; continue; }
+				this.resourceAliases.set(raw.file, canonical);
+				entries.push({ ...raw, file: canonical, before: raw.before && { ...raw.before }, after: raw.after && { ...raw.after } });
 			}
 			await this.resolveBlobs(folder.uri, entries, blobs);
-			all.push(...entries);
-
-			const saved = await this.readState(vscode.Uri.joinPath(folder.uri, ...STATUS_PATH));
-			statusFiles.push({ folder: folderKey, saved });
-			migrate = migrate || (saved === undefined && entries.length > 0);
-			this.applySavedMeta(await this.readState(vscode.Uri.joinPath(folder.uri, ...META_PATH)));
-		}
-		this.blobCache = blobs;
-		this.entryFolder = entryFolder;
-
-		// status.json é a fonte da verdade quando existe; sem ele, vale o que o
-		// editor guardava (versões anteriores) e o arquivo é criado.
-		if (version === this.statusVersion) {
-			for (const { folder, saved } of statusFiles) {
-				if (!saved) {
-					continue;
-				}
-				for (const [id, owner] of entryFolder) {
-					if (owner !== folder) {
-						continue;
-					}
-					const value = saved[id];
-					if (value === 'accepted' || value === 'rejected') {
-						this.status.set(id, value);
-					} else {
-						this.status.delete(id);
-					}
-				}
+			for (let ordinal = 0; ordinal < entries.length; ordinal += 1) {
+				const entry = entries[ordinal];
+				if (this.entryFolder.has(entry.id) && this.entryFolder.get(entry.id) !== key) { collisions.add(entry.id); continue; }
+				this.entryFolder.set(entry.id, key); this.ordinals.set(entry.id, ordinal); all.push(entry);
 			}
-			this.saveStatusMemento();
-		}
-		if (migrate) {
-			this.queueStateWrite();
-		}
+			this.applySavedMeta(await this.readState(vscode.Uri.joinPath(folder.uri, ...META_PATH)));
+			const capture = await safeReadText(nodePath.join(folder.uri.fsPath, ...LOG_DIR, CAPTURE_STATUS_FILE), folder.uri.fsPath, 64 * 1024);
+			this.captureWarnings.delete(key);
+			if (capture.kind === 'content') { try { const value = JSON.parse(capture.text.replace(/^\uFEFF/, '')); if (value?.schemaVersion === 1 && ['paused', 'quotaExceeded', 'invalidPolicy', 'storageUnavailable'].includes(value.state)) { this.captureWarnings.set(key, `Captura ${value.state}: revise a política e o armazenamento local.`); } else { this.captureWarnings.delete(key); } } catch { this.captureWarnings.set(key, 'Diagnóstico da captura incompatível.'); } }
 
-		all.sort((a, b) => b.time.localeCompare(a.time));
-		return all;
+			if (entries.length || await existsLocal(nodePath.join(folder.uri.fsPath, ...LOG_DIR, 'review-state.v1.json'))) {
+				try {
+					let store = this.stores.get(key);
+					if (!store) { const legacy = Object.fromEntries([...this.status].filter(([id]) => entries.some((entry) => entry.id === id))); store = await ReviewStore.open(folder.uri.fsPath, legacy); this.stores.set(key, store); }
+					else { await store.reload(); }
+					if (store.writable) {
+						const state = store.get();
+						if (ingestEntries(state, entries)) { await store.update((draft) => { ingestEntries(draft, entries); }); }
+					} else { const transient = store.get(); ingestEntries(transient, entries); }
+					await this.migrateLegacyUndo(store, entries);
+					this.storeErrors.delete(key);
+				} catch (error) { this.storeErrors.set(key, errorCode(error)); }
+			}
+		}
+		if (collisions.size) { this.coverageMessage = 'IDs de histórico ambíguos entre pastas foram isolados.'; }
+		this.blobCache = blobs;
+		this.synchronizeViews();
+		return all.filter((entry) => !collisions.has(entry.id)).sort((a, b) => b.time.localeCompare(a.time) || (this.ordinals.get(b.id) ?? 0) - (this.ordinals.get(a.id) ?? 0));
 	}
 
 	/** Preenche o texto dos snapshots que o log guarda só como hash. */
+
+	private async migrateLegacyUndo(store: ReviewStore, entries: readonly RawEntry[]): Promise<void> {
+		if (!store.writable || !this.undoStack.length) { return; }
+		const marker = 'legacy-undo-migration-' + crypto.createHash('sha256').update(JSON.stringify(this.undoStack)).digest('hex');
+		if (store.get().operations[marker]) { return; }
+		const imports: import('./review').ReviewUndoItem[] = [];
+		for (const batch of this.undoStack) {
+			const batchId = 'legacy-' + crypto.createHash('sha256').update(JSON.stringify(batch)).digest('hex');
+			for (const item of batch.items) {
+				const file = await canonicalResource(item.file, store.root); if (!file) { continue; }
+				const linked = batch.ids.filter((id) => entries.some((entry) => entry.id === id && entry.file === file));
+				if (!linked.length) { continue; }
+				const id = batchId + '-' + crypto.createHash('sha256').update(file).digest('hex').slice(0, 16);
+				if (store.get().undo.some((saved) => saved.id === id)) { continue; }
+				imports.push({ id, operationId: id, file, ids: linked, previous: item.previous === undefined ? { kind: 'absent' } : { kind: 'text', text: item.previous }, restored: item.restored === undefined ? { kind: 'absent' } : { kind: 'text', text: item.restored }, phase: 'available', batchId, createdAt: '1970-01-01T00:00:00.000Z' });
+			}
+		}
+		await store.update((state) => { state.undo.push(...imports); state.operations[marker] = { id: marker, file: store.root, ids: [], expected: { kind: 'absent' }, target: { kind: 'absent' }, stage: 'complete', kind: 'migration' }; });
+	}
+
+	private async pruneReviewedLog(folder: vscode.WorkspaceFolder, store: ReviewStore, clear: boolean): Promise<boolean> {
+		if (this.disposed) { throw new ReviewError('cancelledBeforeEffect'); }
+		const file = nodePath.join(store.directory, 'log.jsonl');
+		const read = await safeReadText(file, store.root, 128 * 1024 * 1024);
+		if (read.kind === 'absent') { return false; } if (read.kind === 'error') { throw new ReviewError(read.code); }
+		const rows = read.text.split('\n').map((line) => { try { const parsed = validateRawEntry(JSON.parse(line)); return { line, entry: parsed.ok ? parsed.entry : undefined }; } catch { return { line, entry: undefined }; } });
+		const state = store.get(); const protectedIds = new Set(state.undo.filter((item) => item.phase !== 'consumed').flatMap((item) => item.ids));
+		for (const operation of Object.values(state.operations)) { if (operation.stage !== 'complete') { operation.ids.forEach((id) => protectedIds.add(id)); } }
+		const candidates = rows.flatMap((row) => row.entry ? [row.entry] : []);
+		const isEligible = (id: string) => Object.hasOwn(state.statuses, id) && !protectedIds.has(id);
+		const days = vscode.workspace.getConfiguration('claudeCodeLauncher').get<number>('historyRetentionDays', 30);
+		const remove = new Set(clear ? candidates.filter((entry) => isEligible(entry.id)).map((entry) => entry.id) : retentionCandidates(candidates, days, Date.now(), isEligible));
+		let remaining = candidates.filter((entry) => !remove.has(entry.id)).length;
+		for (const entry of [...candidates].sort((a, b) => a.time.localeCompare(b.time))) { if (remaining <= MAX_LOG_ENTRIES) { break; } if (isEligible(entry.id) && !remove.has(entry.id)) { remove.add(entry.id); remaining -= 1; } }
+		if (!remove.size) { return false; }
+		const kept = rows.filter((row) => !row.entry || !remove.has(row.entry.id)).map((row) => row.line).filter((line) => line.trim());
+		await this.writeOwnedFile(store, file, kept.length ? kept.join('\n') + '\n' : '', read.text);
+		await store.update((draft) => {
+			for (const [resource, list] of Object.entries(draft.reviews)) { draft.reviews[resource] = list.filter((review) => review.phase !== 'complete' || !review.ids.every((id) => remove.has(id))); if (!draft.reviews[resource].length) { delete draft.reviews[resource]; } }
+			for (const id of remove) { delete draft.statuses[id]; }
+			for (const [id, op] of Object.entries(draft.operations)) { if (op.stage === 'complete' && op.kind !== 'migration' && op.ids.every((entryId) => remove.has(entryId)) && !draft.undo.some((item) => item.phase !== 'consumed' && item.operationId === id)) { delete draft.operations[id]; } }
+			draft.undo = draft.undo.filter((item) => item.phase !== 'consumed' || !item.ids.every((id) => remove.has(id)));
+		});
+		const metaFile = nodePath.join(store.directory, 'meta.json'), meta = await safeReadText(metaFile, store.root, 8 * 1024 * 1024);
+		if (meta.kind === 'content') { const parsed = validateSavedMeta(JSON.parse(meta.text)); for (const id of remove) { delete parsed[id]; } await this.writeOwnedFile(store, metaFile, JSON.stringify(parsed) + '\n', meta.text); }
+		this.logCache.delete(folder.uri.toString()); await this.collectBlobs(folder.uri, kept); return true;
+	}
+	private async applyRetention(): Promise<void> {
+		if (this.maintenance || this.disposed || this.activeOperations.size || this.backgroundTasks.size) { return; }
+		for (const folder of vscode.workspace.workspaceFolders ?? []) {
+			const store = this.stores.get(folder.uri.toString()); if (!store?.writable) { continue; }
+			const entries = this.entries.filter((entry) => this.entryFolder.get(entry.id) === folder.uri.toString());
+			const days = vscode.workspace.getConfiguration('claudeCodeLauncher').get<number>('historyRetentionDays', 30);
+			if (entries.length <= MAX_LOG_ENTRIES && !retentionCandidates(entries, days, Date.now(), (id) => this.status.has(id)).length) { continue; }
+			try { const changed = await withCaptureMaintenance(store, () => this.pruneReviewedLog(folder, store, false)); if (changed) { this.refreshAgain = true; } }
+			catch (error) { this.coverageMessage = `Retenção adiada: ${errorCode(error)}. Pendências preservadas.`; }
+		}
+	}
+
 	private async resolveBlobs(folder: vscode.Uri, entries: RawEntry[], blobs: Map<string, string>): Promise<void> {
 		const wanted = new Set<string>();
 		for (const entry of entries) {
@@ -819,12 +1070,17 @@ export class ChangesController implements
 				}
 			}
 		}
-		await Promise.all([...wanted].map(async (hash) => {
-			const text = this.blobCache.get(hash) ?? await readText(vscode.Uri.joinPath(folder, ...BLOB_DIR, `${hash}.txt`));
-			if (text !== undefined) {
-				blobs.set(hash, text);
-			}
-		}));
+		let bytesRead = [...blobs.values()].reduce((total, text) => total + Bytes.byteLength(text, 'utf8'), 0);
+		const hashes = [...wanted];
+		for (let offset = 0; offset < hashes.length; offset += 4) {
+			if (bytesRead >= 64 * 1024 * 1024) { this.coverageMessage = 'Parte dos snapshots aguarda orçamento de memória; os registros originais foram preservados.'; break; }
+			const batch = await Promise.all(hashes.slice(offset, offset + 4).map(async (hash) => {
+				const text = this.blobCache.get(hash) ?? await readVerifiedBlob(vscode.Uri.joinPath(folder, ...BLOB_DIR, hash + '.txt').fsPath, folder.fsPath, hash);
+				return { hash, text };
+			}));
+			for (const { hash, text } of batch) { if (text !== undefined && bytesRead + Bytes.byteLength(text, 'utf8') <= 64 * 1024 * 1024) { blobs.set(hash, text); bytesRead += Bytes.byteLength(text, 'utf8'); } }
+		}
+
 		const get = (hash: string) => blobs.get(hash);
 		for (const entry of entries) {
 			entry.before = resolveSnapshot(entry.before, get);
@@ -832,61 +1088,30 @@ export class ChangesController implements
 		}
 	}
 
-	/** Mantém o log abaixo de MAX_LOG_ENTRIES, tirando as edições revisadas mais antigas. */
-	private async rotate(folder: vscode.Uri, uri: vscode.Uri, text: string): Promise<string> {
-		const kept = trimLog(text.split('\n'), MAX_LOG_ENTRIES, (id) => this.status.has(id));
-		if (!kept) {
-			return text;
-		}
-		try {
-			// O hook pode ter acrescentado uma linha desde a leitura: ela é mantida.
-			const again = await readText(uri);
-			if (again === undefined || !again.startsWith(text)) {
-				return text;
-			}
-			const next = `${kept.join('\n')}\n${again.slice(text.length)}`;
-			await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(next));
-			await this.collectBlobs(folder, next.split('\n'));
-			return next;
-		} catch {
-			return text;
-		}
-	}
 
 	/**
 	 * Apaga os blobs que nenhuma linha do log nem nenhum "pre" em andamento
 	 * cita. Blobs recentes ficam: o hook pode tê-los gravado agora há pouco.
 	 */
 	private async collectBlobs(folder: vscode.Uri, logLines: readonly string[]): Promise<void> {
+		const store = this.stores.get(folder.toString()); if (!store?.writable) { return; }
+		const keep = referencedBlobs(logLines), pending = nodePath.join(store.directory, 'pending'), directory = nodePath.join(store.directory, 'blobs');
+		if (!(await assessStoragePath(pending, store.root)).allowed || !(await assessStoragePath(directory, store.root)).allowed) { throw new ReviewError('unsafeStorageType'); }
 		try {
-			const now = Date.now();
-			const keep = referencedBlobs(logLines);
-			const pendingDir = vscode.Uri.joinPath(folder, ...PENDING_DIR);
-			for (const [name] of await readDirectory(pendingDir)) {
-				const uri = vscode.Uri.joinPath(pendingDir, name);
-				if (await olderThan(uri, now, PENDING_MAX_AGE_MS)) {
-					await vscode.workspace.fs.delete(uri).then(undefined, () => undefined);
-					continue;
-				}
-				const text = await readText(uri);
-				if (text !== undefined) {
-					referencedBlobs([text]).forEach((hash) => keep.add(hash));
-				}
+			for (const name of await nodeFs.promises.readdir(pending)) {
+				if (!/^[a-f0-9]{32}\.json$/.test(name)) { continue; }
+				const read = await safeReadText(nodePath.join(pending, name), store.root, 64 * 1024);
+				if (read.kind === 'error') { throw new ReviewError(read.code); }
+				if (read.kind === 'content') { referencedBlobs([read.text]).forEach((hash) => keep.add(hash)); }
 			}
-			const blobDir = vscode.Uri.joinPath(folder, ...BLOB_DIR);
-			for (const [name] of await readDirectory(blobDir)) {
-				const hash = name.slice(0, 40);
-				if (keep.has(hash) && name === `${hash}.txt`) {
-					continue;
-				}
-				const uri = vscode.Uri.joinPath(blobDir, name);
-				if (await olderThan(uri, now, BLOB_GRACE_MS)) {
-					await vscode.workspace.fs.delete(uri).then(undefined, () => undefined);
-				}
+		} catch (error) { if ((error as { code?: string }).code !== 'ENOENT') { throw error; } }
+		try {
+			for (const name of await nodeFs.promises.readdir(directory)) {
+				if (!/^[a-f0-9]{40}\.txt$/.test(name) || keep.has(name.slice(0, 40))) { continue; }
+				const file = nodePath.join(directory, name); if (!(await assessStoragePath(file, store.root)).allowed) { throw new ReviewError('unsafeStorageType'); }
+				const stat = await nodeFs.promises.lstat(file); if (stat.isFile() && !stat.isSymbolicLink() && Date.now() - stat.mtimeMs > BLOB_GRACE_MS) { if (this.disposed) { throw new ReviewError('cancelledBeforeEffect'); } await nodeFs.promises.unlink(file); }
 			}
-		} catch {
-			// A limpeza fica para a próxima vez.
-		}
+		} catch (error) { if ((error as { code?: string }).code !== 'ENOENT') { throw error; } }
 	}
 
 	/** Edições cuja explicação e pedido valem a pena buscar: as do histórico e as pendentes. */
@@ -904,15 +1129,17 @@ export class ChangesController implements
 	// enquanto faltarem, tenta outra vez em alguns segundos, até
 	// MAX_META_ATTEMPTS vezes por edição. O que for achado vai para meta.json.
 	private async fillMeta(): Promise<void> {
+		if (this.disposed || this.maintenance) { return; }
 		if (this.metaRunning) {
 			this.metaAgain = true;
 			return;
 		}
 		this.metaRunning = true;
+		const epoch = this.metaEpoch;
 		try {
 			const byTranscript = new Map<string, RawEntry[]>();
 			for (const entry of this.metaTargets()) {
-				if (!entry.transcript || !entry.toolUseId || this.hasMeta(entry)) {
+				if (!entry.transcript || !entry.toolUseId || this.hasMeta(entry) || !(await transcriptAllowed(entry.transcript, (vscode.workspace.workspaceFolders ?? []).filter((folder) => folder.uri.scheme === 'file').map((folder) => sessionsDir(folder.uri.fsPath))))) {
 					continue;
 				}
 				if ((this.metaAttempts.get(entry.id) ?? 0) >= MAX_META_ATTEMPTS) {
@@ -926,6 +1153,7 @@ export class ChangesController implements
 			let missing = false;
 			for (const [transcript, list] of byTranscript) {
 				const meta = await readTranscriptMeta(transcript);
+				if (epoch !== this.metaEpoch || this.maintenance || this.disposed) { return; }
 				for (const entry of list) {
 					const toolUseId = entry.toolUseId as string;
 					const reason = meta.reasons.get(toolUseId);
@@ -957,7 +1185,7 @@ export class ChangesController implements
 			}
 		} finally {
 			this.metaRunning = false;
-			if (this.metaAgain) {
+			if (this.metaAgain && !this.disposed && !this.maintenance) {
 				this.metaAgain = false;
 				void this.fillMeta();
 			}
@@ -965,7 +1193,7 @@ export class ChangesController implements
 	}
 
 	private applySavedMeta(saved: Record<string, unknown> | undefined): void {
-		for (const [id, value] of Object.entries(saved ?? {})) {
+		for (const [id, value] of Object.entries(validateSavedMeta(saved))) {
 			const item = value as { reason?: unknown; request?: { id?: unknown; text?: unknown } } | null;
 			if (!item || typeof item !== 'object') {
 				continue;
@@ -983,22 +1211,18 @@ export class ChangesController implements
 	// ---- Estado gravado: status.json, meta.json, undo -------------------------------
 
 	private async readState(uri: vscode.Uri): Promise<Record<string, unknown> | undefined> {
-		const text = await readText(uri);
-		if (text === undefined) {
-			return undefined;
-		}
-		this.stateText.set(uri.toString(), text);
-		try {
-			const parsed = JSON.parse(text);
-			return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
-		} catch {
-			return {};
-		}
+		const folder = vscode.workspace.getWorkspaceFolder(uri); if (!folder || folder.uri.scheme !== 'file') { return undefined; }
+		const read = await safeReadText(uri.fsPath, folder.uri.fsPath, 8 * 1024 * 1024);
+		if (read.kind === 'absent') { return undefined; }
+		if (read.kind === 'error') { this.coverageMessage = 'Metadados locais não puderam ser lidos com segurança.'; return undefined; }
+		this.stateText.set(uri.toString(), read.text);
+		try { const parsed: unknown = JSON.parse(read.text.replace(/^\uFEFF/, '')); if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && !Object.hasOwn(parsed, 'schemaVersion')) { return parsed as Record<string, unknown>; } } catch { /* Invalid is not an empty valid state. */ }
+		this.coverageMessage = 'Metadados locais incompatíveis foram preservados.'; return undefined;
 	}
 
 	/** Grava status.json e meta.json em seguida, juntando pedidos feitos enquanto uma gravação espera. */
 	private queueStateWrite(): void {
-		if (this.writeQueued) {
+		if (this.disposed || this.maintenance || this.writeQueued) {
 			return;
 		}
 		this.writeQueued = true;
@@ -1007,13 +1231,13 @@ export class ChangesController implements
 				this.writeQueued = false;
 				await this.writeStateFiles();
 			})
-			.catch(() => undefined);
+			.catch((error) => { this.coverageMessage = `Metadados preservados sem atualização: ${errorCode(error)}.`; if (!this.disposed) { this.publish(); } });
 	}
 
 	private async writeStateFiles(): Promise<void> {
 		for (const folder of vscode.workspace.workspaceFolders ?? []) {
 			const folderKey = folder.uri.toString();
-			const status: Record<string, Status> = {};
+			const status: Record<string, ReviewResolution> = {};
 			const meta: Record<string, { reason: string | null; request: RequestInfo | null }> = {};
 			let count = 0;
 			for (const [id, owner] of this.entryFolder) {
@@ -1034,138 +1258,122 @@ export class ChangesController implements
 			if (count === 0) {
 				continue;
 			}
-			await this.writeIfChanged(vscode.Uri.joinPath(folder.uri, ...STATUS_PATH), status);
+			if (!this.stores.get(folderKey)?.writable) { continue; }
+			// status.json is written exclusively by the canonical store projection.
 			await this.writeIfChanged(vscode.Uri.joinPath(folder.uri, ...META_PATH), meta);
 		}
 	}
 
 	private async writeIfChanged(uri: vscode.Uri, value: object): Promise<void> {
-		const text = `${JSON.stringify(value)}\n`;
-		if (this.stateText.get(uri.toString()) === text) {
-			return;
-		}
-		try {
-			await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(text));
-			this.stateText.set(uri.toString(), text);
-		} catch {
-			// Sem permissão de escrita: o estado do editor continua valendo.
-		}
+		const folder = vscode.workspace.getWorkspaceFolder(uri), store = folder && this.stores.get(folder.uri.toString());
+		if (!store?.writable || this.maintenance) { return; }
+		const text = JSON.stringify(value) + '\n'; if (this.stateText.get(uri.toString()) === text) { return; }
+		const read = await safeReadText(uri.fsPath, store.root, 8 * 1024 * 1024);
+		if (read.kind === 'error') { throw new ReviewError(read.code); }
+		if (read.kind === 'content') { try { const parsed = JSON.parse(read.text.replace(/^\uFEFF/, '')); if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || Object.hasOwn(parsed, 'schemaVersion') || Object.keys(validateSavedMeta(parsed)).length !== Object.keys(parsed).length) { throw new Error('shape'); } } catch { throw new ReviewError('invalidMetadata'); } }
+		await this.writeOwnedFile(store, uri.fsPath, text, read.kind === 'content' ? read.text : undefined);
+		this.stateText.set(uri.toString(), text);
 	}
 
-	private saveStatusMemento(): void {
-		while (this.status.size > MAX_STATUS) {
-			this.status.delete(this.status.keys().next().value as string);
-		}
-		void this.context.workspaceState.update(STATUS_KEY, Object.fromEntries(this.status));
-	}
-
-	private pushUndo(undo: Undo): void {
-		this.undoStack.push(undo);
-		let size = this.undoStack.reduce((total, item) => total + undoSize(item), 0);
-		while (this.undoStack.length > 1 && (this.undoStack.length > MAX_UNDO || size > MAX_UNDO_CHARS)) {
-			size -= undoSize(this.undoStack.shift() as Undo);
-		}
-		this.saveUndo();
-	}
-
-	/**
-	 * O estado do registro fica ao lado do título da view, e os pendentes viram um
-	 * número no ícone da barra de atividades, como o Git faz.
-	 */
-	private updateViewChrome(pending = this.pendingGroups().length): void {
-		if (!this.view) {
-			return;
-		}
-		const hasFolder = (vscode.workspace.workspaceFolders ?? []).length > 0;
-		this.view.description = hasFolder ? (this.enabled ? 'Registrando' : 'Registro desligado') : undefined;
-		this.view.badge = pending > 0
-			? { value: pending, tooltip: `${capitalize(countFiles(pending))} com mudanças do Claude para revisar` }
-			: undefined;
-	}
-
-	/** Contextos que decidem quais botões aparecem no título da view Mudanças. */
-	private updateViewContexts(): void {
-		void vscode.commands.executeCommand('setContext', 'claudeCodeLauncher.changeLogEnabled', this.enabled);
-		void vscode.commands.executeCommand('setContext', 'claudeCodeLauncher.hasChangeHistory', this.entries.length > 0);
-		void vscode.commands.executeCommand('setContext', 'claudeCodeLauncher.canUndoReject', this.undoStack.length > 0);
-	}
-
-	private saveUndo(): void {
-		this.updateViewContexts();
-		const fits = this.undoStack.reduce((total, item) => total + undoSize(item), 0) <= MAX_UNDO_CHARS;
-		// Uma recusa enorme ainda pode ser desfeita nesta sessão, mas não é guardada.
-		void this.context.workspaceState.update(UNDO_KEY, fits ? this.undoStack : []);
-	}
 
 	private async hooksEnabled(): Promise<boolean> {
+		if (vscode.workspace.getConfiguration('claudeCodeLauncher').get<string>('hookExecutionMode', 'auto') === 'disabled') { return false; }
 		for (const folder of vscode.workspace.workspaceFolders ?? []) {
-			const text = await readText(vscode.Uri.joinPath(folder.uri, ...SETTINGS_PATH));
-			if (text?.includes(HOOK_FILE)) {
-				return true;
+			if (folder.uri.scheme !== 'file') { continue; }
+			const read = await this.readSettings(folder);
+			if (inspectHookConfiguration(read, this.scriptPath(folder), this.knownHookPaths()).active) {
+				try { const policy = await this.readCapturePolicy(folder); if (policy?.paused || this.captureWarnings.has(folder.uri.toString())) { continue; } const capability = await this.hookCapability(); if (capability.status !== 'confirmed') { this.hookWarnings.set(folder.uri.toString(), 'Capacidade de hooks não confirmada; revisão do histórico continua disponível.'); continue; } return true; }
+				catch { this.hookWarnings.set(folder.uri.toString(), 'Política de captura incompatível preservada.'); }
 			}
 		}
 		return false;
 	}
-
-	/** Copia o script do hook para dentro do projeto, numa pasta que o git ignora. */
-	private async installHookScript(folder: vscode.WorkspaceFolder): Promise<void> {
-		const dir = vscode.Uri.joinPath(folder.uri, ...LOG_DIR);
-		await vscode.workspace.fs.createDirectory(dir);
-		const ignore = vscode.Uri.joinPath(dir, '.gitignore');
-		if ((await readText(ignore)) === undefined) {
-			await vscode.workspace.fs.writeFile(ignore, new TextEncoder().encode('*\n'));
-		}
-		await vscode.workspace.fs.copy(
-			vscode.Uri.joinPath(this.context.extensionUri, 'hooks', 'record-change.js'),
-			this.scriptUri(folder),
-			{ overwrite: true },
-		);
+	private async ensureStore(folder: vscode.WorkspaceFolder): Promise<ReviewStore> {
+		if (this.disposed) { throw new ReviewError('cancelledBeforeEffect'); }
+		if (folder.uri.scheme !== 'file') { throw new ReviewError('unsupportedStore'); }
+		let store = this.stores.get(folder.uri.toString());
+		if (!store) { store = await ReviewStore.open(folder.uri.fsPath); this.stores.set(folder.uri.toString(), store); }
+		if (!store.writable) { throw new ReviewError(store.blockReason || 'readOnlyOwner'); }
+		return store;
 	}
-
-	private async writeHooks(folder: vscode.WorkspaceFolder, enable: boolean): Promise<void> {
-		const uri = vscode.Uri.joinPath(folder.uri, ...SETTINGS_PATH);
-		const text = await readText(uri);
-		// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		let settings: any = {};
-		if (text !== undefined && text.trim()) {
+	private async readSettings(folder: vscode.WorkspaceFolder): Promise<SettingsRead> { return safeReadText(nodePath.join(folder.uri.fsPath, ...SETTINGS_PATH), folder.uri.fsPath); }
+	private knownHookPaths(): string[] { return [vscode.Uri.joinPath(this.context.globalStorageUri, HOOK_FILE).fsPath]; }
+	private async hookCapability(): Promise<HookCapability> {
+		const config = vscode.workspace.getConfiguration('claudeCodeLauncher'); const mode = config.get<string>('hookExecutionMode', 'auto');
+		if (mode === 'disabled') { return { status: 'unsupported', harness: 'disabled' }; }
+		if (mode === 'exec') { return { status: 'confirmed', harness: 'operator-selected-exec', evidence: 'Explicit command+args contract selected in settings.' }; }
+		if (vscode.workspace.getConfiguration('claudeCode').get<string>('claudeProcessWrapper')) { return { status: 'unknown', harness: 'external-wrapper' }; }
+		const extension = vscode.extensions.getExtension('anthropic.claude-code');
+		if (extension) {
 			try {
-				settings = JSON.parse(text);
-			} catch {
-				void vscode.window.showErrorMessage(
-					`Não alterei ${uri.fsPath}: o arquivo não é um JSON válido. Corrija-o e tente de novo.`,
-				);
-				return;
-			}
+				const file = nodePath.join(extension.extensionPath, 'claude-code-settings.schema.json');
+				const stat = await nodeFs.promises.stat(file); if (stat.size > 4 * 1024 * 1024) { throw new Error('schemaBudget'); }
+				const schema = JSON.parse(await nodeFs.promises.readFile(file, 'utf8'));
+				const variants = schema?.properties?.hooks?.additionalProperties?.items?.properties?.hooks?.items?.anyOf;
+				if (Array.isArray(variants) && variants.some((variant: any) => variant?.properties?.type?.const === 'command' && variant?.properties?.command?.type === 'string' && variant?.properties?.args?.type === 'array' && variant?.properties?.args?.items?.type === 'string')) {
+					return { status: 'confirmed', harness: 'anthropic.claude-code', version: extension.packageJSON?.version, evidence: 'Installed command-hook schema variant supports exec args.' };
+				}
+			} catch { /* Unknown does not enable a shell fallback. */ }
 		}
-		if (!enable && text === undefined) {
-			return;
+		return { status: 'unknown', harness: 'unverified-runtime' };
+	}
+	private async readCapturePolicy(folder: vscode.WorkspaceFolder): Promise<CapturePolicy | undefined> {
+		const read = await safeReadText(nodePath.join(folder.uri.fsPath, ...LOG_DIR, CAPTURE_POLICY_FILE), folder.uri.fsPath, 64 * 1024);
+		if (read.kind === 'absent') { return undefined; }
+		if (read.kind === 'error') { throw new ReviewError(read.code); }
+		let parsed: unknown; try { parsed = JSON.parse(read.text.replace(/^\uFEFF/, '')); } catch { throw new ReviewError('invalidCapturePolicy'); }
+		if (!validateCapturePolicy(parsed)) { throw new ReviewError('unsupportedCapturePolicy'); }
+		return parsed;
+	}
+	private async writeCapturePolicy(folder: vscode.WorkspaceFolder, paused: boolean): Promise<void> {
+		const store = await this.ensureStore(folder); const config = vscode.workspace.getConfiguration('claudeCodeLauncher');
+		const policy = makeCapturePolicy({ paused, excludedPatterns: config.get<string[]>('historyExcludedPatterns'), maxStorageMB: config.get<number>('historyMaxStorageMB', 128), retentionDays: config.get<number>('historyRetentionDays', 30) });
+		const file = nodePath.join(store.directory, CAPTURE_POLICY_FILE), read = await safeReadText(file, store.root);
+		if (read.kind === 'error') { throw new ReviewError(read.code); }
+		if (read.kind === 'content') {
+			const prior = await this.readCapturePolicy(folder); if (prior && JSON.stringify({ ...prior, generation: '' }) === JSON.stringify({ ...policy, generation: '' })) { return; }
 		}
-
-		const script = this.scriptPath(folder);
-		const hooks = settings.hooks && typeof settings.hooks === 'object' ? settings.hooks : {};
-		for (const [event, phase] of [['PreToolUse', 'pre'], ['PostToolUse', 'post']] as const) {
-			const groups: unknown[] = Array.isArray(hooks[event]) ? hooks[event] : [];
-			const kept = groups.filter((group) => !JSON.stringify(group).includes(HOOK_FILE));
-			if (enable) {
-				kept.push({
-					matcher: MATCHER,
-					hooks: [{ type: 'command', command: `node "${script}" ${phase}`, timeout: 10 }],
-				});
-			}
-			if (kept.length > 0) {
-				hooks[event] = kept;
-			} else {
-				delete hooks[event];
-			}
-		}
-		if (Object.keys(hooks).length > 0) {
-			settings.hooks = hooks;
-		} else {
-			delete settings.hooks;
-		}
-
-		await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(folder.uri, '.claude'));
-		await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(`${JSON.stringify(settings, null, 2)}\n`));
+		await this.writeOwnedFile(store, file, JSON.stringify(policy) + '\n', read.kind === 'content' ? read.text : undefined);
+	}
+	private async installHookScript(folder: vscode.WorkspaceFolder): Promise<void> {
+		const store = await this.ensureStore(folder), dir = store.directory;
+		const ignore = nodePath.join(dir, '.gitignore');
+		if (!(await existsLocal(ignore))) { await this.writeOwnedFile(store, ignore, '*\n', undefined); }
+		const text = await nodeFs.promises.readFile(vscode.Uri.joinPath(this.context.extensionUri, 'hooks', 'record-change.js').fsPath, 'utf8');
+		const file = this.scriptUri(folder).fsPath, read = await safeReadText(file, store.root);
+		if (read.kind === 'error') { throw new ReviewError(read.code); }
+		if (read.kind !== 'content' || read.text !== text) { await this.writeOwnedFile(store, file, text, read.kind === 'content' ? read.text : undefined); }
+	}
+	private async prepareHookPlan(folder: vscode.WorkspaceFolder, enable: boolean): Promise<HookPlan> {
+		return planHooks({ read: await this.readSettings(folder), scriptPath: this.scriptPath(folder), knownScriptPaths: this.knownHookPaths(), enable, capability: await this.hookCapability() });
+	}
+	private async writeHooks(folder: vscode.WorkspaceFolder, enable: boolean, prepared?: HookPlan): Promise<void> {
+		const store = await this.ensureStore(folder), file = nodePath.join(folder.uri.fsPath, ...SETTINGS_PATH);
+		const plan = prepared ?? await this.prepareHookPlan(folder, enable);
+		const result = await applyHookPlan(plan, {
+			read: () => this.readSettings(folder),
+			assertOwnership: async () => { if (!store.writable) { throw new ReviewError('readOnlyOwner'); } await store.update(() => undefined); },
+			backup: async (text, fingerprint) => {
+				const directory = nodePath.join(store.directory, 'settings-backups'); const scope = await assessStoragePath(directory, store.root); if (!scope.allowed) { throw new ReviewError('unsafeStorageType'); }
+				await nodeFs.promises.mkdir(directory, { recursive: true, mode: 0o700 }); const backup = nodePath.join(directory, fingerprint + '.json');
+				try { await nodeFs.promises.writeFile(backup, text, { flag: 'wx', mode: 0o600 }); } catch (error) { if ((error as { code?: string }).code !== 'EEXIST') { throw error; } }
+			},
+			write: async (text, fingerprint) => { const read = await this.readSettings(folder); if (read.kind === 'error' || configFingerprint(read.kind === 'content' ? read.text : undefined) !== fingerprint) { throw new ReviewError('settingsChanged'); } await this.writeOwnedFile(store, file, text, read.kind === 'content' ? read.text : undefined); },
+		});
+		if (!['persisted', 'unchanged'].includes(result.kind)) { throw new ReviewError(result.code || result.kind); }
+	}
+	private async writeOwnedFile(store: ReviewStore, file: string, text: string, expected: string | undefined): Promise<void> {
+		if (this.disposed || !store.writable || !(await assessStoragePath(file, store.root)).allowed) { throw new ReviewError('unsafeOrReadOnlyStorage'); }
+		const read = await safeReadText(file, store.root, 128 * 1024 * 1024);
+		if (read.kind === 'error' || (read.kind === 'content' ? read.text : undefined) !== expected) { throw new ReviewError('stateChanged'); }
+		const temp = `${file}.${crypto.randomUUID()}.tmp`;
+		await nodeFs.promises.writeFile(temp, text, { flag: 'wx', mode: 0o600 });
+		try {
+			const again = await safeReadText(file, store.root, 128 * 1024 * 1024);
+			if (again.kind === 'error' || (again.kind === 'content' ? again.text : undefined) !== expected) { throw new ReviewError('stateChanged'); }
+			if (this.disposed || !store.writable) { throw new ReviewError('cancelledBeforeEffect'); }
+			await nodeFs.promises.rename(temp, file);
+		} finally { await nodeFs.promises.unlink(temp).catch(() => undefined); }
 	}
 
 	private scriptUri(folder: vscode.WorkspaceFolder): vscode.Uri {
@@ -1221,36 +1429,6 @@ async function confirm(message: string, detail: string, action: string): Promise
 }
 
 /** Texto atual do arquivo: o do editor, se estiver aberto, senão o do disco. */
-async function currentText(uri: vscode.Uri): Promise<string | undefined> {
-	const open = vscode.workspace.textDocuments.find((doc) => !doc.isClosed && doc.uri.toString() === uri.toString());
-	return open ? open.getText() : readText(uri);
-}
-
-/** Grava o texto pelo editor quando o arquivo está aberto (fica no Ctrl+Z); senão, direto no disco. */
-async function writeText(uri: vscode.Uri, text: string): Promise<void> {
-	const open = vscode.workspace.textDocuments.find((doc) => !doc.isClosed && doc.uri.toString() === uri.toString());
-	if (open) {
-		const clean = normalizeEol(text);
-		const content = open.eol === vscode.EndOfLine.CRLF ? clean.replace(/\n/g, '\r\n') : clean;
-		const edit = new vscode.WorkspaceEdit();
-		edit.replace(uri, open.validateRange(new vscode.Range(0, 0, open.lineCount, 0)), content);
-		if (!(await vscode.workspace.applyEdit(edit))) {
-			throw new Error('O editor recusou a edição.');
-		}
-		await open.save();
-		return;
-	}
-	await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(uri, '..'));
-	await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(text));
-}
-
-async function deleteFile(uri: vscode.Uri): Promise<void> {
-	try {
-		await vscode.workspace.fs.delete(uri, { useTrash: true });
-	} catch {
-		await vscode.workspace.fs.delete(uri, { useTrash: false });
-	}
-}
 
 function toViewEntry(entry: RawEntry): BaseView {
 	const relative = vscode.workspace.asRelativePath(entry.file, false).replace(/\\/g, '/');
@@ -1331,25 +1509,6 @@ function loadUndo(memento: vscode.Memento): Undo[] {
 	return saved.filter((undo) => undo && Array.isArray(undo.items) && Array.isArray(undo.ids)).slice(-MAX_UNDO);
 }
 
-function undoSize(undo: Undo): number {
-	return undo.items.reduce((total, item) => total + (item.previous?.length ?? 0) + (item.restored?.length ?? 0), 0);
-}
-
-async function readDirectory(uri: vscode.Uri): Promise<[string, vscode.FileType][]> {
-	try {
-		return await vscode.workspace.fs.readDirectory(uri);
-	} catch {
-		return [];
-	}
-}
-
-async function olderThan(uri: vscode.Uri, now: number, age: number): Promise<boolean> {
-	try {
-		return now - (await vscode.workspace.fs.stat(uri)).mtime > age;
-	} catch {
-		return false;
-	}
-}
 
 function actionLabel(tool: string | null | undefined, created: boolean): string {
 	if (created) {
@@ -1421,10 +1580,31 @@ async function readText(uri: vscode.Uri): Promise<string | undefined> {
 }
 
 function createNonce(): string {
-	const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-	let nonce = '';
-	for (let index = 0; index < 32; index += 1) {
-		nonce += alphabet.charAt(Math.floor(Math.random() * alphabet.length));
-	}
-	return nonce;
+	return crypto.randomBytes(24).toString('hex');
+}
+
+function errorCode(error: unknown): string { return error instanceof ReviewError ? error.code : (error as { code?: string })?.code || 'operationFailed'; }
+async function existsLocal(file: string): Promise<boolean> { try { await nodeFs.promises.lstat(file); return true; } catch (error) { if ((error as { code?: string }).code === 'ENOENT') { return false; } throw error; } }
+
+async function removeOwnedTree(file: string, root: string, cancelled: () => boolean = () => false): Promise<void> {
+	if (cancelled()) { throw new ReviewError('cancelledBeforeEffect'); }
+	if (!(await assessStoragePath(file, root)).allowed) { throw new ReviewError('unsafeStorageType'); }
+	const stat = await nodeFs.promises.lstat(file);
+	if (stat.isSymbolicLink()) { throw new ReviewError('unsafeStorageType'); }
+	if (stat.isDirectory()) { for (const name of await nodeFs.promises.readdir(file)) { await removeOwnedTree(nodePath.join(file, name), root, cancelled); } if (cancelled()) { throw new ReviewError('cancelledBeforeEffect'); } await nodeFs.promises.rmdir(file); }
+	else if (stat.isFile()) { if (cancelled()) { throw new ReviewError('cancelledBeforeEffect'); } await nodeFs.promises.unlink(file); }
+	else { throw new ReviewError('unsafeStorageType'); }
+}
+
+async function canonicalResource(file: string, root: string): Promise<string | undefined> {
+	if (!nodePath.isAbsolute(file) || !nodePath.isAbsolute(root)) { return undefined; }
+	try {
+		const canonicalRoot = await nodeFs.promises.realpath(root); let current = nodePath.resolve(file); const missing: string[] = [];
+		while (true) {
+			try { current = await nodeFs.promises.realpath(current); break; }
+			catch (error) { if ((error as { code?: string }).code !== 'ENOENT' || current === nodePath.dirname(current)) { return undefined; } missing.unshift(nodePath.basename(current)); current = nodePath.dirname(current); }
+		}
+		const canonical = nodePath.join(current, ...missing), relative = nodePath.relative(canonicalRoot, canonical);
+		return relative !== '..' && !relative.startsWith('..' + nodePath.sep) && !nodePath.isAbsolute(relative) ? canonical : undefined;
+	} catch { return undefined; }
 }
