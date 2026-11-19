@@ -7,6 +7,8 @@ declare const require: (id: string) => any;
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const ByteBuffer = require('buffer').Buffer;
+const crypto = require('node:crypto');
 
 const TAIL_BYTES = 256 * 1024;
 const HEAD_BYTES = 512 * 1024;
@@ -19,7 +21,16 @@ export interface SessionInfo {
 	updated: number;
 }
 
-const titleCache = new Map<string, { mtime: number; title: string | null }>();
+const titleCache = new Map<string, { mtime: number; size: number; title: string | null }>();
+const MAX_TITLE_CACHE = 1000;
+const MAX_SESSION_FILES = 10000;
+const MAX_TITLE_CANDIDATES = 256;
+
+function cacheTitle(file: string, mtime: number, size: number, title: string | null): void {
+	titleCache.delete(file);
+	titleCache.set(file, { mtime, size, title });
+	while (titleCache.size > MAX_TITLE_CACHE) { titleCache.delete(titleCache.keys().next().value as string); }
+}
 
 export function sessionsDir(workspaceFolder: string): string {
 	const base = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
@@ -43,7 +54,8 @@ export function listSessions(workspaceFolder: string, limit: number): SessionInf
 		}
 		try {
 			const file = path.join(dir, name);
-			const stat = fs.statSync(file);
+			const stat = fs.lstatSync(file);
+			if (!stat.isFile() || stat.isSymbolicLink()) { continue; }
 			files.push({ id, file, mtime: stat.mtimeMs, size: stat.size });
 		} catch {
 			// Arquivo sumiu entre o readdir e o stat.
@@ -56,9 +68,9 @@ export function listSessions(workspaceFolder: string, limit: number): SessionInf
 		if (sessions.length >= limit) {
 			break;
 		}
-		const cached = titleCache.get(item.id);
-		const title = cached && cached.mtime === item.mtime ? cached.title : readTitle(item.file, item.size);
-		titleCache.set(item.id, { mtime: item.mtime, title });
+		const cached = titleCache.get(item.file);
+		const title = cached && cached.mtime === item.mtime && cached.size === item.size ? cached.title : readTitle(item.file, item.size);
+		cacheTitle(item.file, item.mtime, item.size, title);
 		if (title) {
 			sessions.push({ id: item.id, title, updated: item.mtime });
 		}
@@ -66,10 +78,86 @@ export function listSessions(workspaceFolder: string, limit: number): SessionInf
 	return sessions;
 }
 
+
+export interface SessionListing {
+	sessions: SessionInfo[];
+	partial: boolean;
+	scanned: number;
+	total: number;
+}
+
+/** IO assíncrono com concorrência limitada e orçamento explícito de candidatos. */
+export async function listSessionsAsync(workspaceFolder: string, limit: number, cancelled: () => boolean = () => false): Promise<SessionListing> {
+	const result: SessionListing = { sessions: [], partial: false, scanned: 0, total: 0 };
+	let names: string[];
+	const dir = sessionsDir(workspaceFolder);
+	try { names = await fs.promises.readdir(dir); }
+	catch (error) {
+		result.partial = (error as { code?: string }).code !== 'ENOENT';
+		return result;
+	}
+	if (cancelled()) { return result; }
+	const candidates = names.filter((name) => name.endsWith('.jsonl') && SESSION_ID.test(name.slice(0, -6)));
+	result.total = candidates.length;
+	result.partial = candidates.length > MAX_SESSION_FILES;
+	const selected = candidates.slice(0, MAX_SESSION_FILES);
+	const files: Array<{ id: string; file: string; mtime: number; size: number }> = [];
+	for (let offset = 0; offset < selected.length && !cancelled(); offset += 8) {
+		const batch = await Promise.all(selected.slice(offset, offset + 8).map(async (name) => {
+			const file = path.join(dir, name);
+			try {
+				const stat = await fs.promises.lstat(file);
+				return stat.isFile() && !stat.isSymbolicLink() ? { id: name.slice(0, -6), file, mtime: stat.mtimeMs, size: stat.size } : undefined;
+			} catch (error) {
+				if ((error as { code?: string }).code !== 'ENOENT') { result.partial = true; }
+				return undefined;
+			}
+		}));
+		files.push(...batch.filter((file): file is NonNullable<typeof file> => file !== undefined));
+	}
+	files.sort((a, b) => b.mtime - a.mtime || a.id.localeCompare(b.id));
+	for (const item of files) {
+		if (cancelled() || result.sessions.length >= Math.max(0, limit)) { break; }
+		if (result.scanned >= MAX_TITLE_CANDIDATES) { result.partial = true; break; }
+		result.scanned += 1;
+		const cached = titleCache.get(item.file);
+		let title: string | null;
+		if (cached && cached.mtime === item.mtime && cached.size === item.size) { title = cached.title; }
+		else {
+			const tail = await readRangeAsync(item.file, Math.max(0, item.size - TAIL_BYTES), item.size);
+			if (cancelled()) { break; }
+			if (tail === null) { result.partial = true; continue; }
+			const head = item.size <= TAIL_BYTES ? tail : await readRangeAsync(item.file, 0, Math.min(item.size, HEAD_BYTES));
+			if (cancelled()) { break; }
+			if (head === null) { result.partial = true; continue; }
+			title = titleFromRanges(tail, head);
+			cacheTitle(item.file, item.mtime, item.size, title);
+		}
+		if (title) { result.sessions.push({ id: item.id, title, updated: item.mtime }); }
+	}
+	return result;
+}
+
+async function readRangeAsync(file: string, start: number, end: number): Promise<string | null> {
+	let handle: any;
+	try {
+		handle = await fs.promises.open(file, 'r');
+		const buffer = ByteBuffer.alloc(Math.max(0, end - start));
+		const { bytesRead } = await handle.read(buffer, 0, buffer.length, start);
+		return buffer.toString('utf8', 0, bytesRead);
+	} catch { return null; }
+	finally { await handle?.close().catch(() => undefined); }
+}
+
 // Título escolhido pelo usuário > título gerado pelo Claude Code > primeira mensagem.
 // Sem nenhuma mensagem do usuário, a conversa está vazia e não entra na lista.
 function readTitle(file: string, size: number): string | null {
 	const tail = readRange(file, Math.max(0, size - TAIL_BYTES), size);
+	const head = size <= TAIL_BYTES ? tail : readRange(file, 0, Math.min(size, HEAD_BYTES));
+	return titleFromRanges(tail, head);
+}
+
+function titleFromRanges(tail: string, head: string): string | null {
 	let custom: string | null = null;
 	let generated: string | null = null;
 	for (const entry of parseLines(tail)) {
@@ -82,7 +170,6 @@ function readTitle(file: string, size: number): string | null {
 		}
 	}
 
-	const head = size <= TAIL_BYTES ? tail : readRange(file, 0, Math.min(size, HEAD_BYTES));
 	const firstPrompt = firstUserText(head);
 	if (!firstPrompt && !custom && !generated) {
 		return null;
@@ -175,7 +262,7 @@ export function parseTranscriptMeta(text: string, transcriptPath: string): Trans
 			if (!entry.isMeta && entry.message) {
 				const prompt = promptText(entry.message.content);
 				if (prompt) {
-					current = { id: String(entry.uuid ?? `${transcriptPath}:${prompt}`), text: clip(prompt, MAX_REQUEST) };
+					current = { id: typeof entry.uuid === 'string' && /^[^\u0000-\u001f\u007f]{1,256}$/.test(entry.uuid) ? entry.uuid : 'request-' + crypto.createHash('sha256').update(`${transcriptPath}\0${prompt}`).digest('hex'), text: clip(prompt, MAX_REQUEST) };
 				}
 			}
 			continue;

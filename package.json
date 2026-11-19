@@ -2,7 +2,7 @@
   "name": "claude-code-launcher",
   "displayName": "Claude Code Launcher",
   "description": "Abre o chat oficial do Claude Code e mostra, de forma didática, o que ele mudou em cada arquivo.",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "publisher": "kauan",
   "license": "MIT",
   "repository": {
@@ -10,7 +10,8 @@
     "url": "https://github.com/KauanCarolino/Extension-Claude-Code-Launcher.git"
   },
   "engines": {
-    "vscode": "^1.85.0"
+    "vscode": "^1.94.0",
+    "node": ">=22"
   },
   "categories": [
     "Other"
@@ -19,6 +20,12 @@
     "onStartupFinished"
   ],
   "main": "./out/extension.js",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "A revisão pode restaurar arquivos e configurar hooks locais. Confie no workspace para habilitar o launcher."
+    }
+  },
   "contributes": {
     "commands": [
       {
@@ -56,7 +63,22 @@
       },
       {
         "command": "claude-code-launcher.clearChanges",
-        "title": "Limpar histórico de mudanças",
+        "title": "Limpar histórico revisado",
+        "category": "Claude Code Launcher"
+      },
+      {
+        "command": "claude-code-launcher.clearAllReviewData",
+        "title": "Apagar todos os dados locais de revisão",
+        "category": "Claude Code Launcher"
+      },
+      {
+        "command": "claude-code-launcher.releaseReviewWriter",
+        "title": "Liberar revisão para outra janela",
+        "category": "Claude Code Launcher"
+      },
+      {
+        "command": "claude-code-launcher.recoverReviewWriter",
+        "title": "Recuperar revisão bloqueada",
         "category": "Claude Code Launcher"
       },
       {
@@ -222,20 +244,86 @@
         "claudeCodeLauncher.inlineChanges": {
           "type": "boolean",
           "default": true,
-          "description": "Marca no próprio editor as linhas que o Claude adicionou, modificou ou removeu, enquanto o arquivo continuar como o Claude deixou."
+          "description": "Mostra a revisão das mudanças do Claude no editor, preservando decisões parciais e bloqueando ações quando houver conflito."
+        },
+        "claudeCodeLauncher.manageEditorGroups": {
+          "type": "boolean",
+          "default": false,
+          "description": "Permite ao launcher organizar os grupos do chat e gerir suas preferências de abertura. Ao desligar, restaura somente valores que continuem iguais aos definidos pelo launcher."
+        },
+        "claudeCodeLauncher.hookExecutionMode": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "exec",
+            "disabled"
+          ],
+          "default": "auto",
+          "enumDescriptions": [
+            "Ativa hooks somente quando o Claude Code selecionado declara suporte a executável e argumentos separados.",
+            "Usa executável e argumentos separados após você confirmar que sua versão do Claude Code suporta esse formato.",
+            "Desativa a instalação e execução dos hooks geridos pelo launcher."
+          ],
+          "description": "Formato de execução do registro de mudanças. Versões sem suporte confirmado permanecem desativadas; não há alternativa automática via shell."
+        },
+        "claudeCodeLauncher.historyExcludedPatterns": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "default": [
+            "**/.env",
+            "**/.env.*",
+            "**/*.pem",
+            "**/*.key",
+            "**/*.p12",
+            "**/*.pfx",
+            "**/id_rsa",
+            "**/id_ed25519",
+            "**/credentials.json"
+          ],
+          "description": "Padrões de caminhos excluídos de novas cópias de conteúdo no histórico local. Alterar a lista não apaga cópias já existentes."
+        },
+        "claudeCodeLauncher.historyRetentionDays": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3650,
+          "default": 30,
+          "description": "Retenção do histórico já revisado, em dias. Zero desativa a limpeza por idade. Pendências e dados necessários à recuperação são preservados."
+        },
+        "claudeCodeLauncher.historyMaxStorageMB": {
+          "type": "integer",
+          "minimum": 16,
+          "maximum": 2048,
+          "default": 128,
+          "description": "Limite de armazenamento local do histórico em MiB. Ao atingir o limite, novas capturas são suspensas sem apagar revisões pendentes."
         }
       }
     }
   },
   "scripts": {
-    "compile": "tsc -p ./",
+    "compile": "node scripts/build.cjs",
+    "typecheck": "tsc -p ./ --noEmit",
     "watch": "tsc -watch -p ./",
-    "test": "tsc -p ./ && node --test \"test/*.test.js\"",
-    "package": "vsce package"
+    "test": "npm run compile && node --test \"test/*.test.js\"",
+    "vscode:prepublish": "npm run compile",
+    "package": "vsce package",
+    "verify:package": "node scripts/verify-package.cjs",
+    "test:package": "node --test test/package/*.test.cjs",
+    "test:host": "node scripts/test-host.cjs"
   },
   "devDependencies": {
-    "@types/vscode": "^1.85.0",
-    "@vscode/vsce": "^3.6.0",
-    "typescript": "^5.6.0"
+    "@types/vscode": "1.94.0",
+    "@vscode/vsce": "4.1.1",
+    "typescript": "^5.6.0",
+    "yauzl": "3.4.0"
+  },
+  "overrides": {
+    "@vscode/vsce": {
+      "minimatch": "11.0.9"
+    }
   }
 }
