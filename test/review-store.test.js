@@ -155,3 +155,93 @@ test('snapshot and nesting budgets reject excess without changing the canonical 
 	await assert.rejects(store.update(s => { s.operations.op = { id: 'op', file: path.join(root, 'a.txt'), ids: [], expected: { kind: 'absent' }, target: { kind: 'absent' }, stage: 'prepared', extra }; }), /storeDepthExceeded/);
 	assert.equal(store.get().generation, generation);
 });
+
+test('an unchanged draft proves ownership without rewriting or advancing the canonical state', async t => {
+	const root = await fixture(t), store = await ReviewStore.open(root), reader = await ReviewStore.open(root);
+	t.after(() => store.close()); t.after(() => reader.close());
+	await store.update(s => ingestEntries(s, [entry(root, 'a', 'before', 'after')]));
+	const canonical = path.join(store.directory, 'review-state.v1.json'), bytes = fs.readFileSync(canonical), generation = store.get().generation;
+	const identity = fs.statSync(canonical);
+	await store.update(() => undefined); await store.update(s => { s.statuses = { ...s.statuses }; });
+	assert.equal(store.get().generation, generation); assert.deepEqual(fs.readFileSync(canonical), bytes);
+	assert.equal(fs.statSync(canonical).ino, identity.ino); assert.equal(fs.statSync(canonical).mtimeMs, identity.mtimeMs);
+	// The checks that make the no-op meaningful still run: a reader, a lost lock and a foreign generation are refused.
+	await assert.rejects(reader.update(() => undefined), /anotherWriter/);
+	const raw = JSON.parse(bytes.toString('utf8')); raw.generation += 5; fs.writeFileSync(canonical, JSON.stringify(raw));
+	await assert.rejects(store.update(() => undefined), /stateChanged/);
+});
+
+test('an update that leaves status.json unchanged commits once; a decision still goes through the pending projection', async t => {
+	const root = await fixture(t); const stages = [];
+	const store = await ReviewStore.open(root, {}, { fault(stage) { stages.push(stage); } }); t.after(() => store.close());
+	stages.length = 0; const generation = store.get().generation;
+	await store.update(s => ingestEntries(s, [entry(root, 'a', 'before', 'after')]));
+	assert.equal(store.get().generation, generation + 1); assert.equal(store.get().legacyProjection.phase, 'complete');
+	assert.equal(stages.filter(stage => stage === 'state').length, 1); assert.equal(stages.includes('projection'), false);
+	stages.length = 0;
+	await store.update(s => { s.statuses.a = 'accepted'; });
+	assert.equal(store.get().generation, generation + 3); assert.equal(store.get().legacyProjection.phase, 'complete');
+	assert.equal(stages.filter(stage => stage === 'state').length, 2); assert.equal(stages.filter(stage => stage === 'projection').length, 1);
+	assert.deepEqual(JSON.parse(fs.readFileSync(path.join(store.directory, 'status.json'), 'utf8')), { a: 'accepted' });
+	await store.close(); const reopened = await ReviewStore.open(root); t.after(() => reopened.close());
+	assert.equal(reopened.writable, true); assert.equal(reopened.get().statuses.a, 'accepted');
+});
+
+test('a verified snapshot is reused only while its file is unchanged: replaced content is rejected and a deleted copy is rewritten', async t => {
+	const root = await fixture(t), store = await ReviewStore.open(root); t.after(() => store.close());
+	const e = entry(root, 'a', 'before text', 'after text'); await store.update(s => ingestEntries(s, [e]));
+	const raw = JSON.parse(fs.readFileSync(path.join(store.directory, 'review-state.v1.json'), 'utf8'));
+	const blob = path.join(store.directory, 'review-blobs/v1', raw.reviews[e.file][0].base.contentRef.digest + '.txt');
+	await store.reload(); assert.equal(activeReview(store.get(), e.file).base.text, 'before text');
+	fs.unlinkSync(blob);
+	await store.update(s => { s.statuses.other = 'accepted'; });
+	assert.equal(fs.readFileSync(blob, 'utf8'), 'before text');
+	fs.writeFileSync(blob, 'tampered text of another size');
+	await assert.rejects(store.reload(), /invalidSnapshot/);
+	// Same size, later timestamp: identity changed, so the content is read and hashed again.
+	fs.writeFileSync(blob, 'BEFORE TEXT'); const later = new Date(Date.now() + 60000); fs.utimesSync(blob, later, later);
+	await assert.rejects(store.reload(), /invalidSnapshot/);
+	fs.writeFileSync(blob, 'before text'); await store.reload();
+	assert.equal(activeReview(store.get(), e.file).base.text, 'before text');
+});
+
+test('blob collection removes only old copies that no canonical, previous or backed-up state mentions', async t => {
+	const root = await fixture(t), store = await ReviewStore.open(root), reader = await ReviewStore.open(root);
+	t.after(() => store.close()); t.after(() => reader.close());
+	const blobs = path.join(store.directory, 'review-blobs/v1'), names = () => fs.readdirSync(blobs).sort();
+	const digestOf = text => require('node:crypto').createHash('sha256').update(text, 'utf8').digest('hex') + '.txt';
+	const old = file => { const time = new Date(Date.now() - 3600000); fs.utimesSync(path.join(blobs, file), time, time); };
+	const e = entry(root, 'a', 'first base', 'first expected');
+	await store.update(s => ingestEntries(s, [e]));
+	// Replace the review content twice: the first texts leave the canonical state, then also the previous one.
+	const replace = (base, expected) => store.update(s => { const review = s.reviews[e.file][0]; review.base = { kind: 'text', text: base }; review.expected = { kind: 'text', text: expected }; review.revision += 1; });
+	await replace('second base', 'second expected');
+	const backup = path.join(store.directory, 'review-migration-backups', 'manual-backup'); fs.mkdirSync(backup, { recursive: true });
+	fs.copyFileSync(path.join(store.directory, 'review-state.v1.json'), path.join(backup, 'review-state.v1.json'));
+	await replace('third base', 'third expected'); await replace('fourth base', 'fourth expected');
+	fs.writeFileSync(path.join(blobs, 'notes.txt'), 'unknown file'); fs.writeFileSync(path.join(blobs, digestOf('recent orphan')), 'recent orphan');
+	fs.writeFileSync(path.join(blobs, digestOf('old orphan')), 'old orphan');
+	for (const name of names()) { if (name !== digestOf('recent orphan')) old(name); }
+	await assert.rejects(reader.collectUnreferencedBlobs(0), /anotherWriter/);
+	const before = names(); assert.equal(await store.collectUnreferencedBlobs(), 3);
+	const removed = before.filter(name => !names().includes(name)).sort();
+	assert.deepEqual(removed, [digestOf('first base'), digestOf('first expected'), digestOf('old orphan')].sort());
+	for (const kept of ['second base', 'second expected', 'third base', 'third expected', 'fourth base', 'fourth expected', 'recent orphan']) assert.ok(names().includes(digestOf(kept)), kept);
+	assert.ok(names().includes('notes.txt'));
+	// What remains is sufficient for the canonical state, its previous generation and the backup.
+	await store.reload(); assert.equal(activeReview(store.get(), e.file).base.text, 'fourth base');
+	await store.close(); const reopened = await ReviewStore.open(root); t.after(() => reopened.close());
+	assert.equal(activeReview(reopened.get(), e.file).expected.text, 'fourth expected');
+});
+
+test('blob collection is cancelled, deleting nothing, when a reference source cannot be read', async t => {
+	if (process.platform === 'win32') { t.skip('symlink creation needs privileges on Windows'); return; }
+	const root = await fixture(t), store = await ReviewStore.open(root); t.after(() => store.close());
+	await store.update(s => ingestEntries(s, [entry(root, 'a', 'before', 'after')]));
+	const blobs = path.join(store.directory, 'review-blobs/v1'), orphan = path.join(blobs, 'f'.repeat(64) + '.txt');
+	fs.writeFileSync(orphan, 'orphan'); const time = new Date(Date.now() - 3600000); fs.utimesSync(orphan, time, time);
+	const backups = path.join(store.directory, 'review-migration-backups'); fs.mkdirSync(backups, { recursive: true });
+	fs.symlinkSync(root, path.join(backups, 'linked'));
+	await assert.rejects(store.collectUnreferencedBlobs(), /unsupportedStore/);
+	assert.equal(fs.existsSync(orphan), true);
+});

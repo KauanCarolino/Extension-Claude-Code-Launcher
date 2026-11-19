@@ -1,8 +1,10 @@
 import { ReviewError } from './review';
 import { ReviewStore } from './review-store';
 import { assessStoragePath, CAPTURE_MAINTENANCE_FILE } from './history';
-declare const require: (name: string) => any;
-const fs = require('node:fs'), path = require('node:path'), crypto = require('node:crypto'), runtime = require('node:process');
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as crypto from 'node:crypto';
+import * as runtime from 'node:process';
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 const queues = new WeakMap<ReviewStore, Promise<unknown>>();
 async function serialized<T>(store: ReviewStore, work: () => Promise<T>): Promise<T> {
@@ -17,6 +19,54 @@ export async function captureQuiescent(store: ReviewStore): Promise<boolean> {
 	}
 	return true;
 }
+/** The hook runs under a 10 s timeout; a lease this old cannot belong to a producer that is still working. */
+export const STALE_PRODUCER_MS = 30 * 1000;
+const LEASE_NAME = /^(\d{1,10})-(?:status-)?[a-f0-9]{16}\.json$/;
+function processGone(pid: number): boolean {
+	try { runtime.kill(pid, 0); return false; }
+	catch (error) { return (error as { code?: string }).code === 'ESRCH'; }
+}
+/**
+ * A hook killed mid-run (timeout, crash, power loss) leaves its lease in active/ and possibly a
+ * pending/<key>.post marker, which would block maintenance forever. Only what is provably orphaned is
+ * removed: a lease in the hook's own name format, older than the hook timeout, whose process no longer
+ * exists; and .post markers once no lease remains. Unknown names and live processes keep blocking.
+ * Call only while holding the maintenance guard: a producer arriving now stops before any content write.
+ */
+export async function reapStaleProducers(store: ReviewStore, now = Date.now()): Promise<number> {
+	const active = path.join(store.directory, 'active'), pending = path.join(store.directory, 'pending');
+	const list = async (dir: string): Promise<string[] | undefined> => {
+		if (!(await assessStoragePath(dir, store.root)).allowed) { return undefined; }
+		try { return await fs.promises.readdir(dir); }
+		catch (error) { return (error as { code?: string }).code === 'ENOENT' ? [] : undefined; }
+	};
+	const removeAged = async (file: string, accept: (text: string) => boolean): Promise<boolean> => {
+		try {
+			if (!(await assessStoragePath(file, store.root)).allowed) { return false; }
+			const stat = await fs.promises.lstat(file);
+			if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 1024 || now - stat.mtimeMs <= STALE_PRODUCER_MS) { return false; }
+			if (!accept(await fs.promises.readFile(file, 'utf8'))) { return false; }
+			await fs.promises.unlink(file); return true;
+		} catch { return false; /* Unknown evidence stays and keeps maintenance blocked. */ }
+	};
+	let removed = 0;
+	const leases = await list(active); if (!leases) { return removed; }
+	for (const name of leases) {
+		const pid = Number(LEASE_NAME.exec(name)?.[1]);
+		if (!Number.isSafeInteger(pid) || pid <= 0 || pid === runtime.pid || !processGone(pid)) { continue; }
+		// A lease truncated by the kill has no readable record; a readable one must name the same process.
+		if (await removeAged(path.join(active, name), (text) => {
+			try { const record = JSON.parse(text); return !!record && typeof record === 'object' && record.pid === pid; } catch { return true; }
+		})) { removed += 1; }
+	}
+	const remaining = await list(active); if (!remaining || remaining.length > 0) { return removed; }
+	// Every producer holds its lease from before the marker is created until after it is removed,
+	// so a marker without any lease belongs to a producer that no longer exists.
+	for (const name of await list(pending) ?? []) {
+		if (/^[a-f0-9]{32}\.post$/.test(name) && await removeAged(path.join(pending, name), () => true)) { removed += 1; }
+	}
+	return removed;
+}
 /** Cooperative guard: producer leases precede all content writes and recheck this guard. */
 export async function withCaptureMaintenance<T>(store: ReviewStore, work: () => Promise<T>, timeoutMs = 1500): Promise<T> {
 	return serialized(store, () => performMaintenance(store, work, timeoutMs));
@@ -30,12 +80,15 @@ async function performMaintenance<T>(store: ReviewStore, work: () => Promise<T>,
 	try { await fs.promises.writeFile(guard, JSON.stringify({ schemaVersion: 1, token, pid: runtime.pid }), { flag: 'wx', mode: 0o600 }); }
 	catch (error) { if ((error as { code?: string }).code === 'EEXIST') { throw new ReviewError('captureMaintenanceLocked'); } throw error; }
 	try {
+		await reapStaleProducers(store);
 		const deadline = Date.now() + timeoutMs; let quiet = false;
 		do { quiet = await captureQuiescent(store); if (quiet) { break; } await wait(20); } while (Date.now() < deadline);
 		if (!quiet) { throw new ReviewError('captureInProgress'); }
 		return await work();
 	} finally {
 		const contents = JSON.parse(await fs.promises.readFile(guard, 'utf8'));
+		// Deliberate: an effect that ran under a guard it no longer owns must not report success.
+		// eslint-disable-next-line no-unsafe-finally
 		if (contents.token !== token) { throw new ReviewError('captureMaintenanceOwnerLost'); }
 		await fs.promises.unlink(guard);
 	}

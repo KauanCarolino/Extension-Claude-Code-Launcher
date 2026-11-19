@@ -10,6 +10,7 @@ const { createRequire } = require('node:module');
 const { fixture, entry, writeLog, readLog, writeDiagnostic, until, OUT } = require('./helpers/changes-fixture.cjs');
 const { ReviewStore } = require(path.join(OUT, 'review-store.js'));
 const { ingestEntries } = require(path.join(OUT, 'review.js'));
+const { describeReason } = require(path.join(OUT, 'messages.js'));
 const history = require(path.join(OUT, 'history.js'));
 const hooks = require(path.join(OUT, 'hooks.js'));
 
@@ -107,7 +108,9 @@ test('controller preflight blocks unknown capability before writing a policy or 
 	await f.controller.setEnabled(true);
 	assert.equal(fs.existsSync(path.join(f.dir, history.CAPTURE_POLICY_FILE)), false);
 	assert.equal(fs.existsSync(path.join(f.dir, hooks.HOOK_NAME)), false);
-	assert.ok(f.warnings.some((message) => message.includes('execArgumentsNotConfirmed')));
+	// The user reads the explanation of this specific reason, never the internal code.
+	assert.ok(f.warnings.some((message) => message.includes(describeReason('execArgumentsNotConfirmed'))));
+	assert.ok(f.warnings.every((message) => !message.includes('execArgumentsNotConfirmed')));
 });
 
 test('controller preflight preserves invalid settings without installing script or policy', async (t) => {
@@ -127,7 +130,8 @@ test('unknown capture-policy version is preserved, and cannot be reset by activa
 	await f.controller.setEnabled(true);
 	assert.equal(fs.readFileSync(file, 'utf8'), prior);
 	assert.equal(fs.existsSync(path.join(f.dir, hooks.HOOK_NAME)), false);
-	assert.ok(f.warnings.some((message) => message.includes('unsupportedCapturePolicy')));
+	assert.ok(f.warnings.some((message) => message.includes(describeReason('unsupportedCapturePolicy'))));
+	assert.ok(f.warnings.every((message) => !message.includes('unsupportedCapturePolicy')));
 });
 
 test('repair preserves an explicit pause across reload and effective capture is not reported active', async (t) => {
@@ -426,4 +430,206 @@ test('dispose drains an active operation while rejecting new decisions before re
 		release(); await operation; await f.controller.whenDisposed();
 		f.controller.activeOperations.delete(operation);
 	}
+});
+
+function aged(file, hours) { const time = new Date(Date.now() - hours * 3600 * 1000); fs.utimesSync(file, time, time); }
+
+test('housekeeping removes aged hook markers and unreferenced review copies, keeping recent, unknown and in-progress files', async (t) => {
+	const f = fixture(t), store = await f.store();
+	await store.update((state) => { ingestEntries(state, [entry(f.root, 'kept')]); });
+	const completed = path.join(f.dir, 'completed'), pending = path.join(f.dir, 'pending'), blobs = path.join(f.dir, 'review-blobs', 'v1');
+	fs.mkdirSync(completed); fs.mkdirSync(pending);
+	const files = {
+		oldCompleted: path.join(completed, 'a'.repeat(32) + '.json'), recentCompleted: path.join(completed, 'b'.repeat(32) + '.json'),
+		unknownCompleted: path.join(completed, 'notes.json'), oldPending: path.join(pending, 'c'.repeat(32) + '.json'),
+		recentPending: path.join(pending, 'd'.repeat(32) + '.json'), oldPost: path.join(pending, 'e'.repeat(32) + '.post'),
+		orphanBlob: path.join(blobs, 'f'.repeat(64) + '.txt'),
+	};
+	for (const file of Object.values(files)) { fs.writeFileSync(file, '{}'); }
+	for (const name of ['oldCompleted', 'unknownCompleted', 'oldPending', 'oldPost', 'orphanBlob']) { aged(files[name], 25); }
+	const referenced = fs.readdirSync(blobs).filter((name) => name !== 'f'.repeat(64) + '.txt');
+	for (const name of referenced) { aged(path.join(blobs, name), 25); }
+	await f.controller.applyHousekeeping();
+	const exists = Object.fromEntries(Object.entries(files).map(([name, file]) => [name, fs.existsSync(file)]));
+	assert.deepEqual(exists, { oldCompleted: false, recentCompleted: true, unknownCompleted: true, oldPending: false, recentPending: true, oldPost: true, orphanBlob: false });
+	for (const name of referenced) { assert.equal(fs.existsSync(path.join(blobs, name)), true); }
+	assert.equal(store.get().reviews[path.join(f.root, 'kept.txt')][0].base.text, 'before');
+	// Within the interval a refresh does not scan the directories again.
+	fs.writeFileSync(files.oldCompleted, '{}'); aged(files.oldCompleted, 25);
+	await f.controller.applyHousekeeping(); assert.equal(fs.existsSync(files.oldCompleted), true);
+	f.controller.nextHousekeeping.clear(); await f.controller.applyHousekeeping(); assert.equal(fs.existsSync(files.oldCompleted), false);
+});
+
+test('housekeeping belongs to the review owner and never follows an unsafe marker directory', async (t) => {
+	await t.test('a read-only window removes nothing', async (sub) => {
+		const f = fixture(sub), owner = await ReviewStore.open(f.root); sub.after(() => owner.close());
+		const reader = await f.store(); assert.equal(reader.writable, false);
+		const completed = path.join(f.dir, 'completed'), marker = path.join(completed, 'a'.repeat(32) + '.json');
+		fs.mkdirSync(completed); fs.writeFileSync(marker, '{}'); aged(marker, 25);
+		await f.controller.applyHousekeeping(); assert.equal(fs.existsSync(marker), true);
+	});
+	await t.test('a linked directory is refused and retried later', async (sub) => {
+		if (process.platform === 'win32') { sub.skip('symlink creation needs privileges on Windows'); return; }
+		const f = fixture(sub); await f.store();
+		const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'launcher-outside-')); sub.after(() => fs.rmSync(outside, { recursive: true, force: true }));
+		const marker = path.join(outside, 'a'.repeat(32) + '.json'); fs.writeFileSync(marker, '{}'); aged(marker, 25);
+		fs.symlinkSync(outside, path.join(f.dir, 'completed'));
+		const before = Date.now(); await f.controller.applyHousekeeping();
+		assert.equal(fs.existsSync(marker), true);
+		const next = f.controller.nextHousekeeping.get(f.folder.uri.toString());
+		assert.ok(next > before && next < before + 60 * 60 * 1000);
+	});
+});
+
+test('a hook script that differs from the packaged one is restored by the review owner and reported; a missing one is restored quietly', async (t) => {
+	const f = fixture(t); f.configuredHooks(); f.policy(); await f.store();
+	const script = path.join(f.dir, hooks.HOOK_NAME), packaged = fs.readFileSync(path.resolve(__dirname, '../hooks/record-change.js'), 'utf8');
+	const key = f.folder.uri.toString();
+	await f.controller.loadCaptureHealth(f.folder);
+	assert.equal(fs.readFileSync(script, 'utf8'), packaged); assert.deepEqual(f.warnings, []);
+	fs.writeFileSync(script, packaged + '\nrequire("node:fs").writeFileSync("/tmp/injected", "x");\n');
+	await f.controller.loadCaptureHealth(f.folder);
+	assert.equal(fs.readFileSync(script, 'utf8'), packaged);
+	assert.equal(f.warnings.filter((message) => message.includes('foi restaurado')).length, 1);
+	assert.equal(f.controller.runtimeWarnings.has(key), false);
+	await f.controller.loadCaptureHealth(f.folder);
+	assert.equal(f.warnings.length, 1);
+});
+
+test('a window that does not own the review reports a differing hook script without rewriting it', async (t) => {
+	const f = fixture(t); f.configuredHooks(); f.policy();
+	const owner = await ReviewStore.open(f.root); t.after(() => owner.close());
+	const reader = await f.store(); assert.equal(reader.writable, false);
+	const script = path.join(f.dir, hooks.HOOK_NAME); fs.writeFileSync(script, 'process.exit(0);\n');
+	await f.controller.loadCaptureHealth(f.folder);
+	assert.equal(fs.readFileSync(script, 'utf8'), 'process.exit(0);\n');
+	let state; f.controller.post({ postMessage: async (value) => { state = value; } }, false);
+	assert.match(state.coverageMessage, /script de captura .* diferente/);
+	assert.equal(f.warnings.some((message) => message.includes('foi restaurado')), false);
+});
+
+test('a configured hook without node on PATH is reported until a capture event proves the executable exists', async (t) => {
+	const f = fixture(t); f.configuredHooks(); f.policy(); await f.store();
+	const key = f.folder.uri.toString();
+	await f.controller.loadCaptureHealth(f.folder);
+	assert.equal(f.controller.runtimeWarnings.has(key), false, 'node is on PATH in the test process');
+	f.controller.nodeLookup = { at: Date.now(), found: false };
+	await f.controller.loadCaptureHealth(f.folder);
+	assert.match(f.controller.runtimeWarnings.get(key), /"node".*PATH/);
+	let state; f.controller.post({ postMessage: async (value) => { state = value; } }, false);
+	assert.match(state.coverageMessage, /"node"/);
+	writeDiagnostic(f, { phase: 'pre', stage: 'pending', code: 'capturePrepared', contentCoverage: 'complete' });
+	await f.controller.loadCaptureHealth(f.folder);
+	assert.equal(f.controller.runtimeWarnings.has(key), false);
+});
+
+test('enabling the change log warns when node is not on PATH and stays quiet when hooks are not configured', async (t) => {
+	const f = fixture(t); f.controller.nodeLookup = { at: Date.now(), found: false };
+	await f.controller.loadCaptureHealth(f.folder);
+	assert.equal(f.controller.runtimeWarnings.size, 0);
+	await f.controller.setEnabled(true);
+	assert.equal(f.warnings.filter((message) => message.includes('"node"')).length, 1);
+	assert.equal(f.messages.some((message) => message.includes('Registro ativado')), true);
+});
+
+test('a recreated project file gets the default permissions, not the private mode of review storage', async (t) => {
+	if (process.platform === 'win32') { t.skip('POSIX permission bits'); return; }
+	const f = fixture(t), file = path.join(f.root, 'scripts', 'restored.sh'), sibling = path.join(f.root, 'sibling.txt');
+	fs.writeFileSync(sibling, 'ordinary file');
+	await f.controller.writeResource(file, f.root, { kind: 'text', text: '#!/bin/sh\n' }, { kind: 'absent' });
+	assert.equal(fs.readFileSync(file, 'utf8'), '#!/bin/sh\n');
+	assert.equal(fs.statSync(file).mode & 0o777, fs.statSync(sibling).mode & 0o777);
+	await assert.rejects(f.controller.writeResource(file, f.root, { kind: 'text', text: 'other' }, { kind: 'absent' }), { code: 'externalChange' });
+	assert.equal(fs.readFileSync(file, 'utf8'), '#!/bin/sh\n');
+});
+
+test('store and hook failures reach the user as explanations, and unknown codes only as a reference', async (t) => {
+	const f = fixture(t), owner = await ReviewStore.open(f.root); t.after(() => owner.close());
+	writeLog(f, [entry(f.root, 'a')]); await f.controller.loadEntries();
+	const reason = f.controller.readOnlyReason();
+	assert.equal(reason, 'Outra janela é a dona da revisão desta pasta');
+	assert.equal(/anotherWriter|readOnlyOwner/.test(reason), false);
+	assert.match(describeReason('somethingNew'), /não classificada \(referência: somethingNew\)/);
+	assert.equal(describeReason('<script>'), 'ocorreu uma falha não classificada');
+});
+
+test('a capture stopped by the inventory budget of accumulated markers resumes after housekeeping', async (t) => {
+	const hook = require('../hooks/record-change.js');
+	const f = fixture(t); await f.store();
+	const file = path.join(f.root, 'edited.txt'); fs.writeFileSync(file, 'one\n');
+	const env = { CLAUDE_PROJECT_DIR: f.root };
+	const input = (id) => ({ tool_name: 'Write', tool_input: { file_path: file }, tool_use_id: id, session_id: 'session', cwd: f.root });
+	assert.equal(hook.run('pre', input('first'), { env }).state, 'prepared');
+	fs.writeFileSync(file, 'two\n');
+	assert.equal(hook.run('post', input('first'), { env }).state, 'recorded');
+	// One marker per recorded edit, as the hook leaves them; all older than any open tool call.
+	const completed = path.join(f.dir, 'completed'), old = new Date(Date.now() - 25 * 3600 * 1000);
+	for (let index = 0; index < 10001; index += 1) {
+		const marker = path.join(completed, index.toString(16).padStart(32, '0') + '.json');
+		fs.writeFileSync(marker, '{}'); fs.utimesSync(marker, old, old);
+	}
+	const diagnostic = {};
+	assert.equal(hook.run('pre', input('blocked'), { env }).state, 'blocked');
+	const observations = path.join(f.dir, 'capture-diagnostics', 'v2', 'observations');
+	const latest = fs.readdirSync(observations).sort().at(-1);
+	assert.equal(JSON.parse(fs.readFileSync(path.join(observations, latest), 'utf8')).code, 'storageInventoryBudget');
+	await f.controller.applyHousekeeping();
+	// The marker of the edit recorded moments ago is recent and stays: it still deduplicates a repeated event.
+	assert.equal(fs.readdirSync(completed).length, 1);
+	assert.equal(hook.run('post', input('first'), { env, diagnostic }).state, 'duplicate');
+	assert.equal(hook.run('pre', input('resumed'), { env }).state, 'prepared');
+	fs.writeFileSync(file, 'three\n');
+	assert.equal(hook.run('post', input('resumed'), { env }).state, 'recorded');
+	assert.equal(readLog(f).length, 2);
+});
+
+function deadWriterLock(f) {
+	const child = require('node:child_process').spawnSync(process.execPath, ['-e', ''], { encoding: 'utf8' });
+	assert.equal(child.status, 0);
+	fs.mkdirSync(f.dir, { recursive: true });
+	fs.writeFileSync(path.join(f.dir, 'review-writer.lock'), JSON.stringify({ schemaVersion: 1, token: 'exited-window', pid: child.pid, started: '2026-11-19T00:00:00.000Z' }));
+}
+
+test('a window that finds the lock of an exited owner offers recovery once and never takes it unasked', async (t) => {
+	const f = fixture(t); writeLog(f, [entry(f.root, 'a')]); deadWriterLock(f);
+	const offers = []; let answer;
+	f.vscode.window.showInformationMessage = async (message, ...actions) => { offers.push({ message, actions }); return answer; };
+	f.controller.entries = await f.controller.loadEntries();
+	const store = f.controller.stores.get(f.folder.uri.toString());
+	assert.equal(store.writable, false); assert.equal(offers.length, 1);
+	assert.deepEqual(offers[0].actions, ['Recuperar revisão']); assert.match(offers[0].message, /não está mais em execução/);
+	assert.equal(JSON.parse(fs.readFileSync(path.join(f.dir, 'review-writer.lock'), 'utf8')).token, 'exited-window');
+	await f.controller.loadEntries(); assert.equal(offers.length, 1);
+});
+
+test('accepting the offer recovers the review; a live owner is never offered', async (t) => {
+	await t.test('accepted offer', async (sub) => {
+		const f = fixture(sub); writeLog(f, [entry(f.root, 'a')]); deadWriterLock(f);
+		f.vscode.window.showInformationMessage = async (message, ...actions) => actions[0];
+		f.controller.entries = await f.controller.loadEntries();
+		const store = f.controller.stores.get(f.folder.uri.toString());
+		await until(() => store.writable, 'the accepted offer did not recover the writer');
+		assert.notEqual(JSON.parse(fs.readFileSync(path.join(f.dir, 'review-writer.lock'), 'utf8')).token, 'exited-window');
+	});
+	await t.test('live owner', async (sub) => {
+		const f = fixture(sub); writeLog(f, [entry(f.root, 'a')]);
+		const owner = await ReviewStore.open(f.root); sub.after(() => owner.close());
+		const offers = []; f.vscode.window.showInformationMessage = async (message) => { offers.push(message); };
+		f.controller.entries = await f.controller.loadEntries();
+		assert.equal(f.controller.stores.get(f.folder.uri.toString()).writable, false); assert.deepEqual(offers, []);
+	});
+});
+
+test('project exclusion patterns add to the user patterns and cannot remove them', async (t) => {
+	const scoped = { defaultValue: ['**/.env', '**/*.pem'], globalValue: undefined, workspaceValue: [] };
+	const f = fixture(t, { inspect: (key) => key === 'claudeCodeLauncher.historyExcludedPatterns' ? scoped : undefined });
+	await f.controller.setEnabled(true);
+	const policy = () => JSON.parse(fs.readFileSync(path.join(f.dir, history.CAPTURE_POLICY_FILE), 'utf8'));
+	// A repository that empties the list still gets the defaults the user kept.
+	assert.deepEqual(policy().excludedPatterns, ['**/.env', '**/*.pem']);
+	scoped.workspaceValue = ['secrets/**', '**/.env']; await f.controller.setEnabled(true);
+	assert.deepEqual(policy().excludedPatterns, ['**/.env', '**/*.pem', 'secrets/**']);
+	// The user, not the project, decides to drop a default.
+	scoped.globalValue = ['only-mine/**']; scoped.workspaceValue = undefined; await f.controller.setEnabled(true);
+	assert.deepEqual(policy().excludedPatterns, ['only-mine/**']);
 });

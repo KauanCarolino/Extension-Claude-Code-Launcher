@@ -1,26 +1,25 @@
 import * as vscode from 'vscode';
-import { computeDiff, DiffResult, Hunk } from './diff';
-import {
-	contiguousTail, fileKey, groupByFile, isBlobHash, normalizeEol, planRevert, RawEntry, referencedBlobs, resolveSnapshot,
-	Status, trimLog,
-} from './logic';
+import { computeDiff } from './diff';
+import { fileKey, isBlobHash, RawEntry, referencedBlobs, resolveSnapshot, Status } from './logic';
 import { readTranscriptMeta, RequestInfo, sessionsDir, clearTranscriptMetadataForRoots, transcriptMetadataCacheCount } from './sessions';
 import { activeReview, copyReview, ingestEntries, ReviewContent, ReviewDecisionRequest, ReviewError, ReviewResolution, SharedReview, sameContent } from './review';
 import { ReviewStore } from './review-store';
 import { withCaptureMaintenance, recoverCaptureMaintenance } from './maintenance';
 import { executeDecisionDetailed, ResourceAdapter, undoItemDetailed } from './reversal';
 import { applyHookPlan, configFingerprint, HookCapability, inspectHookConfiguration, planHooks, SettingsRead, HookPlan } from './hooks';
-import { assessResourceScope, assessStoragePath, CAPTURE_POLICY_FILE, makeCapturePolicy, readLogFile, readVerifiedBlob, safeReadText, transcriptAllowed, validateMessage, validateSavedMeta, retentionCandidates, CapturePolicy, validateCapturePolicy, validateRawEntry, collectContentHashes, CaptureDiagnostics, readCaptureDiagnostics } from './history';
+import { assessResourceScope, assessStoragePath, CAPTURE_POLICY_FILE, makeCapturePolicy, readLogFile, readVerifiedBlob, safeReadText, transcriptAllowed, validateMessage, validateSavedMeta, retentionCandidates, CapturePolicy, validateCapturePolicy, validateRawEntry, CaptureDiagnostics, readCaptureDiagnostics } from './history';
 import { captureHealth, CaptureConfiguration, retainCaptureEvidence } from './capture-health';
 import { projectReview, operationView, pendingOperationView, ReviewItemResult, blockedReviewResult, ReviewResultError, formatReviewItemResult, summarizeReviewResults } from './review-results';
 import { evaluateMetadataPolicy, revalidateMetadataPermit, MetadataPermit, MetadataPolicyContext } from './metadata-policy';
 import { inventoryPurge, planPurge, summarizePurge, PurgeInventory, PurgeEffect, PurgeReport, PurgeReason, PurgeMemory, PURGE_MEMORY_PATHS } from './purge-plan';
-declare const require: (name: string) => any;
-const nodeFs = require('node:fs');
-const nodePath = require('node:path');
-const crypto = require('node:crypto');
-const Bytes = require('node:buffer').Buffer;
-const Utf8Decoder = require('node:util').TextDecoder;
+import { describeReason } from './messages';
+import { BaseView, FileSummary, ViewEntry, basename, capitalize, countFiles, errorCode, excludedPatterns, explain, purgeFailureReason, purgeInventoryText, purgeReportText, toViewEntry, HOOK_SCRIPT_DIFFERS, HOOK_SCRIPT_RESTORED, NODE_MISSING } from './changes-view';
+import { findExecutable } from './node-runtime';
+import * as nodeFs from 'node:fs';
+import * as nodePath from 'node:path';
+import * as crypto from 'node:crypto';
+import { Buffer as Bytes } from 'node:buffer';
+import { TextDecoder as Utf8Decoder } from 'node:util';
 
 export type { RawEntry, Snapshot } from './logic';
 
@@ -28,13 +27,9 @@ const HOOK_FILE = 'launcher-record-change.js';
 const LOG_DIR = ['.claude', 'launcher-changes'];
 const LOG_PATH = [...LOG_DIR, 'log.jsonl'];
 const BLOB_DIR = [...LOG_DIR, 'blobs'];
-const PENDING_DIR = [...LOG_DIR, 'pending'];
-/** Aceito/recusado de cada edição, compartilhado entre editores (Cursor e VS Code). */
-const STATUS_PATH = [...LOG_DIR, 'status.json'];
 /** Explicação e pedido já achados no transcript, para não depender dele depois. */
 const META_PATH = [...LOG_DIR, 'meta.json'];
 const SETTINGS_PATH = ['.claude', 'settings.local.json'];
-const MATCHER = 'Edit|Write|MultiEdit|NotebookEdit';
 const SCHEME = 'claude-launcher-change';
 const STATUS_KEY = 'claudeCodeLauncher.entryStatus';
 const LEGACY_REVIEWED_KEY = 'claudeCodeLauncher.reviewedEntries';
@@ -52,36 +47,24 @@ const MAX_STATUS = 3000;
 const MAX_META_ATTEMPTS = 10;
 /** Recusas que dá para desfazer, da mais recente para trás. */
 const MAX_UNDO = 5;
-/** Soma dos textos guardados para desfazer (caracteres), para o estado do editor não inchar. */
-const MAX_UNDO_CHARS = 8 * 1024 * 1024;
 /** Blobs sem referência só saem depois disso: o hook pode estar no meio de uma edição. */
 const BLOB_GRACE_MS = 10 * 60 * 1000;
-/** "pre" sem "post" (ferramenta que falhou, por exemplo) sai depois disso. */
+/**
+ * "pre" sem "post" (ferramenta negada ou que falhou) e marcadores de edição já gravada saem
+ * depois disso: nenhuma chamada de ferramenta fica aberta por tanto tempo.
+ */
 const PENDING_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+/** Intervalo da coleta de marcadores e cópias sem uso, por pasta. */
+const HOUSEKEEPING_INTERVAL_MS = 6 * 60 * 60 * 1000;
+/** Nova tentativa depois de uma coleta que não pôde terminar. */
+const HOUSEKEEPING_RETRY_MS = 5 * 60 * 1000;
+/** Validade da busca pelo executável do hook no PATH. */
+const NODE_LOOKUP_MS = 60 * 1000;
 
 export function changeUri(entry: RawEntry, side: 'antes' | 'depois'): vscode.Uri {
 	return vscode.Uri.from({ scheme: SCHEME, path: `/${entry.id}/${side}/${basename(entry.file)}` });
 }
 
-interface ViewEntry extends Partial<ReturnType<typeof projectReview>> {
-	id: string;
-	time: string;
-	action: string;
-	file: string;
-	dir: string;
-	summary: string;
-	reason: string | null;
-	added: number;
-	removed: number;
-	modified: number;
-	hunks: Hunk[];
-	note: string | null;
-	canCompare: boolean;
-	status: ReviewResolution | null;
-	requestId: string | null;
-	request: string | null;
-	lastOperation?: ReturnType<typeof operationView>;
-}
 
 interface UndoItem {
 	file: string;
@@ -132,17 +115,15 @@ export class ChangesController implements
 	private panel: vscode.WebviewPanel | undefined;
 	private readonly viewSubscriptions: vscode.Disposable[] = [];
 	private readonly panelSubscriptions: vscode.Disposable[] = [];
-	private refreshTimer: unknown;
-	private publishTimer: unknown;
-	private metaTimer: unknown;
+	private refreshTimer: ReturnType<typeof setTimeout> | undefined;
+	private publishTimer: ReturnType<typeof setTimeout> | undefined;
+	private metaTimer: ReturnType<typeof setTimeout> | undefined;
 	private readonly disposables: vscode.Disposable[] = [];
 	private readonly reasonCache = new Map<string, string>();
 	private readonly requestCache = new Map<string, RequestInfo>();
 	private readonly metaAttempts = new Map<string, number>();
 	private readonly pendingMetadata = new Map<string, { reason?: string; request?: RequestInfo; permits: MetadataPermit[]; epoch: number }>();
 	private readonly status: Map<string, ReviewResolution>;
-	/** Sobe a cada setStatus: uma leitura de status.json mais antiga que isso é descartada. */
-	private statusVersion = 0;
 	private readonly undoStack: Undo[];
 	private readonly stores = new Map<string, ReviewStore>();
 	private readonly storeErrors = new Map<string, string>();
@@ -165,6 +146,13 @@ export class ChangesController implements
 	private readonly captureHealthStates = new Map<string, ReturnType<typeof captureHealth>>();
 	private readonly activeOperations = new Set<Promise<unknown>>();
 	private readonly hookWarnings = new Map<string, string>();
+	/** Avisos sobre o ambiente de execução do hook (executável ausente, script alterado), por pasta. */
+	private readonly runtimeWarnings = new Map<string, string>();
+	private readonly nextHousekeeping = new Map<string, number>();
+	/** Pastas em que a recuperação da revisão já foi oferecida nesta janela. */
+	private readonly recoveryOffered = new Set<string>();
+	private nodeLookup: { at: number; found: boolean } | undefined;
+	private packagedHook: string | undefined;
 	private readonly resourceAliases = new Map<string, string>();
 	private readonly ambiguousResources = new Set<string>();
 	private refreshing: Promise<void> | undefined;
@@ -235,7 +223,8 @@ export class ChangesController implements
 		this.disposables.push(vscode.workspace.onDidChangeTextDocument((event) => {
 			if (this.disposed || event.document.uri.scheme !== 'file' || !this.getSharedReview(event.document.uri.fsPath)) { return; }
 			this.summaryCache.clear(); clearTimeout(this.publishTimer);
-			this.publishTimer = setTimeout(() => { if (!this.disposed) { this.publish(); } }, 50);
+			// Cada publicação reenvia o estado às webviews; uma por rajada de digitação basta.
+			this.publishTimer = setTimeout(() => { if (!this.disposed) { this.publish(); } }, 200);
 		}));
 		this.scheduleRefresh();
 	}
@@ -256,7 +245,7 @@ export class ChangesController implements
 			clearTranscriptMetadataForRoots((vscode.workspace.workspaceFolders ?? []).filter((folder) => folder.uri.scheme === 'file').map((folder) => sessionsDir(folder.uri.fsPath)));
 			this.reasonCache.clear(); this.requestCache.clear(); this.metaAttempts.clear(); this.pendingMetadata.clear(); this.blobCache.clear(); this.viewCache.clear(); this.summaryCache.clear();
 			this.stateText.clear(); this.comparisonTexts.clear(); this.decorated.clear(); this.lastOperationResults.clear();
-			this.captureEvidence.clear(); this.captureHealthStates.clear(); this.captureWarnings.clear(); this.hookWarnings.clear(); this.storeErrors.clear();
+			this.captureEvidence.clear(); this.captureHealthStates.clear(); this.captureWarnings.clear(); this.hookWarnings.clear(); this.runtimeWarnings.clear(); this.nextHousekeeping.clear(); this.recoveryOffered.clear(); this.storeErrors.clear();
 		});
 	}
 	whenDisposed(): Promise<void> { return this.disposal; }
@@ -490,11 +479,12 @@ export class ChangesController implements
 				await this.writeCapturePolicy(folder, !enable);
 				if (enable) { await this.installHookScript(folder); }
 				await this.writeHooks(folder, enable, plan); this.hookWarnings.delete(folder.uri.toString());
-			} catch (error) { failed.push(`${folder.name} (${errorCode(error)})`); }
+			} catch (error) { failed.push(`${folder.name}: ${explain(error)}.`); }
 		}
 		await this.refresh();
-		if (failed.length) { void vscode.window.showWarningMessage(`Registro não concluído em: ${failed.join(', ')}.`); }
+		if (failed.length) { void vscode.window.showWarningMessage(`Registro não concluído. ${failed.join(' ')}`); }
 		else { void vscode.window.showInformationMessage(enable ? 'Registro ativado para novas conversas, com política de cópias locais aplicada.' : 'Hooks próprios desligados; configurações alheias preservadas.'); }
+		if (enable && !failed.length && !this.disposed && !(await this.nodeAvailable())) { void vscode.window.showWarningMessage(NODE_MISSING); }
 	}
 
 	async repairHooks(): Promise<void> { if (this.disposed || this.maintenance) { return; } return this.background(() => this.repairConfiguredHooks()); }
@@ -513,7 +503,7 @@ export class ChangesController implements
 				await this.writeCapturePolicy(folder, disabled || prior?.paused === true);
 				if (!disabled) { await this.installHookScript(folder); }
 				await this.writeHooks(folder, !disabled, plan); this.hookWarnings.delete(folder.uri.toString());
-			} catch (error) { this.hookWarnings.set(folder.uri.toString(), errorCode(error)); }
+			} catch (error) { this.hookWarnings.set(folder.uri.toString(), `Hooks de ${folder.name}: ${explain(error)}.`); }
 		}
 	}
 
@@ -525,22 +515,28 @@ export class ChangesController implements
 			await Promise.allSettled([...this.activeOperations, ...this.backgroundTasks]); await this.refreshing; await this.writeChain;
 			for (const folder of vscode.workspace.workspaceFolders ?? []) {
 				const store = this.stores.get(folder.uri.toString()); if (!store) { continue; }
-				try { await withCaptureMaintenance(store, async () => { await this.pruneReviewedLog(folder, store, true); }); }
-				catch (error) { failed.push(`${folder.name} (${errorCode(error)})`); }
+				try {
+					await withCaptureMaintenance(store, async () => {
+						// A poda já recolhe as cópias sem referência; sem nada a podar, a coleta roda mesmo assim.
+						if (!(await this.pruneReviewedLog(folder, store, true))) { await this.collectLogBlobs(folder, store); }
+					});
+					await this.housekeep(store); this.nextHousekeeping.set(folder.uri.toString(), Date.now() + HOUSEKEEPING_INTERVAL_MS);
+				} catch (error) { failed.push(`${folder.name}: ${explain(error)}.`); }
 			}
 		} finally { this.endMaintenance(); }
 		await this.refresh();
-		if (failed.length) { void vscode.window.showWarningMessage(`Limpeza parcial/bloqueada: ${failed.join(', ')}.`); }
+		if (failed.length) { void vscode.window.showWarningMessage(`Limpeza parcial/bloqueada. ${failed.join(' ')}`); }
 		else { void vscode.window.showInformationMessage('Histórico revisado sem referência de recuperação foi limpo. Pendências, decisões parciais, pausa e undo foram preservados.'); }
 	}
 
 	async clearAllReviewData(): Promise<void> {
 		if (this.disposed || this.maintenance) { throw new ReviewError('maintenanceInProgress'); }
-		const folders = [...vscode.workspace.workspaceFolders ?? []];
+		// Dados de revisão só existem em pastas locais; o caminho de um provider virtual não é um caminho de disco.
+		const folders = (vscode.workspace.workspaceFolders ?? []).filter((folder) => folder.uri.scheme === 'file');
 		const preview: string[] = [];
 		for (const folder of folders) {
 			const inventory = await inventoryPurge(nodePath.join(folder.uri.fsPath, ...LOG_DIR), folder.uri.fsPath, { memory: this.purgeMemory() });
-			preview.push(`Pasta ${folder.index + 1}: ${this.purgeInventoryText(inventory)}.`);
+			preview.push(`Pasta ${folder.index + 1}: ${purgeInventoryText(inventory)}.`);
 		}
 		if (!(await confirm('Apagar todos os dados locais de revisão?', `${preview.join('\n')}\nIsso remove dados próprios de captura, histórico, cópias locais, decisões, metadados e recuperação de recusas. Caches são da janela. Arquivos atuais, controles de pausa e hooks de terceiros permanecem. Encerre conversas e outros escritores. O inventário será revalidado antes dos efeitos.`, 'Apagar dados de revisão'))) { return; }
 		this.beginMaintenance(); this.metaEpoch += 1; this.pendingMetadata.clear(); this.lastPurgeReports.splice(0);
@@ -577,10 +573,10 @@ export class ChangesController implements
 								if (item.kind === 'directory') { await nodeFs.promises.rmdir(file); } else { await nodeFs.promises.unlink(file); }
 								run.effects.push({ ...item, outcome: 'removed' });
 								if (item.relativePath === 'capture-diagnostics' || item.relativePath.startsWith('capture-diagnostics/') || item.relativePath === 'capture-status.json') { this.forgetCapture(folder); }
-							} catch (error) { run.effects.push({ ...item, outcome: 'failed', reason: this.purgeFailureReason(error) }); }
+							} catch (error) { run.effects.push({ ...item, outcome: 'failed', reason: purgeFailureReason(error) }); }
 						}
 					});
-				} catch (error) { run.reason = this.purgeFailureReason(error); }
+				} catch (error) { run.reason = purgeFailureReason(error); }
 			}
 			if (runs.every((run) => !run.reason && run.effects.every((effect) => effect.outcome === 'removed'))) {
 				try { await this.context.workspaceState.update(UNDO_KEY, []); await this.context.workspaceState.update(STATUS_KEY, {}); await this.context.workspaceState.update(LEGACY_REVIEWED_KEY, []); this.undoStack.splice(0); }
@@ -595,8 +591,8 @@ export class ChangesController implements
 						if (memorySucceeded && !run.reason && run.effects.every((effect) => effect.outcome === 'removed')) { if ((await this.readPurgeState(run.folder, true)) !== run.marker) { throw new ReviewError('stateChanged'); } await nodeFs.promises.unlink(marker); this.forgetCapture(run.folder); }
 						else { const partial = JSON.stringify({ ...JSON.parse(run.marker), phase: 'partial' }) + '\n'; await this.writeOwnedFile(run.store, marker, partial, run.marker); }
 					}
-				} catch (error) { run.reason = this.purgeFailureReason(error); }
-				finally { if (run.store) { try { await run.store.close(); } catch (error) { run.reason = this.purgeFailureReason(error); } this.stores.delete(run.folder.uri.toString()); } this.logCache.delete(run.folder.uri.toString()); }
+				} catch (error) { run.reason = purgeFailureReason(error); }
+				finally { if (run.store) { try { await run.store.close(); } catch (error) { run.reason = purgeFailureReason(error); } this.stores.delete(run.folder.uri.toString()); } this.logCache.delete(run.folder.uri.toString()); }
 				const after = await inventoryPurge(nodePath.join(run.folder.uri.fsPath, ...LOG_DIR), run.folder.uri.fsPath, { memory: this.purgeMemory() });
 				if (!memorySucceeded) { run.effects.push({ relativePath: PURGE_MEMORY_PATHS.undo, category: 'undo', outcome: memoryFailed ? 'failed' : 'blocked', reason: 'memoryUnavailable' }); }
 				this.lastPurgeReports.push({ workspace: run.folder.index + 1, report: summarizePurge(run.before, after, run.effects, { blockedReason: run.reason }) });
@@ -605,7 +601,7 @@ export class ChangesController implements
 		await this.refresh();
 		if (this.disposed) { return; }
 		const complete = this.lastPurgeReports.every(({ report }) => report.outcome === 'complete');
-		const message = this.lastPurgeReports.map(({ workspace, report }) => `Pasta ${workspace}: ${this.purgeReportText(report)}`).join('\n');
+		const message = this.lastPurgeReports.map(({ workspace, report }) => `Pasta ${workspace}: ${purgeReportText(report)}`).join('\n');
 		if (complete) { void vscode.window.showInformationMessage('Dados locais de revisão removidos. A captura permanece pausada. ' + message); }
 		else { void vscode.window.showWarningMessage('Limpeza parcial/bloqueada. ' + message + ' Use Apagar todos os dados locais de revisão para tentar concluir; controles e dados desconhecidos foram preservados.'); }
 	}
@@ -617,19 +613,7 @@ export class ChangesController implements
 			return { undoCount, cacheCount: this.reasonCache.size + this.requestCache.size + this.pendingMetadata.size + this.blobCache.size + this.viewCache.size + this.summaryCache.size + this.comparisonTexts.size + this.lastOperationResults.size + this.stateText.size + transcriptMetadataCacheCount(roots), complete: true };
 		} catch { return { undoCount: null, cacheCount: null, complete: false }; }
 	}
-	private purgeInventoryText(inventory: PurgeInventory): string {
-		return ['history', 'capture', 'blobs', 'canonical', 'metadata', 'projection', 'backups'].map((category) => `${category}=${inventory.items.filter((item) => item.category === category).length}`).join(', ')
-			+ `; memória da janela: undo=${inventory.memory.undoCount ?? '?'}, cache=${inventory.memory.cacheCount ?? '?'}; desconhecidos preservados=${inventory.unknown.length}${inventory.coverage === 'partial' ? '; inventário parcial' : ''}`;
-	}
-	private purgeReportText(report: PurgeReport): string {
-		return report.categories.filter((category) => category.beforeCount || category.remainingCount || category.reasons.length).map((category) => `${category.category}: ${category.outcome}, restantes=${category.remainingCount ?? '?'}${category.reasons.length ? ` (${category.reasons.join(', ')})` : ''}`).join('; ') || 'sem dados próprios restantes';
-	}
-	private purgeFailureReason(error: unknown): PurgeReason {
-		const reason = errorCode(error);
-		return ['readOnlyOwner', 'anotherWriter', 'ownerLost'].includes(reason) ? 'ownershipRequired' : ['captureInProgress', 'pendingCapture', 'needsReconciliation'].includes(reason) ? 'captureInProgress'
-			: reason.startsWith('cancelled') ? 'cancelled' : ['unsafeStorageType', 'unsupportedStore'].includes(reason) ? 'unsafeType' : reason === 'stateChanged' ? 'changedSincePlan' : 'operationFailed';
-	}
-	private forgetCapture(folder: vscode.WorkspaceFolder): void { const key = folder.uri.toString(); this.captureEvidence.delete(key); this.captureHealthStates.delete(key); this.captureWarnings.delete(key); }
+	private forgetCapture(folder: vscode.WorkspaceFolder): void { const key = folder.uri.toString(); this.captureEvidence.delete(key); this.captureHealthStates.delete(key); this.captureWarnings.delete(key); this.runtimeWarnings.delete(key); }
 	private async readPurgeState(folder: vscode.WorkspaceFolder, validate = false): Promise<string | undefined> {
 		const read = await safeReadText(nodePath.join(folder.uri.fsPath, ...LOG_DIR, PURGE_STATE_FILE), folder.uri.fsPath, 4096);
 		if (read.kind === 'absent') { return undefined; }
@@ -654,8 +638,8 @@ export class ChangesController implements
 		this.beginMaintenance();
 		try {
 			await Promise.allSettled([...this.activeOperations, ...this.backgroundTasks]);
-			for (const folder of vscode.workspace.workspaceFolders ?? []) { if (await this.readPurgeState(folder)) { throw new ReviewResultError(blockedReviewResult('', [], 'reject', 'purgeNeedsRecovery')); } }
-			for (const store of this.stores.values()) { try { await store.recoverWriter(); await recoverCaptureMaintenance(store); } catch (error) { void vscode.window.showWarningMessage(error instanceof Error ? error.message : errorCode(error)); throw error; } }
+			for (const folder of vscode.workspace.workspaceFolders ?? []) { if (folder.uri.scheme === 'file' && await this.readPurgeState(folder)) { throw new ReviewResultError(blockedReviewResult('', [], 'reject', 'purgeNeedsRecovery')); } }
+			for (const store of this.stores.values()) { try { await store.recoverWriter(); await recoverCaptureMaintenance(store); } catch (error) { void vscode.window.showWarningMessage(error instanceof Error && error.message !== errorCode(error) ? error.message : `Recuperação não concluída: ${explain(error)}.`); throw error; } }
 		} finally { this.endMaintenance(); }
 		await this.refresh();
 	}
@@ -816,7 +800,8 @@ export class ChangesController implements
 			await nodeFs.promises.mkdir(nodePath.dirname(file), { recursive: true });
 			const scope = await assessResourceScope(file, root); if (!scope.allowed) { throw new ReviewError('resourceOutsideScope'); }
 			if (this.disposed) { throw new ReviewError('cancelledBeforeEffect'); }
-			await nodeFs.promises.writeFile(file, target.text, { flag: 'wx', mode: 0o600 }); if (this.disposed) { throw new ReviewError('cancelledAfterEffect'); } return;
+			// Arquivo do projeto, não dado privado da revisão: nasce com a permissão padrão do sistema (umask).
+			await nodeFs.promises.writeFile(file, target.text, { flag: 'wx' }); if (this.disposed) { throw new ReviewError('cancelledAfterEffect'); } return;
 		}
 		const document = await vscode.workspace.openTextDocument(uri);
 		if (this.disposed) { throw new ReviewError('cancelledBeforeEffect'); }
@@ -856,7 +841,7 @@ export class ChangesController implements
 	private setupWebview(webview: vscode.Webview, wide: boolean): vscode.Disposable {
 		webview.options = { enableScripts: true, localResourceRoots: [this.mediaUri()] };
 		webview.html = this.html(webview);
-		return webview.onDidReceiveMessage((message: unknown) => { if (this.disposed) { return; } void this.handleMessage(message, webview, wide).catch((error) => { if (!this.disposed) { void vscode.window.showWarningMessage(error instanceof ReviewResultError ? formatReviewItemResult(error.result) : `A ação não foi concluída: ${errorCode(error)}.`); } }); });
+		return webview.onDidReceiveMessage((message: unknown) => { if (this.disposed) { return; } void this.handleMessage(message, webview, wide).catch((error) => { if (!this.disposed) { void vscode.window.showWarningMessage(error instanceof ReviewResultError ? formatReviewItemResult(error.result) : `A ação não foi concluída: ${explain(error)}.`); } }); });
 	}
 
 	private async handleMessage(value: unknown, webview: vscode.Webview, wide: boolean): Promise<void> {
@@ -910,6 +895,9 @@ export class ChangesController implements
 			case 'undoReject':
 				await this.undoReject();
 				return;
+			default:
+				// validateMessage só admite os comandos acima; qualquer outro não tem efeito.
+				return;
 		}
 	}
 
@@ -956,8 +944,10 @@ export class ChangesController implements
 				const live = new Set(this.entries.map((entry) => entry.id));
 				for (const id of this.viewCache.keys()) { if (!live.has(id)) { this.viewCache.delete(id); } }
 				this.summaryCache.clear(); this.publish(); void this.fillMeta().catch(() => undefined);
+				// Depois de publicar: a coleta não muda o que o painel mostra e não deve atrasá-lo.
+				await this.applyHousekeeping();
 			} while (this.refreshAgain && !this.disposed);
-		})().catch((error) => { this.coverageMessage = `Não foi possível atualizar parte da revisão: ${errorCode(error)}.`; if (!this.disposed) { this.publish(); } }).finally(() => { this.refreshing = undefined; });
+		})().catch((error) => { this.coverageMessage = `Não foi possível atualizar parte da revisão: ${explain(error)}.`; if (!this.disposed) { this.publish(); } }).finally(() => { this.refreshing = undefined; });
 		return this.refreshing;
 	}
 
@@ -1005,7 +995,7 @@ export class ChangesController implements
 	private readOnlyReason(): string | null {
 		const reasons = [...this.storeErrors.values(), ...[...this.stores.values()].filter((store) => !store.writable).map((store) => store.blockReason)].filter(Boolean);
 		if (reasons.includes('purgeNeedsRecovery')) { return 'Uma limpeza foi interrompida. Use Apagar todos os dados locais de revisão para concluir; não remova o marcador manualmente.'; }
-		return reasons.join(', ') || null;
+		return [...new Set(reasons.map((reason) => capitalize(describeReason(reason))))].join('; ') || null;
 	}
 
 	/**
@@ -1041,7 +1031,6 @@ export class ChangesController implements
 
 	private post(webview: vscode.Webview, wide: boolean): void {
 			if (this.disposed) { return; }
-		const pending = this.entries.filter((entry) => !this.status.has(entry.id));
 			// Read each canonical store once per publication, including historical and
 			// earlier blocked segments rather than projecting only the latest review.
 			const states = new Map([...this.stores].map(([key, store]) => [key, store.get()]));
@@ -1079,7 +1068,7 @@ export class ChangesController implements
 			entries: history,
 				files: this.pendingGroups().map((list) => this.summaryOf(list, states.get(this.entryFolder.get(list[0].id) || ''))),
 			canUndo: this.canUndoReject(),
-			coverageMessage: [this.coverageMessage, ...this.hookWarnings.values(), ...this.captureWarnings.values()].filter(Boolean).join(' ') || null,
+			coverageMessage: [this.coverageMessage, ...this.hookWarnings.values(), ...this.runtimeWarnings.values(), ...this.captureWarnings.values()].filter(Boolean).join(' ') || null,
 			reviewWriter: [...this.stores.values()].every((store) => store.writable),
 			readOnlyReason: this.readOnlyReason(),
 				readOnlyAction: [...this.storeErrors.values()].includes('purgeNeedsRecovery') ? 'clearAllReviewData' : 'recoverWriter',
@@ -1090,7 +1079,7 @@ export class ChangesController implements
 	private viewOf(entry: RawEntry): BaseView {
 		let view = this.viewCache.get(entry.id);
 		if (!view) {
-			view = toViewEntry(entry);
+			view = toViewEntry(entry, vscode.workspace.asRelativePath(entry.file, false));
 			this.viewCache.set(entry.id, view);
 		}
 		return view;
@@ -1154,13 +1143,14 @@ export class ChangesController implements
 		const all: RawEntry[] = []; const folders = vscode.workspace.workspaceFolders ?? [];
 		const currentFolders = new Set(folders.filter((folder) => folder.uri.scheme === 'file').map((folder) => folder.uri.toString()));
 		for (const key of this.captureEvidence.keys()) { if (!currentFolders.has(key)) { this.captureEvidence.delete(key); this.captureHealthStates.delete(key); this.captureWarnings.delete(key); } }
+		for (const key of [...this.runtimeWarnings.keys(), ...this.nextHousekeeping.keys()]) { if (!currentFolders.has(key)) { this.runtimeWarnings.delete(key); this.nextHousekeeping.delete(key); } }
 		for (const [key, store] of this.stores) { if (!currentFolders.has(key)) { await store.close(); this.stores.delete(key); } }
 		this.entryFolder.clear(); this.ordinals.clear(); this.resourceAliases.clear(); this.coverageMessage = null;
 		const collisions = new Set<string>(); const blobs = new Map<string, string>();
 		for (const folder of folders) {
 			if (folder.uri.scheme !== 'file') { this.coverageMessage = 'Revisão em provider não validado: somente leitura.'; continue; }
 			const key = folder.uri.toString(), log = nodePath.join(folder.uri.fsPath, ...LOG_PATH);
-			let stat: any; try { stat = await nodeFs.promises.lstat(log); } catch (error) { if ((error as { code?: string }).code !== 'ENOENT') { this.coverageMessage = 'Parte do histórico não pôde ser lida.'; } }
+			let stat: nodeFs.Stats | undefined; try { stat = await nodeFs.promises.lstat(log); } catch (error) { if ((error as { code?: string }).code !== 'ENOENT') { this.coverageMessage = 'Parte do histórico não pôde ser lida.'; } }
 			let cache = this.logCache.get(key);
 			if (!stat || !cache || cache.inode !== stat.ino || stat.size < cache.cursor.offset || stat.size === cache.size && stat.mtimeMs !== cache.mtime) { cache = { cursor: { offset: 0, line: 0 }, entries: [], size: -1, mtime: -1, inode: stat?.ino ?? 0, rejections: 0 }; }
 			if (stat && (cache.size !== stat.size || cache.mtime !== stat.mtimeMs || cache.cursor.offset < stat.size)) {
@@ -1202,6 +1192,7 @@ export class ChangesController implements
 					} else { const transient = store.get(); ingestEntries(transient, entries); }
 					await this.migrateLegacyUndo(store, entries);
 					this.storeErrors.delete(key);
+					if (!store.writable && store.blockReason === 'anotherWriter' && store.writerExited()) { this.offerWriterRecovery(folder); }
 				} catch (error) { this.storeErrors.set(key, errorCode(error)); }
 			}
 		}
@@ -1212,6 +1203,21 @@ export class ChangesController implements
 	}
 
 	/** Preenche o texto dos snapshots que o log guarda só como hash. */
+
+	/**
+	 * Depois de uma queda, o lock da janela anterior fica no disco e esta abre só para leitura.
+	 * A posse nunca é tomada sozinha (o processo pode estar vivo em outra máquina ou contêiner que
+	 * compartilha a pasta), mas a recuperação é oferecida uma vez em vez de depender de o usuário
+	 * achar o comando.
+	 */
+	private offerWriterRecovery(folder: vscode.WorkspaceFolder): void {
+		const key = folder.uri.toString();
+		if (this.disposed || this.maintenance || this.recoveryOffered.has(key)) { return; }
+		this.recoveryOffered.add(key);
+		const action = 'Recuperar revisão';
+		void vscode.window.showInformationMessage(`A janela que era dona da revisão de "${folder.name}" não está mais em execução, e esta janela abriu só para leitura. Se o projeto não estiver aberto em outra máquina ou contêiner, recupere a revisão aqui.`, action)
+			.then((choice) => { if (choice === action && !this.disposed) { void this.recoverReviewWriter().catch(() => undefined); } });
+	}
 
 	private async migrateLegacyUndo(store: ReviewStore, entries: readonly RawEntry[]): Promise<void> {
 		if (!store.writable || !this.undoStack.length) { return; }
@@ -1267,8 +1273,61 @@ export class ChangesController implements
 			const days = vscode.workspace.getConfiguration('claudeCodeLauncher').get<number>('historyRetentionDays', 30);
 			if (entries.length <= MAX_LOG_ENTRIES && !retentionCandidates(entries, days, Date.now(), (id) => this.status.has(id)).length) { continue; }
 			try { const changed = await withCaptureMaintenance(store, () => this.pruneReviewedLog(folder, store, false)); if (changed) { this.refreshAgain = true; } }
-			catch (error) { this.coverageMessage = `Retenção adiada: ${errorCode(error)}. Pendências preservadas.`; }
+			catch (error) { this.coverageMessage = `Retenção adiada: ${explain(error)}. Pendências preservadas.`; }
 		}
+	}
+
+	/**
+	 * O hook deixa um marcador em completed/ a cada edição gravada e um "pre" em pending/ quando a
+	 * ferramenta não chega ao "post"; o estado canônico acumula cópias em review-blobs/. A retenção
+	 * do log não alcança nenhum deles, e o hook para de capturar quando a pasta passa do seu
+	 * orçamento de inventário. A coleta roda de tempos em tempos, só na janela dona da revisão.
+	 */
+	private async applyHousekeeping(): Promise<void> {
+		if (this.maintenance || this.disposed || this.activeOperations.size || this.backgroundTasks.size) { return; }
+		for (const folder of vscode.workspace.workspaceFolders ?? []) {
+			const key = folder.uri.toString(), store = this.stores.get(key);
+			if (!store?.writable || Date.now() < (this.nextHousekeeping.get(key) ?? 0)) { continue; }
+			// Falha aqui não é um problema da revisão: tenta de novo mais tarde, sem aviso.
+			try { await this.housekeep(store); this.nextHousekeeping.set(key, Date.now() + HOUSEKEEPING_INTERVAL_MS); }
+			catch { this.nextHousekeeping.set(key, Date.now() + HOUSEKEEPING_RETRY_MS); }
+		}
+	}
+	/**
+	 * Não precisa da guarda de manutenção: só toca marcadores mais velhos que qualquer chamada de
+	 * ferramenta e cópias que nenhum estado desta janela (a única escritora) referencia.
+	 */
+	private async housekeep(store: ReviewStore): Promise<void> {
+		await this.removeAged(store, 'completed', PENDING_MAX_AGE_MS);
+		await this.removeAged(store, 'pending', PENDING_MAX_AGE_MS);
+		if (this.disposed || !store.writable) { return; }
+		await store.collectUnreferencedBlobs(BLOB_GRACE_MS);
+	}
+	private async removeAged(store: ReviewStore, name: 'completed' | 'pending', maxAgeMs: number): Promise<number> {
+		const directory = nodePath.join(store.directory, name);
+		if (!(await assessStoragePath(directory, store.root)).allowed) { throw new ReviewError('unsafeStorageType'); }
+		let names: string[];
+		try { names = await nodeFs.promises.readdir(directory); }
+		catch (error) { if ((error as { code?: string }).code === 'ENOENT') { return 0; } throw error; }
+		const now = Date.now(); let removed = 0;
+		for (const item of names) {
+			// Só os nomes que o próprio hook cria; "<chave>.post" é de uma captura em andamento.
+			if (!/^[a-f0-9]{32}\.json$/.test(item)) { continue; }
+			if (this.disposed || !store.writable) { break; }
+			const file = nodePath.join(directory, item);
+			try {
+				const stat = await nodeFs.promises.lstat(file);
+				if (!stat.isFile() || stat.isSymbolicLink() || now - stat.mtimeMs <= maxAgeMs) { continue; }
+				await nodeFs.promises.unlink(file); removed += 1;
+			} catch (error) { if ((error as { code?: string }).code !== 'ENOENT') { throw error; } }
+		}
+		return removed;
+	}
+	/** Recolhe as cópias do hook que o log atual não cita. Chamar sob a guarda de manutenção. */
+	private async collectLogBlobs(folder: vscode.WorkspaceFolder, store: ReviewStore): Promise<void> {
+		const read = await safeReadText(nodePath.join(store.directory, 'log.jsonl'), store.root, 128 * 1024 * 1024);
+		if (read.kind === 'error') { throw new ReviewError(read.code); }
+		await this.collectBlobs(folder.uri, read.kind === 'content' ? read.text.split('\n') : []);
 	}
 
 	private async resolveBlobs(folder: vscode.Uri, entries: RawEntry[], blobs: Map<string, string>): Promise<void> {
@@ -1346,7 +1405,7 @@ export class ChangesController implements
 				// Absence has the same recognized legacy default as capture; an invalid
 				// or unreadable policy above never falls back to that default.
 				const legacy = diskPolicy ?? makeCapturePolicy({ generation: 'legacy-default' });
-				const settings = makeCapturePolicy({ generation: 'metadata-settings', excludedPatterns: config.get<string[]>('historyExcludedPatterns'),
+				const settings = makeCapturePolicy({ generation: 'metadata-settings', excludedPatterns: excludedPatterns(config),
 					maxStorageMB: config.get<number>('historyMaxStorageMB', 128), retentionDays: config.get<number>('historyRetentionDays', 30) });
 				return [legacy, settings].map((policy) => ({ policy, canonicalRoot: root, canonicalFile: file, scopeVerified: true }));
 			} catch { return undefined; }
@@ -1477,7 +1536,7 @@ export class ChangesController implements
 				this.writeQueued = false;
 				await this.writeStateFiles();
 			})
-			.catch((error) => { this.coverageMessage = `Metadados preservados sem atualização: ${errorCode(error)}.`; if (!this.disposed) { this.publish(); } });
+			.catch((error) => { this.coverageMessage = `Metadados preservados sem atualização: ${explain(error)}.`; if (!this.disposed) { this.publish(); } });
 	}
 
 	private async writeStateFiles(): Promise<void> {
@@ -1548,8 +1607,15 @@ export class ChangesController implements
 		const diagnostic = await readCaptureDiagnostics(nodePath.join(folder.uri.fsPath, ...LOG_DIR), folder.uri.fsPath);
 		const capability = await this.hookCapability();
 		const inspected = inspectHookConfiguration(await this.readSettings(folder), this.scriptPath(folder), this.knownHookPaths());
+		const active = inspected.valid && inspected.active && capability.status !== 'unsupported';
+		const script = active ? await this.verifyHookScript(folder) : 'ok';
+		const nodeFound = !active || await this.nodeAvailable();
 		if (this.disposed || this.maintenance || epoch !== this.metaEpoch
 			|| !(vscode.workspace.workspaceFolders ?? []).some((current) => current.uri.toString() === key)) { return; }
+		this.runtimeWarnings.delete(key);
+		if (script === 'differs') { this.runtimeWarnings.set(key, HOOK_SCRIPT_DIFFERS); }
+		// Um evento já observado prova que o executável existe para o Claude, mesmo fora do PATH desta janela.
+		else if (!nodeFound && diagnostic.kind !== 'known') { this.runtimeWarnings.set(key, NODE_MISSING); }
 		const diagnostics = retainCaptureEvidence(this.captureEvidence.get(key), diagnostic);
 		this.captureEvidence.set(key, diagnostics);
 		const disabled = vscode.workspace.getConfiguration('claudeCodeLauncher').get<string>('hookExecutionMode', 'auto') === 'disabled';
@@ -1584,6 +1650,36 @@ export class ChangesController implements
 		if (!store.writable) { throw new ReviewError(store.blockReason || 'readOnlyOwner'); }
 		return store;
 	}
+	/** O hook é registrado como `node <script> <fase>`; sem `node` no PATH ele nunca roda, e nada falha à vista. */
+	private async nodeAvailable(): Promise<boolean> {
+		if (this.nodeLookup && Date.now() - this.nodeLookup.at < NODE_LOOKUP_MS) { return this.nodeLookup.found; }
+		let found = true; // Uma busca que falha não é prova de ausência.
+		try { found = Boolean(await findExecutable('node', { env: process.env, platform: process.platform })); } catch { /* Mantém o benefício da dúvida. */ }
+		this.nodeLookup = { at: Date.now(), found };
+		return found;
+	}
+	private async packagedHookText(): Promise<string> {
+		return this.packagedHook ??= await nodeFs.promises.readFile(vscode.Uri.joinPath(this.context.extensionUri, 'hooks', 'record-change.js').fsPath, 'utf8');
+	}
+	/**
+	 * O script do hook fica no projeto e roda a cada edição do Claude, com as permissões do usuário.
+	 * Qualquer processo com escrita na pasta pode trocá-lo, então a cópia é conferida a cada atualização
+	 * e restaurada pela janela dona da revisão. A troca só deixa de valer a partir dessa conferência.
+	 */
+	private async verifyHookScript(folder: vscode.WorkspaceFolder): Promise<'ok' | 'restored' | 'differs'> {
+		const store = this.stores.get(folder.uri.toString());
+		// Sem os dados da revisão abertos não há como restaurar; a ativação e a próxima atualização cobrem o caso.
+		if (!store) { return 'ok'; }
+		try {
+			const read = await safeReadText(this.scriptUri(folder).fsPath, folder.uri.fsPath);
+			if (read.kind === 'content' && read.text === await this.packagedHookText()) { return 'ok'; }
+			if (!store.writable || this.maintenance || this.disposed) { return 'differs'; }
+			await this.installHookScript(folder);
+			// Script ausente é reposto em silêncio; conteúdo diferente pode ser adulteração e merece aviso.
+			if (read.kind === 'content') { void vscode.window.showWarningMessage(HOOK_SCRIPT_RESTORED); }
+			return 'restored';
+		} catch { return 'differs'; }
+	}
 	private async readSettings(folder: vscode.WorkspaceFolder): Promise<SettingsRead> { return safeReadText(nodePath.join(folder.uri.fsPath, ...SETTINGS_PATH), folder.uri.fsPath); }
 	private knownHookPaths(): string[] { return [vscode.Uri.joinPath(this.context.globalStorageUri, HOOK_FILE).fsPath]; }
 	private async hookCapability(): Promise<HookCapability> {
@@ -1615,7 +1711,7 @@ export class ChangesController implements
 	}
 	private async writeCapturePolicy(folder: vscode.WorkspaceFolder, paused: boolean, allowPurgeRecovery = false): Promise<void> {
 		const store = await this.ensureStore(folder, allowPurgeRecovery); const config = vscode.workspace.getConfiguration('claudeCodeLauncher');
-		const policy = makeCapturePolicy({ paused, excludedPatterns: config.get<string[]>('historyExcludedPatterns'), maxStorageMB: config.get<number>('historyMaxStorageMB', 128), retentionDays: config.get<number>('historyRetentionDays', 30) });
+		const policy = makeCapturePolicy({ paused, excludedPatterns: excludedPatterns(config), maxStorageMB: config.get<number>('historyMaxStorageMB', 128), retentionDays: config.get<number>('historyRetentionDays', 30) });
 		const file = nodePath.join(store.directory, CAPTURE_POLICY_FILE), read = await safeReadText(file, store.root);
 		if (read.kind === 'error') { throw new ReviewError(read.code); }
 		if (read.kind === 'content') {
@@ -1627,7 +1723,7 @@ export class ChangesController implements
 		const store = await this.ensureStore(folder), dir = store.directory;
 		const ignore = nodePath.join(dir, '.gitignore');
 		if (!(await existsLocal(ignore))) { await this.writeOwnedFile(store, ignore, '*\n', undefined); }
-		const text = await nodeFs.promises.readFile(vscode.Uri.joinPath(this.context.extensionUri, 'hooks', 'record-change.js').fsPath, 'utf8');
+		const text = await this.packagedHookText();
 		const file = this.scriptUri(folder).fsPath, read = await safeReadText(file, store.root);
 		if (read.kind === 'error') { throw new ReviewError(read.code); }
 		if (read.kind !== 'content' || read.text !== text) { await this.writeOwnedFile(store, file, text, read.kind === 'content' ? read.text : undefined); }
@@ -1656,7 +1752,7 @@ export class ChangesController implements
 		if (read.kind === 'error' || (read.kind === 'content' ? read.text : undefined) !== expected) { throw new ReviewError('stateChanged'); }
 		const temp = `${file}.${crypto.randomUUID()}.tmp`;
 		await assertPermits?.();
-		let handle: any; let created = false;
+		let handle: nodeFs.promises.FileHandle | undefined; let created = false;
 		try {
 			handle = await nodeFs.promises.open(temp, 'wx', 0o600); created = true;
 			await handle.writeFile(text, 'utf8'); await handle.sync(); await handle.close(); handle = undefined;
@@ -1670,6 +1766,8 @@ export class ChangesController implements
 			let failed = false;
 			if (handle) { try { await handle.close(); } catch { failed = true; } }
 			if (created) { try { await nodeFs.promises.unlink(temp); } catch (error) { if ((error as { code?: string }).code !== 'ENOENT') { failed = true; } } }
+			// Deliberado: um temporário que não pôde ser removido não pode terminar como sucesso.
+			// eslint-disable-next-line no-unsafe-finally
 			if (failed) { throw new ReviewError('temporaryCleanupFailed'); }
 		}
 	}
@@ -1718,7 +1816,7 @@ function loadStatus(memento: vscode.Memento): Map<string, Status> {
 	}
 	// Versões anteriores guardavam só a lista de edições revisadas.
 	const legacy = memento.get<string[]>(LEGACY_REVIEWED_KEY, []);
-	return new Map(legacy.map((id) => [id, 'accepted' as Status]));
+	return new Map(legacy.map((id) => [id, 'accepted']));
 }
 
 async function confirm(message: string, detail: string, action: string): Promise<boolean> {
@@ -1726,79 +1824,6 @@ async function confirm(message: string, detail: string, action: string): Promise
 	return answer === action;
 }
 
-/** Texto atual do arquivo: o do editor, se estiver aberto, senão o do disco. */
-
-function toViewEntry(entry: RawEntry): BaseView {
-	const relative = vscode.workspace.asRelativePath(entry.file, false).replace(/\\/g, '/');
-	const slash = relative.lastIndexOf('/');
-	const before = entry.before;
-	const after = entry.after;
-	const created = before !== null && !before.exists && after?.exists === true;
-	const deleted = after !== null && !after.exists;
-
-	const base = {
-		id: entry.id,
-		time: entry.time,
-		action: actionLabel(entry.tool, created),
-		file: slash >= 0 ? relative.slice(slash + 1) : relative,
-		dir: slash >= 0 ? relative.slice(0, slash) : '',
-		summary: '',
-		reason: entry.reason?.trim() || null,
-		added: 0,
-		removed: 0,
-		modified: 0,
-		hunks: [] as Hunk[],
-		note: null as string | null,
-		canCompare: false,
-	};
-
-	if (deleted) {
-		return { ...base, summary: 'O arquivo não existe mais depois desta ação.' };
-	}
-	if (before?.large || after?.large) {
-		return { ...base, summary: 'Arquivo grande demais (mais de 512 KB) para guardar o antes e o depois.' };
-	}
-	// Texto null num arquivo que existe: o blob dele sumiu (ou nunca foi guardado).
-	if (before === null || after === null || after.text === null || (before.exists && before.text === null)) {
-		return {
-			...base,
-			summary: 'Não foi possível capturar o conteúdo de antes desta edição.',
-			note: 'Isso acontece quando o registro foi ativado no meio de uma conversa.',
-		};
-	}
-
-	const diff: DiffResult = computeDiff(before.text ?? '', after.text);
-	return {
-		...base,
-		summary: summarize(diff, created),
-		added: diff.added,
-		removed: diff.removed,
-		modified: diff.modified,
-		hunks: diff.hunks,
-		canCompare: true,
-		note: diff.clipped
-			? 'Parte das linhas foi omitida aqui. Use "Lado a lado" para ver tudo.'
-			: diff.approximate
-				? 'Arquivo grande: as linhas foram comparadas em bloco. "Lado a lado" mostra o diff exato.'
-				: null,
-	};
-}
-
-interface FileSummary extends Partial<ReturnType<typeof projectReview>> {
-	/** Edição mais recente do arquivo: "Ver no código" parte dela. */
-	id: string;
-	/** Identifica o arquivo nas ações aceitar/recusar. */
-	key: string;
-	file: string;
-	dir: string;
-	added: number;
-	removed: number;
-	created: boolean;
-	deleted: boolean;
-	lastOperation?: ReturnType<typeof operationView>;
-}
-
-type BaseView = Omit<ViewEntry, 'status' | 'requestId' | 'request'>;
 
 function loadUndo(memento: vscode.Memento): Undo[] {
 	const saved = memento.get<Undo[]>(UNDO_KEY, []);
@@ -1809,91 +1834,11 @@ function loadUndo(memento: vscode.Memento): Undo[] {
 }
 
 
-function actionLabel(tool: string | null | undefined, created: boolean): string {
-	if (created) {
-		return 'Criou';
-	}
-	switch (tool) {
-		case 'Write':
-			return 'Reescreveu';
-		case 'MultiEdit':
-			return 'Editou em várias partes';
-		case 'NotebookEdit':
-			return 'Editou notebook';
-		default:
-			return 'Editou';
-	}
-}
-
-function summarize(diff: DiffResult, created: boolean): string {
-	if (created) {
-		return `Arquivo novo, com ${plural(diff.added, 'linha', 'linhas')}.`;
-	}
-	if (diff.hunks.length === 0) {
-		return 'O conteúdo ficou igual: nenhuma linha mudou.';
-	}
-	const parts: string[] = [];
-	if (diff.modified > 0) {
-		parts.push(`${plural(diff.modified, 'linha modificada', 'linhas modificadas')}`);
-	}
-	if (diff.added > 0) {
-		parts.push(`${plural(diff.added, 'linha nova', 'linhas novas')}`);
-	}
-	if (diff.removed > 0) {
-		parts.push(`${plural(diff.removed, 'linha removida', 'linhas removidas')}`);
-	}
-	const where = diff.hunks.length === 1 ? 'em 1 trecho' : `em ${diff.hunks.length} trechos`;
-	return `${joinPt(parts)}, ${where} do arquivo.`;
-}
-
-function countFiles(count: number): string {
-	return plural(count, 'arquivo', 'arquivos');
-}
-
-function plural(count: number, one: string, many: string): string {
-	return `${count} ${count === 1 ? one : many}`;
-}
-
-function joinPt(parts: string[]): string {
-	if (parts.length <= 1) {
-		return capitalize(parts[0] ?? '');
-	}
-	return capitalize(`${parts.slice(0, -1).join(', ')} e ${parts[parts.length - 1]}`);
-}
-
-function capitalize(text: string): string {
-	return text.charAt(0).toUpperCase() + text.slice(1);
-}
-
-function basename(file: string): string {
-	const parts = file.split(/[\\/]/);
-	return parts[parts.length - 1] || file;
-}
-
-async function readText(uri: vscode.Uri): Promise<string | undefined> {
-	try {
-		return new TextDecoder('utf-8').decode(await vscode.workspace.fs.readFile(uri));
-	} catch {
-		return undefined;
-	}
-}
-
 function createNonce(): string {
 	return crypto.randomBytes(24).toString('hex');
 }
 
-function errorCode(error: unknown): string { return error instanceof ReviewError ? error.code : (error as { code?: string })?.code || 'operationFailed'; }
 async function existsLocal(file: string): Promise<boolean> { try { await nodeFs.promises.lstat(file); return true; } catch (error) { if ((error as { code?: string }).code === 'ENOENT') { return false; } throw error; } }
-
-async function removeOwnedTree(file: string, root: string, cancelled: () => boolean = () => false): Promise<void> {
-	if (cancelled()) { throw new ReviewError('cancelledBeforeEffect'); }
-	if (!(await assessStoragePath(file, root)).allowed) { throw new ReviewError('unsafeStorageType'); }
-	const stat = await nodeFs.promises.lstat(file);
-	if (stat.isSymbolicLink()) { throw new ReviewError('unsafeStorageType'); }
-	if (stat.isDirectory()) { for (const name of await nodeFs.promises.readdir(file)) { await removeOwnedTree(nodePath.join(file, name), root, cancelled); } if (cancelled()) { throw new ReviewError('cancelledBeforeEffect'); } await nodeFs.promises.rmdir(file); }
-	else if (stat.isFile()) { if (cancelled()) { throw new ReviewError('cancelledBeforeEffect'); } await nodeFs.promises.unlink(file); }
-	else { throw new ReviewError('unsafeStorageType'); }
-}
 
 async function canonicalResource(file: string, root: string): Promise<string | undefined> {
 	if (!nodePath.isAbsolute(file) || !nodePath.isAbsolute(root)) { return undefined; }

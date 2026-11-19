@@ -1,11 +1,10 @@
 /** Validation and local IO boundaries for history. No VS Code dependency. */
 import type { RawEntry, Snapshot } from './logic';
-declare const require: (id: string) => any;
-const crypto = require('node:crypto');
-const fs = require('node:fs');
-const path = require('node:path');
-const Bytes = require('node:buffer').Buffer;
-const Utf8Decoder = require('node:util').TextDecoder;
+import * as crypto from 'node:crypto';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { Buffer as Bytes } from 'node:buffer';
+import { TextDecoder as Utf8Decoder } from 'node:util';
 
 export const CAPTURE_POLICY_FILE = 'capture-policy.json';
 export const CAPTURE_STATUS_FILE = 'capture-status.json';
@@ -52,7 +51,7 @@ function validateDiagnosticFields(value: Record<string, unknown>, now: number): 
 		|| (value.code === 'capturePrepared' && (value.phase !== 'pre' || value.stage !== 'pending'))) { return undefined; }
 	return { schemaVersion: 2, id: value.id, kind: value.kind as CaptureDiagnosticEvent['kind'], phase: value.phase as CaptureDiagnosticEvent['phase'],
 		stage: value.stage as CaptureDiagnosticStage, code: value.code as CaptureDiagnosticCode,
-		contentCoverage: value.contentCoverage as CaptureDiagnosticEvent['contentCoverage'], observedAt: value.observedAt as string };
+		contentCoverage: value.contentCoverage as CaptureDiagnosticEvent['contentCoverage'], observedAt: value.observedAt };
 }
 export function captureDiagnosticFilename(event: CaptureDiagnosticEvent): string {
 	return `${event.observedAt.replace(/[-:.]/g, '')}-${event.id}.json`;
@@ -83,7 +82,7 @@ export async function readCaptureDiagnostics(historyDir: string, workspaceRoot: 
 		const scope = await assessStoragePath(directory, workspaceRoot);
 		if (!scope.allowed) { issues.push('unsafeStorage'); continue; }
 		const names: string[] = [];
-		let handle: any;
+		let handle: fs.Dir | undefined;
 		try {
 			handle = await fs.promises.opendir(directory, { bufferSize: 16 });
 			for (let index = 0; index <= MAX_CAPTURE_DIAGNOSTIC_FILES; index += 1) {
@@ -142,7 +141,7 @@ export function makeCapturePolicy(options: {
 	if (!validateCapturePolicy(candidate)) {
 		throw new Error('invalidCapturePolicy');
 	}
-	return candidate as CapturePolicy;
+	return candidate;
 }
 function object(value: unknown): value is Record<string, unknown> {
 	return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -231,7 +230,7 @@ export function validateRawEntry(value: unknown): EntryValidation {
 		session: value.session as string | null | undefined, tool: value.tool as string | null | undefined,
 		toolUseId: value.toolUseId as string | null | undefined,
 		transcript: value.transcript as string | null | undefined,
-		reason: value.reason as string | null | undefined,
+		reason: value.reason,
 	} };
 }
 
@@ -392,8 +391,8 @@ export async function assessStoragePath(file: string, root: string, io: PathIO =
 export type SafeTextRead = { kind: 'content'; text: string } | { kind: 'absent' } | { kind: 'error'; code: string };
 export async function safeReadText(file: string, root: string, maxBytes = 2 * 1024 * 1024): Promise<SafeTextRead> {
 	const policy = await assessStoragePath(file, root);
-	if (!policy.allowed) { return { kind: 'error', code: policy.code ?? 'unsafeStorage' }; }
-	let handle: any;
+	if (!policy.allowed || policy.canonicalPath === undefined) { return { kind: 'error', code: policy.code ?? 'unsafeStorage' }; }
+	let handle: fs.promises.FileHandle | undefined;
 	try {
 		handle = await fs.promises.open(policy.canonicalPath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0));
 		const metadata = await handle.stat();
@@ -418,10 +417,10 @@ export async function readLogFile(file: string, root: string, options: LogOption
 	const initial = options.cursor ?? { offset: 0, line: 0 };
 	const empty = () => parseLog(new Uint8Array(), { cursor: initial, baseOffset: initial.offset });
 	const policy = await assessStoragePath(file, root);
-	if (!policy.allowed) {
-		const result = empty(); result.coverage.status = 'partial'; result.coverage.reason = policy.code; return result;
+	if (!policy.allowed || policy.canonicalPath === undefined) {
+		const result = empty(); result.coverage.status = 'partial'; result.coverage.reason = policy.code ?? 'unsafeStorage'; return result;
 	}
-	let handle: any;
+	let handle: fs.promises.FileHandle | undefined;
 	try {
 		handle = await fs.promises.open(policy.canonicalPath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0));
 		const metadata = await handle.stat();
@@ -466,7 +465,7 @@ export async function transcriptAllowed(file: string, expectedDirectories: reado
 	if (!limitedString(file, 8192) || !/^[A-Za-z0-9_.-]+\.jsonl$/.test(path.basename(file))) { return false; }
 	for (const root of expectedDirectories) {
 		const result = await assessResourceScope(file, root, io);
-		if (result.allowed && path.dirname(result.canonicalPath) === await io.realpath(root).catch(() => '')) { return true; }
+		if (result.allowed && result.canonicalPath !== undefined && path.dirname(result.canonicalPath) === await io.realpath(root).catch(() => '')) { return true; }
 	}
 	return false;
 }

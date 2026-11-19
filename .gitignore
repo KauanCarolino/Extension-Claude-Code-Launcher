@@ -8,9 +8,8 @@ out/
 # Pacotes gerados pelo vsce
 *.vsix
 
-# Configurações locais do Claude Code (caminhos absolutos da máquina e log de mudanças)
-.claude/settings.local.json
-.claude/launcher-changes/
+# Pasta local do Claude Code: configurações da máquina, log de mudanças e skills instaladas
+.claude/
 
 # Logs
 *.log

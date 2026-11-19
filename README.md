@@ -4,14 +4,17 @@ Extensão para Cursor e Visual Studio Code que abre o chat oficial do Claude Cod
 
 O chat, a autenticação, os modelos e as permissões pertencem à extensão oficial **Claude Code** (`anthropic.claude-code`). O launcher usa essa integração; não incorpora o Agent do Cursor.
 
-Versão: **0.10.0**. Pacote local: `claude-code-launcher-0.10.0.vsix`.
+Esta é uma extensão independente. Não é um produto da Anthropic nem é mantida por ela; "Claude" e "Claude Code" são marcas da Anthropic.
+
+Versão: **0.11.0**. Pacote local: `claude-code-launcher-0.11.0.vsix`.
 
 ## Requisitos e compatibilidade
 
 - Visual Studio Code **1.94.0 ou superior**. No Cursor, a API do editor precisa ser compatível; os alvos de verificação estão na tabela abaixo.
 - Extensão oficial Claude Code para abrir conversas. A instalação só ocorre quando você escolhe **Instalar**.
 - Workspace confiável e arquivos locais para a revisão e a captura. O launcher fica desabilitado no Restricted Mode.
-- Node.js **22 ou superior** no `PATH` para o fluxo de desenvolvimento e para executar o hook local. O Node embutido no Extension Host é independente do Node do terminal.
+- Node.js **22 ou superior** no `PATH` para o fluxo de desenvolvimento e para executar o hook local. O Node embutido no Extension Host é independente do Node do terminal. Quando o registro está configurado e o comando `node` não é encontrado no `PATH` da janela, o painel **Mudanças** avisa; o aviso some assim que um evento de captura é observado.
+- Em workspaces virtuais, a revisão e o registro ficam indisponíveis: exigem pastas no disco local. A abertura do chat depende do suporte da extensão oficial a esse tipo de workspace e não foi verificada.
 
 | Editor | Alvos do teste de host |
 | --- | --- |
@@ -26,7 +29,7 @@ A compatibilidade de hooks é verificada separadamente: o modo automático exige
 ## Instalação
 
 1. Em **Extensions**, abra o menu `…` e escolha **Install from VSIX**.
-2. Selecione `claude-code-launcher-0.10.0.vsix`.
+2. Selecione `claude-code-launcher-0.11.0.vsix`.
 3. Abra a pasta do projeto e use um comando da categoria **Claude Code Launcher**.
 4. Para registrar novas mudanças, use **Ativar registro de mudanças** e inicie uma nova conversa do Claude.
 
@@ -34,7 +37,7 @@ Atualizar o pacote não publica a extensão nem envia o histórico para um servi
 
 ## Abrir e organizar conversas
 
-O ícone de balão no título do editor e o item **Claude** na barra de status abrem a barra lateral oficial. **Nova conversa em aba** e **Abrir chat em nova aba** usam o editor de conversas do Claude. A view **Claude Code** mostra:
+O ícone de balão no título do editor e o item **Claude** na barra de status abrem a barra lateral oficial. **Nova conversa em aba** e **Abrir chat em nova aba** usam o editor de conversas do Claude. A view **Conversas**, no contêiner **Claude Code Launcher** da barra de atividades, mostra:
 
 - **Nova conversa**, que abre uma conversa nova em aba;
 - uma lista só de conversas, uma linha cada, com o tempo à direita:
@@ -78,7 +81,7 @@ As lentes oferecem **Aceitar** e **Recusar** por trecho. Quando há vários trec
 
 **Lado a lado** nas lentes compara a base da revisão atual, incluindo decisões parciais, com o arquivo observado. A comparação de um card mostra o antes/depois histórico daquela edição. Essas comparações respondem a perguntas diferentes.
 
-Arquivos pendentes recebem a letra **C** no Explorer e uma contagem na barra de status. `Alt+]` e `Alt+[` percorrem os trechos. Cores podem ser ajustadas pelo tema, incluindo `claudeCodeLauncher.pendingChangeForeground`.
+Arquivos pendentes recebem a letra **C** no Explorer e uma contagem na barra de status. `Alt+]` e `Alt+[` percorrem os trechos; no macOS, onde essas teclas digitam caracteres, os atalhos são `Ctrl+Alt+]` e `Ctrl+Alt+[`. Cores podem ser ajustadas pelo tema, incluindo `claudeCodeLauncher.pendingChangeForeground`.
 
 ## Hooks e dados locais
 
@@ -87,6 +90,8 @@ Ativar o registro configura handlers próprios em `.claude/settings.local.json` 
 O modo `auto` exige capacidade comprovada no schema. `exec` é uma escolha explícita para um harness que você verificou suportar esse formato. `disabled` desliga os hooks geridos. Não existe fallback automático por shell. O hook observa a edição; uma falha de captura não autoriza nem impede a operação original do Claude.
 
 Ao atualizar a extensão, o script dos hooks já configurados é reparado automaticamente quando a capacidade, a política e a propriedade da escrita permitem. Uma captura pausada continua pausada. Bloqueios são informados; use **Ativar registro de mudanças** quando quiser reativar o registro e inicie uma nova conversa para o Claude carregar a configuração.
+
+O script do hook fica na pasta do projeto e roda a cada edição do Claude. A cada atualização do painel, a cópia é comparada com a distribuída pela extensão. A janela dona da revisão restaura uma cópia ausente ou diferente e, quando o conteúdo era diferente, avisa; uma janela só de leitura apenas informa a diferença. Essa conferência reduz o tempo em que um script trocado continua valendo, mas não impede que ele rode antes dela.
 
 ### Diagnóstico de captura
 
@@ -113,14 +118,16 @@ O histórico contém cópias locais em texto, sem criptografia própria. As excl
 | --- | --- | --- |
 | `claudeCodeLauncher.inlineChanges` | `true` | Mostra as marcas de revisão |
 | `claudeCodeLauncher.manageEditorGroups` | `false` | Permite gestão de grupos e preferências |
-| `claudeCodeLauncher.hookExecutionMode` | `auto` | `auto`, `exec` ou `disabled` |
-| `claudeCodeLauncher.historyExcludedPatterns` | Padrões de arquivos sensíveis | Exclusões de novas cópias; aceita `*`, `**` e `?` |
+| `claudeCodeLauncher.hookExecutionMode` | `auto` | `auto`, `exec` ou `disabled`. Opção da máquina: o `settings.json` de um projeto não a altera |
+| `claudeCodeLauncher.historyExcludedPatterns` | Padrões de arquivos sensíveis | Exclusões de novas cópias; aceita `*`, `**` e `?`. Os padrões do `settings.json` de um projeto somam-se aos do usuário; não os substituem |
 | `claudeCodeLauncher.historyRetentionDays` | `30` | Retenção de histórico revisado; `0` desliga limpeza por idade |
 | `claudeCodeLauncher.historyMaxStorageMB` | `128` | Orçamento local em MiB; atingir o limite suspende novas capturas |
 
 Pendências, decisões parciais e referências necessárias à recuperação não são descartadas para caber no orçamento. Uma leitura parcial ou um registro inválido não permite declarar que todo o histórico foi processado. O diagnóstico de entradas inválidas evita copiar novamente seu conteúdo para relatórios.
 
 **Limpar histórico revisado** remove entradas elegíveis do histórico, preservando revisões e recuperação. Por isso, não equivale a liberar todo o armazenamento.
+
+A janela dona da revisão também recolhe, ao abrir e a cada seis horas, o que nenhum fluxo usa mais: marcadores de `completed/` e preparações de `pending/` com mais de 24 horas, e cópias de `review-blobs/v1/` que nem o estado canônico, nem a geração anterior, nem os backups mencionam. **Limpar histórico revisado** faz a mesma coleta na hora. Arquivos com nomes desconhecidos, capturas em andamento e cópias recentes são preservados.
 
 **Apagar todos os dados locais de revisão** pede confirmação, pausa a captura e exige que os produtores cooperantes estejam parados. Remove os dados próprios de revisão e recuperação; mantém os arquivos atuais do projeto e configurações de terceiros. A captura permanece pausada até você ativá-la novamente. Falhas e conflitos são informados como limpeza parcial ou bloqueada, com inventário do que permaneceu por categoria e orientação para a próxima tentativa. Um inventário incompleto não aparece como ausência de dados. Esse comando não apaga os transcripts originais do Claude, backups externos nem cópias no Git.
 
@@ -141,15 +148,17 @@ O diretório `.claude/launcher-changes/` é local e recebe regra de exclusão do
 | `meta.json` | Pedido e explicação associados aos eventos |
 | `capture-policy.json`, `capture-status.json` | Política de captura, pausa e diagnóstico legado; não comprovam sozinhos uma conclusão |
 | `capture-diagnostics/v2/observations/`, `capture-diagnostics/v2/completions/` | Evidências separadas de tentativas e conclusões; retenção conservadora de 32 registros válidos por categoria, preservando dados desconhecidos |
-| `active/`, `pending/`, `completed/` | Coordenação e idempotência do hook |
+| `active/`, `pending/`, `completed/` | Coordenação e idempotência do hook; marcadores antigos são recolhidos automaticamente |
 
 Somente uma janela nova escreve a revisão de cada projeto por vez. As demais ficam em leitura. Use **Liberar revisão para outra janela** na proprietária e **Recuperar revisão bloqueada** na janela que assumirá. Um proprietário ativo ou ambíguo não é removido por idade do lock.
 
-Após uma queda, o comando de recuperação verifica o proprietário. Se houver um `review-recovery.lock` órfão, o procedimento é offline: encerre todas as janelas e conversas que usam o projeto, faça uma cópia de `.claude/launcher-changes/`, confira o PID registrado e só remova **esse guard** quando comprovar que o processo terminou. Não remova um lock de uma janela ativa nem edite o estado canônico para forçar uma decisão. Um guard de manutenção de captura também exige quiescência e inspeção antes de qualquer intervenção.
+Após uma queda, a janela seguinte abre só para leitura e, quando o processo registrado como dono não existe mais, oferece **Recuperar revisão** uma vez. A posse nunca é assumida sem essa confirmação, porque a pasta pode estar aberta em outra máquina ou contêiner. O comando de recuperação verifica o proprietário. Se houver um `review-recovery.lock` órfão, o procedimento é offline: encerre todas as janelas e conversas que usam o projeto, faça uma cópia de `.claude/launcher-changes/`, confira o PID registrado e só remova **esse guard** quando comprovar que o processo terminou. Não remova um lock de uma janela ativa nem edite o estado canônico para forçar uma decisão. Um guard de manutenção de captura também exige quiescência e inspeção antes de qualquer intervenção.
+
+Um hook interrompido no meio da execução (tempo esgotado, queda do processo ou da máquina) deixa seu registro em `active/` e, às vezes, um marcador `.post` em `pending/`. A manutenção remove esses registros quando eles têm o formato criado pelo hook, mais de 30 segundos e pertencem a um processo que não existe mais; o marcador `.post` sai quando nenhum registro de `active/` permanece. Registros de processos ativos, recentes ou com nomes desconhecidos continuam bloqueando a manutenção.
 
 A versão 0.7.0 não participa desse protocolo. Não mantenha versões antigas e novas escrevendo no mesmo projeto. Para downgrade, encerre os escritores e preserve o diretório de revisão: o formato antigo não representa decisões parciais, estado misto nem toda a recuperação nova. Reinstalar o executável anterior não desfaz o conteúdo dos arquivos.
 
-As versões 0.8 e 0.9 também não reconhecem a intenção de limpeza introduzida na 0.10. Conclua uma limpeza interrompida com a versão 0.10 antes de considerar um downgrade. Uso simultâneo dessas versões durante a limpeza não é suportado.
+As versões 0.8 e 0.9 também não reconhecem a intenção de limpeza introduzida na 0.10. Conclua uma limpeza interrompida com a versão 0.10 ou superior antes de considerar um downgrade. Uso simultâneo dessas versões durante a limpeza não é suportado.
 
 ## Comandos operacionais
 
@@ -179,11 +188,12 @@ Use Node.js 22+ e o lockfile do projeto:
 ```sh
 npm ci --ignore-scripts --no-audit --fund=false
 npm run typecheck
+npm run lint
 npm test
 npm run test:package
 npm audit --audit-level=moderate
-npm run package -- --out claude-code-launcher-0.10.0.vsix
-npm run verify:package -- claude-code-launcher-0.10.0.vsix
+npm run package -- --out claude-code-launcher-0.11.0.vsix
+npm run verify:package -- claude-code-launcher-0.11.0.vsix
 ```
 
 `vscode:prepublish` chama o build. Ele remove a saída gerada antiga e compila com `noEmitOnError`. Os testes de pacote usam árvores temporárias, inclusive uma árvore sem `out/` e outra com saída obsoleta. O verificador inspeciona o VSIX real, compara bytes com o runtime atual, calcula SHA-256 e rejeita conteúdo inesperado. `docs/`, testes, scripts, configurações locais e dependências de desenvolvimento ficam fora do VSIX.
@@ -193,8 +203,8 @@ Os testes de `test/*.test.js` usam regras reais e adaptadores explícitos onde o
 ```sh
 npm run test:host -- --editor code
 npm run test:host -- --editor cursor
-npm run test:host -- --editor code --vsix claude-code-launcher-0.10.0.vsix --keep
-npm run test:host -- --editor cursor --vsix claude-code-launcher-0.10.0.vsix --report-dir docs/validacao/host-cursor
+npm run test:host -- --editor code --vsix claude-code-launcher-0.11.0.vsix --keep
+npm run test:host -- --editor cursor --vsix claude-code-launcher-0.11.0.vsix --report-dir docs/validacao/host-cursor
 ```
 
 O runner cria workspace, perfil, diretório de extensões e configuração Claude temporários. O modo `--vsix` instala e exercita o pacote nesse perfil isolado. Não altera o perfil normal nem envia mensagens ao Claude. `--keep` mantém o perfil temporário; falhas também preservam o diretório. `--report-dir` cria uma subpasta `run-*` exclusiva para cada execução, com os relatórios e logs correspondentes, preservando as execuções anteriores. O cenário é um workspace sintético confiável, não um teste do Restricted Mode.
@@ -204,7 +214,7 @@ A jornada de captura do pacote confere o hash do hook instalado contra sua entra
 No macOS, os caminhos padrão são os aplicativos em `/Applications`. Para outra instalação, use `--executable /caminho/do/editor`. O caminho do CLI é derivado dessa instalação; `--cli /caminho/Resources/app/out/cli.js` permite substituí-lo, mantendo **a mesma instalação**. Para baixar e exercitar uma versão exata do VS Code:
 
 ```sh
-npm run test:host -- --download-version 1.94.0 --vsix claude-code-launcher-0.10.0.vsix --report-dir docs/validacao/host-minimum
+npm run test:host -- --download-version 1.94.0 --vsix claude-code-launcher-0.11.0.vsix --report-dir docs/validacao/host-minimum
 ```
 
 `--download-version` aceita uma versão exata, somente para VS Code, e não pode ser combinado com `--executable` ou `--cli`. O download usa cache temporário fora do projeto. No Linux sem display, execute o comando com `xvfb-run -a`. A matriz CI inclui instalação do VSIX e a jornada do hook no VS Code 1.94.0 em Linux, Windows e macOS, além de tipagem, testes Node, testes de pacote e auditoria. Consulte os checks e as evidências da execução do commit que será distribuído.
@@ -214,9 +224,9 @@ Para medir a listagem de conversas com arquivos sintéticos, rode `node scripts/
 Os contratos adicionais também usam o VSIX instalado em perfis isolados:
 
 ```sh
-npm run test:host:contracts -- multi-window --vsix claude-code-launcher-0.10.0.vsix --report-dir docs/validacao/janelas
-npm run test:host:contracts -- lifecycle --vsix claude-code-launcher-0.10.0.vsix --report-dir docs/validacao/lifecycle
-npm run test:host:contracts -- official --official-extension /caminho/da/extensao/anthropic.claude-code --vsix claude-code-launcher-0.10.0.vsix --report-dir docs/validacao/oficial
+npm run test:host:contracts -- multi-window --vsix claude-code-launcher-0.11.0.vsix --report-dir docs/validacao/janelas
+npm run test:host:contracts -- lifecycle --vsix claude-code-launcher-0.11.0.vsix --report-dir docs/validacao/lifecycle
+npm run test:host:contracts -- official --official-extension /caminho/da/extensao/anthropic.claude-code --vsix claude-code-launcher-0.11.0.vsix --report-dir docs/validacao/oficial
 ```
 
 `multi-window` exercita duas janelas reais, recarregamento, decisão parcial e transferência explícita da escrita. `lifecycle` mede a ativação pública e instancia os componentes empacotados de revisão e lista de conversas com um contexto real e um observador que encaminha chamadas às APIs reais; repete painéis, troca de pastas e descarte durante refresh. O provider privado da lista é exposto somente no carregador de teste, sem mudar o código distribuído; a view real recebe mil sessões sintéticas. Seus contadores pertencem à instância observada e não representam todos os recursos do editor. `official` copia somente os arquivos de programa da extensão oficial já instalada para o diretório temporário, consulta o estado do CLI isolado e verifica uma aba oficial aberta sem enviar mensagem. Também usa o modo público [`--init-only`](https://code.claude.com/docs/en/hooks#setup) para testar o descritor de executável e argumentos em um evento Setup sintético, incluindo erro e timeout. Setup não equivale aos eventos de captura PreToolUse/PostToolUse; esses continuam identificados separadamente. Nenhum desses cenários comprova uma conversa autenticada ou a execução do hook pelo modelo. A matriz CI inclui os contratos de janelas e lifecycle; a extensão oficial depende de uma instalação local compatível com o sistema.

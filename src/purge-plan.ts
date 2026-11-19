@@ -1,6 +1,6 @@
 /** Read-only inventory and redacted purge results. The controller owns confirmation, locks and effects. */
-declare const require: (id: string) => any;
-const fs = require('node:fs').promises, path = require('node:path');
+import { promises as fs } from 'node:fs';
+import * as path from 'node:path';
 
 export const PURGE_CATEGORIES = ['capture', 'history', 'blobs', 'canonical', 'metadata', 'projection', 'undo', 'backups', 'cache'] as const;
 export type PurgeCategory = typeof PURGE_CATEGORIES[number];

@@ -1,9 +1,8 @@
-import { activeReview, commitReviewDecision, copyReview, planReviewDecision, ReviewContent, ReviewDecisionPlan, ReviewDecisionRequest, ReviewError, ReviewOperation, ReviewUndoItem, sameContent } from './review';
+import { activeReview, commitReviewDecision, copyReview, planReviewDecision, ReviewContent, ReviewDecisionRequest, ReviewError, ReviewOperation, sameContent } from './review';
 import { ReviewStore } from './review-store';
 import type { ReviewState } from './review';
 import { blockedReviewResult, ReviewAction, ReviewItemResult, ReviewResultError, reviewResultReason } from './review-results';
-declare const require: (id: string) => any;
-const crypto = require('node:crypto');
+import * as crypto from 'node:crypto';
 
 export interface ResourceAdapter {
 	read(file: string): Promise<ReviewContent>;

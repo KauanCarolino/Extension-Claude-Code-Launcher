@@ -1,7 +1,7 @@
 /** Policy permits for NEW metadata reads/copies. Existing saved metadata is never removed here. */
 import { matchesExcludedPath, validateCapturePolicy } from './history';
-declare const require: (id: string) => any;
-const path = require('node:path'), crypto = require('node:crypto');
+import * as path from 'node:path';
+import * as crypto from 'node:crypto';
 
 export interface MetadataPolicyContext {
 	policy: unknown;

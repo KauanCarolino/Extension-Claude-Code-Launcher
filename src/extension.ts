@@ -1,11 +1,11 @@
 import * as vscode from 'vscode';
-import { registerChanges } from './changes';
+import { ChangesController, registerChanges } from './changes';
 import { registerInline } from './inline';
 import { listSessionsAsync, sessionsDir } from './sessions';
 import { ManagedPreference, PreferenceManager } from './preferences';
 import { validateMessage } from './history';
 
-declare const require: (name: string) => { randomBytes(size: number): { toString(encoding: string): string } };
+import { randomBytes } from 'crypto';
 
 const CLAUDE_EXTENSION_ID = 'anthropic.claude-code';
 const SIDEBAR_COMMAND = 'claude-vscode.sidebar.open';
@@ -17,7 +17,7 @@ class LauncherViewProvider implements vscode.WebviewViewProvider, vscode.Disposa
 	public static readonly viewId = 'claude-code-launcher.home';
 
 	private view: vscode.WebviewView | undefined;
-	private refreshTimer: unknown;
+	private refreshTimer: ReturnType<typeof setTimeout> | undefined;
 	private generation = 0;
 	private disposed = false;
 	private viewSubscriptions: vscode.Disposable[] = [];
@@ -197,6 +197,7 @@ async function openClaudeTab(sessionId?: string): Promise<void> {
 }
 
 let provider: LauncherViewProvider | undefined;
+let changes: ChangesController | undefined;
 let preferenceManager: PreferenceManager | undefined;
 const PREFERENCE_KEY = 'claudeCodeLauncher.managedPreferences.v1';
 
@@ -213,7 +214,8 @@ export function activate(context: vscode.ExtensionContext): void {
 			target === 'global' ? vscode.ConfigurationTarget.Global : vscode.ConfigurationTarget.Workspace); },
 	}, scope);
 	provider = new LauncherViewProvider(context);
-	registerInline(context, registerChanges(context));
+	changes = registerChanges(context);
+	registerInline(context, changes);
 	watchSessions(context);
 
 	context.subscriptions.push(
@@ -256,7 +258,7 @@ export function activate(context: vscode.ExtensionContext): void {
 	}
 
 	const statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
-	statusItem.name = 'Claude Code';
+	statusItem.name = 'Claude Code Launcher';
 	statusItem.text = '$(comment-discussion) Claude';
 	statusItem.tooltip = 'Abrir o chat do Claude Code';
 	statusItem.command = 'claude-code-launcher.openSidebar';
@@ -264,7 +266,18 @@ export function activate(context: vscode.ExtensionContext): void {
 	context.subscriptions.push(statusItem);
 }
 
-export function deactivate(): void { provider?.dispose(); provider = undefined; }
+/**
+ * O editor só aguarda o que `deactivate` devolve; descartes assíncronos em `subscriptions` não são
+ * esperados. A posse da revisão (review-writer.lock) é liberada no fim do descarte do controlador:
+ * sem esta espera, a próxima janela poderia abrir a revisão só para leitura.
+ */
+export function deactivate(): Promise<void> | undefined {
+	provider?.dispose(); provider = undefined;
+	const controller = changes; changes = undefined;
+	if (!controller) { return undefined; }
+	controller.dispose();
+	return controller.whenDisposed();
+}
 
 function isClaudeInstalled(): boolean {
 	return Boolean(vscode.extensions.getExtension(CLAUDE_EXTENSION_ID));
@@ -322,7 +335,7 @@ async function openClaudeSidebar(): Promise<void> {
 
 class LaunchError extends Error { constructor(readonly code: string) { super(code); } }
 async function bounded<T>(work: Thenable<T>, milliseconds: number, code: string): Promise<T> {
-	let timer: unknown;
+	let timer: ReturnType<typeof setTimeout> | undefined;
 	try {
 		return await Promise.race([Promise.resolve(work), new Promise<never>((_, reject) => {
 			timer = setTimeout(() => reject(new LaunchError(code)), milliseconds);
@@ -642,5 +655,5 @@ function watchSessions(context: vscode.ExtensionContext): void {
 
 function requireCryptoNonce(): string {
 	// Extension Host Node; avoid adding a runtime dependency.
-	return require('crypto').randomBytes(24).toString('hex');
+	return randomBytes(24).toString('hex');
 }

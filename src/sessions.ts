@@ -1,14 +1,11 @@
 // Lê as conversas que o Claude Code guarda em ~/.claude/projects/<pasta>/<id>.jsonl.
 // Só lê o começo e o fim de cada arquivo: transcripts com imagens chegam a vários MB.
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
-declare const require: (id: string) => any;
-
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
-const ByteBuffer = require('buffer').Buffer;
-const crypto = require('node:crypto');
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
+import { Buffer as ByteBuffer } from 'buffer';
+import * as crypto from 'node:crypto';
 
 const TAIL_BYTES = 256 * 1024;
 const HEAD_BYTES = 512 * 1024;
@@ -139,7 +136,7 @@ export async function listSessionsAsync(workspaceFolder: string, limit: number, 
 }
 
 async function readRangeAsync(file: string, start: number, end: number): Promise<string | null> {
-	let handle: any;
+	let handle: fs.promises.FileHandle | undefined;
 	try {
 		handle = await fs.promises.open(file, 'r');
 		const buffer = ByteBuffer.alloc(Math.max(0, end - start));
@@ -225,7 +222,6 @@ function readRange(file: string, start: number, end: number): string {
 	}
 }
 
-declare const Buffer: { alloc(size: number): { toString(encoding: string): string } };
 
 const REASON_TAIL_BYTES = 4 * 1024 * 1024;
 const MAX_REASON_CHARS = 4000;
@@ -364,7 +360,7 @@ export async function readTranscriptMeta(transcriptPath: string, options?: Trans
 		return cached.meta;
 	}
 	let text = '';
-	let handle: any;
+	let handle: fs.promises.FileHandle | undefined;
 	try {
 		handle = await fs.promises.open(transcriptPath, 'r');
 		const start = Math.max(0, stat.size - REASON_TAIL_BYTES);
