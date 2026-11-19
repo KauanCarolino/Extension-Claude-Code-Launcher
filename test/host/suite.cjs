@@ -6,6 +6,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const vscode = require('vscode');
 const { assertHookNode, run, validDiagnosticEvent } = require('../../scripts/host-tooling.cjs');
+const { collectReviewFailureDiagnostics } = require('../../scripts/host-state-diagnostics.cjs');
 
 const sha256 = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 
@@ -59,10 +60,30 @@ exports.run = async () => {
       const uri = vscode.Uri.file(path.join(workspace, name));
       const document = await vscode.workspace.openTextDocument(uri);
       await vscode.window.showTextDocument(document, { preview: false });
-      const lenses = await until(async () => {
-        const items = await vscode.commands.executeCommand('vscode.executeCodeLensProvider', uri);
-        return items?.some(x => x.command?.command === 'claude-code-launcher.rejectChange') && items;
-      }, 'lentes de revisão em ' + name);
+      let lastItems = [];
+      let lenses;
+      try {
+        lenses = await until(async () => {
+          const items = await vscode.commands.executeCommand('vscode.executeCodeLensProvider', uri);
+          lastItems = Array.isArray(items) ? items : [];
+          return items?.some(x => x.command?.command === 'claude-code-launcher.rejectChange') && items;
+        }, 'lentes de revisão em ' + name);
+      } catch (error) {
+        try {
+          report.reviewFailureDiagnostics = await collectReviewFailureDiagnostics({
+            workspace, fixture: name,
+            workspaceSyncRealpath: require('node:fs').realpathSync(workspace),
+            documentFsPath: document.uri.fsPath,
+            inlineEnabled: vscode.workspace.getConfiguration('claudeCodeLauncher').get('inlineChanges', true),
+            trusted: vscode.workspace.isTrusted, documentText: document.getText(),
+            document: { scheme: document.uri.scheme, eol: document.eol, dirty: document.isDirty, closed: document.isClosed,
+              lineCount: document.lineCount, uriEqualsRequested: document.uri.toString() === uri.toString(),
+              editorVisible: vscode.window.visibleTextEditors.some(editor => editor.document === document) },
+            lensCount: lastItems.length, lensCommands: lastItems.map(item => item.command?.command),
+          });
+        } catch { report.reviewFailureDiagnostics = { stage: 'codelens-timeout', collection: 'unavailable' }; }
+        throw error;
+      }
       return { uri, document, lenses };
     };
 
