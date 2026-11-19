@@ -83,10 +83,12 @@ test('raw bytes are validated as UTF-8 and cursors use bytes instead of string u
 	assert.equal(parsed.sources[1].offset, Buffer.byteLength(first) + 2);
 });
 
+// Caminhos simulados são POSIX; no Windows o código monta os mesmos caminhos com "\".
 function virtualPaths(linkAt, denialAt) {
+	const posix = (file) => String(file).replace(/\\/g, '/');
 	return {
-		realpath: async (file) => { if (file === denialAt) { throw { code: 'EACCES' }; } return file; },
-		lstat: async (file) => ({ isSymbolicLink: () => file === linkAt, isFile: () => file.endsWith('.txt'), isDirectory: () => !file.endsWith('.txt') }),
+		realpath: async (file) => { if (posix(file) === denialAt) { throw { code: 'EACCES' }; } return file; },
+		lstat: async (file) => ({ isSymbolicLink: () => posix(file) === linkAt, isFile: () => file.endsWith('.txt'), isDirectory: () => !file.endsWith('.txt') }),
 	};
 }
 test('resource and storage policies evaluate simulated scope and links without external effects', async () => {

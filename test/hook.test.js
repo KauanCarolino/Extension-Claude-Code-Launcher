@@ -28,6 +28,11 @@ function project() {
 	return root;
 }
 
+/** Caminho com "/" em qualquer sistema, para comparar com os caminhos simulados. */
+function posix(file) {
+	return String(file).replace(/\\/g, '/');
+}
+
 function changesDir(root) {
 	return path.join(root, '.claude', 'launcher-changes');
 }
@@ -190,7 +195,7 @@ test('simulated storage-link metadata is rejected before any file open or write'
 	let opens = 0;
 	const own = hook.storage('/virtual', {
 		realpathSync: (file) => file,
-		lstatSync: (file) => ({ isSymbolicLink: () => file === '/virtual/.claude', isDirectory: () => true, isFile: () => false }),
+		lstatSync: (file) => ({ isSymbolicLink: () => posix(file) === '/virtual/.claude', isDirectory: () => true, isFile: () => false }),
 		openSync: () => { opens += 1; },
 	});
 	assert.throws(() => own.read('/virtual/.claude/log.jsonl', 100), /unsafeStorageType/);
