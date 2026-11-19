@@ -6,7 +6,7 @@ const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const {
-  parseArguments, assertHookNode, hostEnvironment, provisionEditor, cliScript, run,
+  parseArguments, assertHookNode, hostEnvironment, provisionEditor, cliScript, editorFixtureArguments, run,
   validDiagnosticEvent, createEvidenceDirectory, exportEvidence,
 } = require('../scripts/host-tooling.cjs');
 
@@ -28,6 +28,7 @@ test('host runner requires exact editor pins and rejects ambiguous or unsupporte
     ['--download-version', '1.94.0', '--executable', 'code'],
     ['--download-version', '1.94.0', '--cli', 'cli.js'],
     ['--editor', 'code', '--editor', 'cursor'], ['--vsix', '--keep'], ['--unknown'],
+    ['--no-sandbox'], ['--disable-gpu-sandbox'],
   ]) assert.throws(() => parseArguments(invalid));
   assert.equal(parseArguments(['--editor', 'cursor', '--executable', 'Cursor', '--keep']).keep, true);
 });
@@ -78,6 +79,16 @@ test('CLI JS layouts remain explicit on all OSes without spawning Windows comman
   assert.equal(cliScript('C:\\fixture folder\\Code.exe', 'win32'), 'C:\\fixture folder\\resources\\app\\out\\cli.js');
 });
 
+test('sandbox test arguments are confined to the downloaded Linux editor fixture', () => {
+  assert.deepEqual(editorFixtureArguments('linux', true), ['--no-sandbox', '--disable-gpu-sandbox']);
+  for (const [platform, downloaded] of [
+    ['linux', false], ['darwin', true], ['win32', true], ['darwin', false], ['win32', false],
+    ['linux', undefined], ['linux', 'true'], ['unknown', true],
+  ]) assert.deepEqual(editorFixtureArguments(platform, downloaded), []);
+  const installed = parseArguments(['--executable', '/synthetic/installed-editor']);
+  assert.deepEqual(editorFixtureArguments('linux', Boolean(installed['download-version'])), []);
+});
+
 test('process execution preserves literal arguments/stdin and reports nonzero exit without fallback', async t => {
   const directory = await temporary(t);
   const literal = '$(not-a-shell); & literal';
@@ -116,13 +127,18 @@ test('reusing an evidence base keeps old results separate from an early failing 
   const currentDirectory = path.join(base, runs.find(name => name !== path.basename(firstDirectory)));
   const current = JSON.parse(await fs.readFile(path.join(currentDirectory, 'runner.json'), 'utf8'));
   assert.equal(current.status, 'failed');
+  assert.equal(current.editorSandboxPolicy, 'editor-default');
   assert.equal(current.resultFile, null);
   assert.equal(current.evidenceDirectory, currentDirectory);
   assert(current.files.includes('runner-failure.json'));
   await assert.rejects(fs.access(path.join(currentDirectory, 'result.json')), { code: 'ENOENT' });
   assert.equal(JSON.parse(await fs.readFile(path.join(firstDirectory, 'result.json'), 'utf8')).status, 'passed');
   assert.equal(await fs.readFile(path.join(base, 'user-note.txt'), 'utf8'), 'preserve this user file');
-  assert(execution.output.includes(currentDirectory), 'The runner must identify the current evidence directory.');
+  const summaryPrefix = 'Evidências desta execução: ';
+  const summaries = execution.output.split(/\r?\n/).filter(line => line.startsWith(summaryPrefix));
+  assert.equal(summaries.length, 1, 'The runner must publish exactly one current-run summary.');
+  const announced = JSON.parse(summaries[0].slice(summaryPrefix.length));
+  assert.deepEqual(announced, current, 'The published summary must identify the current run and match runner.json.');
   // The runner intentionally retains failures. Remove only this test's own
   // isolated fixture profile after checking the exported current-run identity.
   const retained = execution.output.match(/Evidências do perfil isolado: ([^\r\n]+)/)?.[1];

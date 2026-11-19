@@ -3,7 +3,7 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
-const { parseArguments, hostEnvironment, provisionEditor, cliScript, run,
+const { parseArguments, hostEnvironment, provisionEditor, cliScript, editorFixtureArguments, run,
   createEvidenceDirectory, exportEvidence } = require('./host-tooling.cjs');
 const { verifyPackage } = require('./verify-package.cjs');
 
@@ -37,6 +37,8 @@ async function seedWorkspace(workspace) {
 
 async function main() {
   const options = parseArguments(process.argv.slice(2));
+  const fixtureArguments = editorFixtureArguments(process.platform, Boolean(options['download-version']));
+  const editorSandboxPolicy = fixtureArguments.length ? 'disabled-for-downloaded-linux-synthetic-fixture' : 'editor-default';
   const temporary = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'launcher-host-')));
   const workspace = path.join(temporary, 'workspace');
   const profile = path.join(temporary, 'profile');
@@ -93,6 +95,7 @@ async function main() {
     }
     // This is a trusted synthetic fixture, not a Restricted Mode validation.
     const execution = await run(executable, [
+      ...fixtureArguments,
       '--new-window', '--disable-gpu', '--skip-welcome', '--skip-release-notes',
       '--disable-workspace-trust', '--disable-telemetry',
       '--user-data-dir=' + profile, '--extensions-dir=' + extensions,
@@ -120,6 +123,7 @@ async function main() {
     await fs.writeFile(path.join(temporary, 'runner-failure.json'), JSON.stringify({
       status: 'failed', error: error.message, platform: process.platform, arch: process.arch,
       runnerNode: process.version, requestedEditorVersion: options['download-version'] ?? null,
+      editorSandboxPolicy,
       artifactSha256: env?.LAUNCHER_HOST_ARTIFACT_SHA256 ?? null,
       source: 'synthetic fixtures; no Claude authentication, AI or paid service',
     }, null, 2));
@@ -130,6 +134,7 @@ async function main() {
       const summary = await exportEvidence(temporary, reportDirectory, {
         schemaVersion: 1, status: passed ? 'passed' : 'failed', runnerNode: process.version,
         platform: process.platform, arch: process.arch,
+        editorSandboxPolicy,
         requestedEditorVersion: options['download-version'] ?? null,
         artifactSha256: env?.LAUNCHER_HOST_ARTIFACT_SHA256 ?? null,
       });

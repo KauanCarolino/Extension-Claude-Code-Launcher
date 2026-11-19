@@ -107,6 +107,14 @@ function cliScript(executable, platform = process.platform) {
     : paths.resolve(paths.dirname(executable), 'resources/app/out/cli.js');
 }
 
+function editorFixtureArguments(platform, downloaded) {
+  // @vscode/test-electron 3.1.0 runTests defaults (lib/runTest.ts):
+  // https://github.com/microsoft/vscode-test/blob/main/lib/runTest.ts
+  // Only our disposable, officially downloaded Linux editor fixture receives
+  // these testing arguments. Installed editors and personal profiles do not.
+  return platform === 'linux' && downloaded === true ? ['--no-sandbox', '--disable-gpu-sandbox'] : [];
+}
+
 function run(executable, args, env, { timeout = 120000, cwd, input } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(executable, args, { cwd, env, shell: false, windowsHide: true,
@@ -133,5 +141,5 @@ function run(executable, args, env, { timeout = 120000, cwd, input } = {}) {
   });
 }
 
-module.exports = { parseArguments, assertHookNode, hostEnvironment, provisionEditor, cliScript, run,
+module.exports = { parseArguments, assertHookNode, hostEnvironment, provisionEditor, cliScript, editorFixtureArguments, run,
   validDiagnosticEvent, createEvidenceDirectory, exportEvidence };
