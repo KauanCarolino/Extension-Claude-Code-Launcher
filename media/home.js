@@ -40,6 +40,9 @@
 
 	function render(state) {
 		root.replaceChildren();
+		if (state.coverageMessage) {
+			root.append(el('p', 'muted', state.coverageMessage));
+		}
 
 		if (!state.installed) {
 			root.append(el('p', 'warning', 'A extensão oficial Claude Code não está instalada. O chat vem dela.'));

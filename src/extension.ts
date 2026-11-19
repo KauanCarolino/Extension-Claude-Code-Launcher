@@ -1,82 +1,112 @@
 import * as vscode from 'vscode';
 import { registerChanges } from './changes';
 import { registerInline } from './inline';
-import { listSessions, sessionsDir } from './sessions';
+import { listSessionsAsync, sessionsDir } from './sessions';
+import { ManagedPreference, PreferenceManager } from './preferences';
+import { validateMessage } from './history';
+
+declare const require: (name: string) => { randomBytes(size: number): { toString(encoding: string): string } };
 
 const CLAUDE_EXTENSION_ID = 'anthropic.claude-code';
 const SIDEBAR_COMMAND = 'claude-vscode.sidebar.open';
 const TAB_COMMAND = 'claude-vscode.editor.open';
-const TAB_URI = 'vscode://anthropic.claude-code/open';
 
 type OpenTarget = 'sidebar' | 'tab';
 
-class LauncherViewProvider implements vscode.WebviewViewProvider {
+class LauncherViewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
 	public static readonly viewId = 'claude-code-launcher.home';
 
 	private view: vscode.WebviewView | undefined;
 	private refreshTimer: unknown;
+	private generation = 0;
+	private disposed = false;
+	private viewSubscriptions: vscode.Disposable[] = [];
 
 	constructor(private readonly context: vscode.ExtensionContext) {}
 
 	resolveWebviewView(webviewView: vscode.WebviewView): void {
+		if (this.disposed) { return; }
+		this.viewSubscriptions.splice(0).forEach((item) => item.dispose());
 		this.view = webviewView;
 		const media = vscode.Uri.joinPath(this.context.extensionUri, 'media');
 		webviewView.webview.options = { enableScripts: true, localResourceRoots: [media] };
 		webviewView.webview.html = this.html(webviewView.webview, media);
-		webviewView.onDidChangeVisibility(() => {
+		this.viewSubscriptions.push(webviewView.onDidChangeVisibility(() => {
 			if (webviewView.visible) {
-				this.postState();
+				void this.postState();
 			}
-		});
-		webviewView.onDidDispose(() => {
-			this.view = undefined;
-		});
+		}), webviewView.onDidDispose(() => {
+			if (this.view === webviewView) {
+				this.view = undefined; this.generation += 1;
+				this.viewSubscriptions.splice(0).forEach((item) => item.dispose());
+			}
+		}));
 
-		webviewView.webview.onDidReceiveMessage(async (message: { command?: string; key?: string; id?: string }) => {
-			switch (message.command) {
-				case 'openSidebar':
-					await openClaude('sidebar');
-					break;
-				case 'newTab':
-					await openClaude('tab');
-					break;
-				case 'openSession':
-					await openSession(message.id);
-					break;
-				case 'focusTab':
-					await focusClaudeTab(message.key);
-					break;
-				case 'closeTab':
-					await closeClaudeTab(message.key);
-					break;
-				case 'install':
-					await installClaude();
-					break;
-			}
-			this.postState();
-		});
+		this.viewSubscriptions.push(webviewView.webview.onDidReceiveMessage(async (value: unknown) => {
+			const message = validateMessage(value, 'home');
+			if (!message || this.disposed || this.view !== webviewView) { return; }
+			try {
+				switch (message.command) {
+					case 'openSidebar':
+						await openClaude('sidebar');
+						break;
+					case 'newTab':
+						await openClaude('tab');
+						break;
+					case 'openSession':
+						await openSession(message.id);
+						break;
+					case 'focusTab':
+						await focusClaudeTab(message.key);
+						break;
+					case 'closeTab':
+						await closeClaudeTab(message.key);
+						break;
+					case 'install':
+						await installClaude();
+						break;
+				}
+			} catch (error) { reportLaunchError(error); }
+			void this.postState();
+		}));
+		void this.postState();
 	}
 
 	/** Atualiza a view, agrupando chamadas seguidas (o transcript muda a cada mensagem). */
 	refresh(delay = 300): void {
+		if (this.disposed) { return; }
+		this.generation += 1;
 		clearTimeout(this.refreshTimer);
-		this.refreshTimer = setTimeout(() => this.postState(), delay);
+		this.refreshTimer = setTimeout(() => { void this.postState(); }, delay);
 	}
 
-	private postState(): void {
-		if (!this.view?.visible) {
+	dispose(): void {
+		this.disposed = true; this.generation += 1; clearTimeout(this.refreshTimer); this.view = undefined;
+		this.viewSubscriptions.splice(0).forEach((item) => item.dispose());
+	}
+
+	private async postState(): Promise<void> {
+		if (this.disposed || !this.view?.visible) {
 			return;
 		}
 		const folders = localFolders();
 		const openTabs = claudeTabs().map(({ tab, key }) => ({ key, label: tab.label, active: tab.isActive }));
 		const openLabels = new Set(openTabs.map((tab) => tab.label));
 		// Com várias pastas abertas, junta as conversas de todas.
-		const sessions = folders
-			.flatMap((folder) => listSessions(folder, RECENT_SESSIONS))
+		const generation = ++this.generation;
+		const view = this.view;
+		const cancelled = () => this.disposed || this.generation !== generation || this.view !== view;
+		const results = await Promise.allSettled(folders.map((folder) => listSessionsAsync(folder, RECENT_SESSIONS, cancelled)));
+		const listings = results.flatMap((result) => result.status === 'fulfilled' ? [result.value] : []);
+		if (cancelled() || !view) { return; }
+		const sessions = listings.flatMap((listing) => listing.sessions)
 			.sort((a, b) => b.updated - a.updated)
 			.slice(0, RECENT_SESSIONS)
 			.map((session) => ({ ...session, open: openLabels.has(session.title) }));
-		void this.view.webview.postMessage({
+		void view.webview.postMessage({
+			coverageMessage: results.some((result) => result.status === 'rejected')
+				? 'Lista parcial: não foi possível ler as conversas de uma das pastas.'
+				: listings.some((listing) => listing.partial) ? 'Lista parcial: o orçamento de leitura foi atingido. As conversas mais antigas podem não aparecer.' : null,
 			type: 'state',
 			installed: isClaudeInstalled(),
 			hasFolder: folders.length > 0,
@@ -141,34 +171,49 @@ async function openSession(id: string | undefined): Promise<void> {
 	if (!id) {
 		return;
 	}
-	await openClaudeTab(id);
+	await openClaude('tab', id);
 }
 
 /** Abre uma aba de conversa: nova, ou retomando a conversa `sessionId`. */
 async function openClaudeTab(sessionId?: string): Promise<void> {
-	try {
-		await vscode.commands.executeCommand(TAB_COMMAND, sessionId);
-	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		if (!/not found/i.test(message)) {
-			throw error;
-		}
+	const previous = new Map(claudeTabs().map(({ tab }) => [tab, { active: tab.isActive, label: tab.label }]));
+	const commands = await vscode.commands.getCommands(true);
+	if (commands.includes(TAB_COMMAND)) {
+		await bounded(vscode.commands.executeCommand(TAB_COMMAND, sessionId), 10000, 'commandTimeout');
+	} else {
+		const scheme = vscode.env.uriScheme;
+		if (!/^[a-z][a-z0-9+.-]*$/i.test(scheme)) { throw new LaunchError('unsupportedUri'); }
 		const query = sessionId ? `?session=${encodeURIComponent(sessionId)}` : '';
-		await vscode.env.openExternal(vscode.Uri.parse(`${TAB_URI}${query}`));
+		const opened = await bounded(vscode.env.openExternal(vscode.Uri.parse(`${scheme}://anthropic.claude-code/open${query}`)), 10000, 'commandTimeout');
+		if (!opened) { throw new LaunchError('uriDenied'); }
 	}
-	await waitForClaudeTab();
+	await waitForClaudeTab(previous);
 	await keepClaudeGroupFreeOfFiles();
 	provider?.refresh(0);
 }
 
 let provider: LauncherViewProvider | undefined;
+let preferenceManager: PreferenceManager | undefined;
+const PREFERENCE_KEY = 'claudeCodeLauncher.managedPreferences.v1';
 
 export function activate(context: vscode.ExtensionContext): void {
+	const scope = vscode.workspace.workspaceFile?.toString() ?? (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.toString()).join('|');
+	preferenceManager = new PreferenceManager({
+		load: () => context.globalState.get<ManagedPreference[]>(PREFERENCE_KEY, []),
+		persist: async (records) => { await context.globalState.update(PREFERENCE_KEY, records); },
+		read: (section, key, target) => {
+			const inspected = vscode.workspace.getConfiguration(section).inspect<unknown>(key);
+			return target === 'global' ? inspected?.globalValue : inspected?.workspaceValue;
+		},
+		write: async (section, key, value, target) => { await vscode.workspace.getConfiguration(section).update(key, value,
+			target === 'global' ? vscode.ConfigurationTarget.Global : vscode.ConfigurationTarget.Workspace); },
+	}, scope);
 	provider = new LauncherViewProvider(context);
 	registerInline(context, registerChanges(context));
 	watchSessions(context);
 
 	context.subscriptions.push(
+		provider,
 		vscode.window.registerWebviewViewProvider(LauncherViewProvider.viewId, provider),
 		vscode.commands.registerCommand('claude-code-launcher.openSidebar', () => openClaude('sidebar')),
 		vscode.commands.registerCommand('claude-code-launcher.openTab', () => openClaude('tab')),
@@ -186,22 +231,23 @@ export function activate(context: vscode.ExtensionContext): void {
 				return;
 			}
 			if (event.opened.some(isClaudeTab) || claudeGroupHasFileTab()) {
-				void keepClaudeGroupFreeOfFiles();
+				void keepClaudeGroupFreeOfFiles().catch(reportLaunchError);
 			}
 		}),
 	);
 
-	void keepNewSessionsInTabs();
+	void configureManagement();
 	context.subscriptions.push(
 		vscode.workspace.onDidChangeConfiguration((event) => {
+			if (event.affectsConfiguration('claudeCodeLauncher.manageEditorGroups')) { void configureManagement(); }
 			if (event.affectsConfiguration('claudeCode.preferredLocation')) {
-				void keepNewSessionsInTabs();
+				void keepNewSessionsInTabs().catch(reportLaunchError);
 			}
 		}),
 	);
 
 	if (vscode.window.tabGroups.all.some((group) => group.tabs.some(isClaudeTab))) {
-		void keepClaudeGroupFreeOfFiles();
+		void keepClaudeGroupFreeOfFiles().catch(reportLaunchError);
 	}
 
 	const statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
@@ -213,39 +259,38 @@ export function activate(context: vscode.ExtensionContext): void {
 	context.subscriptions.push(statusItem);
 }
 
-export function deactivate(): void {}
+export function deactivate(): void { provider?.dispose(); provider = undefined; }
 
 function isClaudeInstalled(): boolean {
 	return Boolean(vscode.extensions.getExtension(CLAUDE_EXTENSION_ID));
 }
 
-async function openClaude(target: OpenTarget): Promise<void> {
-	if (!isClaudeInstalled()) {
-		const installed = await promptInstall();
-		if (!installed) {
+async function openClaude(target: OpenTarget, sessionId?: string): Promise<void> {
+	try {
+		if (!isClaudeInstalled()) {
+			const installed = await promptInstall();
+			if (!installed) {
+				return;
+			}
+		}
+
+		const extension = vscode.extensions.getExtension(CLAUDE_EXTENSION_ID);
+		if (!extension) {
+			throw new LaunchError('missingExtension');
+		}
+
+		if (!extension.isActive) {
+			await bounded(extension.activate(), 10000, 'activationTimeout');
+		}
+
+		if (target === 'sidebar') {
+			await openClaudeSidebar();
 			return;
 		}
-	}
 
-	const extension = vscode.extensions.getExtension(CLAUDE_EXTENSION_ID);
-	if (!extension) {
-		return;
-	}
-
-	if (!extension.isActive) {
-		await extension.activate();
-	}
-
-	if (target === 'sidebar') {
-		await openClaudeSidebar();
-		return;
-	}
-
-	try {
-		await openClaudeTab();
+		await openClaudeTab(sessionId);
 	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		void vscode.window.showErrorMessage(`Não foi possível abrir o Claude Code: ${message}`);
+		reportLaunchError(error);
 	}
 }
 
@@ -259,21 +304,42 @@ const SIDEBAR_FALLBACKS = [
 ];
 
 async function openClaudeSidebar(): Promise<void> {
-	let lastError = '';
+	const available = new Set(await vscode.commands.getCommands(true));
 	for (const command of SIDEBAR_FALLBACKS) {
-		try {
-			await vscode.commands.executeCommand(command);
+		if (available.has(command)) {
+			await bounded(vscode.commands.executeCommand(command), 10000, 'commandTimeout');
 			await keepNewSessionsInTabs();
 			return;
-		} catch (error) {
-			lastError = error instanceof Error ? error.message : String(error);
 		}
 	}
+	throw new LaunchError('sidebarUnavailable');
+}
 
-	void vscode.window.showErrorMessage(
-		`Não foi possível abrir o Claude Code na barra lateral (${lastError}). `
-		+ 'Verifique se a barra lateral secundária está habilitada (View > Appearance > Secondary Side Bar).',
-	);
+class LaunchError extends Error { constructor(readonly code: string) { super(code); } }
+async function bounded<T>(work: Thenable<T>, milliseconds: number, code: string): Promise<T> {
+	let timer: unknown;
+	try {
+		return await Promise.race([Promise.resolve(work), new Promise<never>((_, reject) => {
+			timer = setTimeout(() => reject(new LaunchError(code)), milliseconds);
+		})]);
+	} finally { clearTimeout(timer); }
+}
+function reportLaunchError(error: unknown): void {
+	const text = error instanceof Error ? error.message : String(error);
+	const explanations: Record<string, string> = {
+		missingExtension: 'A extensão oficial não está disponível nesta janela. Instale-a ou recarregue a janela.',
+		activationTimeout: 'A extensão oficial não terminou de iniciar no prazo. Consulte a saída do Claude Code antes de tentar novamente.',
+		commandTimeout: 'O comando não respondeu no prazo. Ele ainda pode concluir; confira o Claude Code antes de repetir a abertura.',
+		tabTimeout: 'O comando foi enviado, mas não confirmei uma aba nova ou ativada. Confira a aba existente, o login e a saída do Claude Code.',
+		uriDenied: 'O editor não aceitou a abertura do endereço do Claude Code.',
+		unsupportedUri: 'Este editor não informou um protocolo de abertura compatível.',
+		sidebarUnavailable: 'Esta versão da extensão oficial não disponibilizou um comando conhecido para a barra lateral.',
+	};
+	const detail = error instanceof LaunchError ? explanations[error.code]
+		: /auth|login|sign.?in|unauthori[sz]ed|401/i.test(text)
+			? 'A extensão oficial solicitou autenticação. Faça login no Claude Code e tente novamente.'
+			: 'A extensão oficial não concluiu a abertura. Consulte o canal de saída do Claude Code para os detalhes.';
+	void vscode.window.showErrorMessage(`Não foi possível confirmar a abertura do Claude Code. ${detail}`);
 }
 
 /**
@@ -283,6 +349,7 @@ async function openClaudeSidebar(): Promise<void> {
  * volta para "panel" (nova aba) sempre que mudar.
  */
 async function keepNewSessionsInTabs(): Promise<void> {
+	if (!manageEditorGroups()) { return; }
 	const config = vscode.workspace.getConfiguration('claudeCode');
 	const inspected = config.inspect<string>('preferredLocation');
 	const targets: Array<[string | undefined, vscode.ConfigurationTarget]> = [
@@ -290,8 +357,8 @@ async function keepNewSessionsInTabs(): Promise<void> {
 		[inspected?.workspaceValue, vscode.ConfigurationTarget.Workspace],
 	];
 	for (const [value, target] of targets) {
-		if (value !== undefined && value !== 'panel') {
-			await config.update('preferredLocation', 'panel', target);
+		if (value !== undefined) {
+			await preferenceManager?.set('claudeCode', 'preferredLocation', 'panel', target === vscode.ConfigurationTarget.Global ? 'global' : 'workspace');
 		}
 	}
 }
@@ -387,17 +454,22 @@ function claudeGroupHasFileTab(): boolean {
 	);
 }
 
-async function waitForClaudeTab(): Promise<void> {
+async function waitForClaudeTab(previous: Map<vscode.Tab, { active: boolean; label: string }>): Promise<void> {
 	const timeoutAt = Date.now() + 4000;
 	while (Date.now() < timeoutAt) {
-		if (vscode.window.tabGroups.all.some((group) => group.tabs.some(isClaudeTab))) {
+		if (claudeTabs().some(({ tab }) => {
+			const before = previous.get(tab);
+			return !before || before.label !== tab.label || !before.active && tab.isActive;
+		})) {
 			return;
 		}
 		await delay(100);
 	}
+	throw new LaunchError('tabTimeout');
 }
 
 async function keepClaudeGroupFreeOfFiles(): Promise<void> {
+	if (!manageEditorGroups()) { return; }
 	if (isolatingClaudeGroup) {
 		return;
 	}
@@ -499,8 +571,8 @@ function groupByColumn(column: vscode.ViewColumn): vscode.TabGroup | undefined {
 
 async function ensureClaudeLocksGroups(): Promise<void> {
 	const config = vscode.workspace.getConfiguration('claudeCode');
-	if (config.inspect<boolean>('lockEditorGroups')?.globalValue === false) {
-		await config.update('lockEditorGroups', true, vscode.ConfigurationTarget.Global);
+	if (config.inspect<boolean>('lockEditorGroups')?.globalValue !== undefined) {
+		await preferenceManager?.set('claudeCode', 'lockEditorGroups', true, 'global');
 	}
 }
 
@@ -513,23 +585,24 @@ async function rememberAutoLock(column: vscode.ViewColumn): Promise<void> {
 	const inspected = config.inspect<Record<string, boolean>>('editor.autoLockGroups');
 	const current = inspected?.globalValue ?? {};
 	const keys = [viewType.viewType, `mainThreadWebview-${viewType.viewType}`];
-	if (keys.every((key) => current[key] === true)) {
-		return;
-	}
 	const next = { ...current };
 	for (const key of keys) {
 		next[key] = true;
 	}
-	await config.update('editor.autoLockGroups', next, vscode.ConfigurationTarget.Global);
+	await preferenceManager?.set('workbench', 'editor.autoLockGroups', next, 'global');
+}
+
+function manageEditorGroups(): boolean { return vscode.workspace.getConfiguration('claudeCodeLauncher').get<boolean>('manageEditorGroups', false); }
+async function configureManagement(): Promise<void> {
+	try {
+		if (!manageEditorGroups()) { await preferenceManager?.restore(); return; }
+		await keepNewSessionsInTabs();
+		await keepClaudeGroupFreeOfFiles();
+	} catch { void vscode.window.showWarningMessage('Não foi possível atualizar as preferências de organização. Seus valores atuais foram preservados quando possível.'); }
 }
 
 function createNonce(): string {
-	const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-	let nonce = '';
-	for (let index = 0; index < 32; index += 1) {
-		nonce += alphabet.charAt(Math.floor(Math.random() * alphabet.length));
-	}
-	return nonce;
+	return requireCryptoNonce();
 }
 
 /** Pastas do workspace no disco local (as conversas do Claude Code ficam indexadas por esse caminho). */
@@ -560,4 +633,9 @@ function watchSessions(context: vscode.ExtensionContext): void {
 		}),
 		{ dispose: () => watchers.forEach((watcher) => watcher.dispose()) },
 	);
+}
+
+function requireCryptoNonce(): string {
+	// Extension Host Node; avoid adding a runtime dependency.
+	return require('crypto').randomBytes(24).toString('hex');
 }
