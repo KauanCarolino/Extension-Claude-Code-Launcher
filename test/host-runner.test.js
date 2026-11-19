@@ -138,6 +138,7 @@ test('atomic completion supervises a surviving editor child without accepting fa
   await assert.rejects(launch('malformed', write + 'fs.writeFileSync(p,"invalid");setInterval(()=>{},1000);'), SyntaxError);
   await assert.rejects(launch('missing', 'setInterval(()=>{},1000);', 80), { code: 'ENOENT' });
   await assert.rejects(launch('exit-error', write + passed + 'process.exit(7);'), /did not finish cleanly/);
+  await assert.rejects(launch('exit-error-after-report', write + passed + 'setTimeout(()=>process.exit(7),100);'), /did not finish cleanly/);
   // A SIGTERM handler cannot turn a timed-out run into a successful late report.
   // Windows kills abruptly, so its handler never creates the report:
   // https://github.com/nodejs/node/blob/v22.x/doc/api/child_process.md#subprocesskillsignal

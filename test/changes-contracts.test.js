@@ -3,6 +3,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const vm = require('node:vm');
 const { fixture, entry, writeLog, until, OUT } = require('./helpers/changes-fixture.cjs');
 const { activeReview } = require(path.join(OUT, 'review.js'));
 const { diffLines, groupsOf, groupSignature } = require(path.join(OUT, 'diff.js'));
@@ -23,6 +24,29 @@ function metadataEntry(f, id, name = id + '.txt', transcriptName = 'shared.jsonl
   return { ...captured(f, id, name), transcript, toolUseId: 'tool-' + id, session: 'synthetic-session' };
 }
 function metadataFor(ids) { return { reasons: new Map(ids.map(id => [id, 'Synthetic reason'])), requests: new Map(ids.map(id => [id, { id: 'synthetic-request', text: 'Synthetic request' }])) }; }
+
+test('fixture root matches native async identity while Windows short-name aliases remain subject to the real scope guard', async t => {
+  const f = fixture(t);
+  assert.equal(f.root, fs.realpathSync.native(f.temporaryRoot)); assert.equal(await fs.promises.realpath(f.root), f.root);
+  t.diagnostic(JSON.stringify({ nativeAsyncRootMatch: true, legacyEqualsNative: fs.realpathSync(f.temporaryRoot) === f.root }));
+  // Run the actual guard with Win32 paths and explicit native-alias IO, even on
+  // another OS. This is an adapter regression, not a claim of Windows execution.
+  const filename = path.join(OUT, 'history.js'), module = { exports: {} };
+  vm.runInNewContext(fs.readFileSync(filename, 'utf8'), { module, exports: module.exports,
+    require: id => id === 'node:path' ? path.win32 : require(id) }, { filename });
+  const shortRoot = String.raw`C:\Users\RUNNER~1\AppData\Local\Temp\LauncherFixture`;
+  const nativeRoot = String.raw`C:\Users\runneradmin\AppData\Local\Temp\LauncherFixture`, file = path.win32.join(nativeRoot, 'SubDir', 'Case.txt');
+  let reads = 0;
+  const io = { async realpath(value) { reads++; return value === shortRoot ? nativeRoot : value.replace(/^[a-z]:/, drive => drive.toUpperCase()); } };
+  const before = await module.exports.assessResourceScope(file, shortRoot, io);
+  assert.equal(before.allowed, false); assert.equal(before.code, 'resourceOutsideScope'); assert.equal(reads, 0, 'lexically different namespaces are rejected before native IO');
+  const native = await module.exports.assessResourceScope(file, nativeRoot, io);
+  assert.equal(native.allowed, true); assert.equal(native.canonicalPath, file, 'directory and filename case must remain unchanged');
+  assert.equal((await module.exports.assessResourceScope(file, nativeRoot.replace(/^C:/, 'c:'), io)).allowed, true, 'drive-letter case alone is already supported by the guard');
+  for (const outside of [path.win32.join(nativeRoot + '-sibling', 'Case.txt'), file.replace(/^C:/, 'D:')]) {
+    assert.equal((await module.exports.assessResourceScope(outside, nativeRoot, io)).allowed, false);
+  }
+});
 
 test('controller projects each captured segment and observes a human buffer without rewriting its canonical decision', async t => {
   const f = fixture(t), before = 'one\ntwo\nthree\n', first = 'ONE\ntwo\nthree\n', human = 'ONE\nHUMAN\nthree\n', after = 'CHANGED\nHUMAN\nTHREE\n';

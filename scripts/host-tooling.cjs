@@ -167,6 +167,14 @@ async function runUntilReport(executable, args, env, { reportFile, validateRepor
         const report = JSON.parse(await fs.readFile(reportFile, 'utf8'));
         validateReport(report);
         completedReport = report;
+        // Allow an editor's normal shutdown (including a nonzero exit) to be
+        // observed before requesting termination. Without this grace, a report
+        // can win the polling race and hide an immediately following exit(7).
+        let graceTimer;
+        try {
+          await Promise.race([execution.then(() => undefined, () => undefined),
+            new Promise(resolve => { graceTimer = setTimeout(resolve, 500); })]);
+        } finally { clearTimeout(graceTimer); }
         if (!finished && !signal?.aborted) { shutdown = 'completed-report'; cancellation.abort(); }
         return;
       } catch (error) {

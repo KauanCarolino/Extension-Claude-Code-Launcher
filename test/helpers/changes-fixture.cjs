@@ -13,7 +13,10 @@ const hooks = require(path.join(OUT, 'hooks.js'));
 
 /** Actual compiled controller, with only editor/IO boundaries replaced by explicit adapters. */
 function fixture(t, options = {}) {
-	const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'launcher-changes-')));
+	const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'launcher-changes-'));
+	// Match promises.realpath used by the real controller: Windows' JS realpath
+	// can retain a TEMP 8.3 alias while native realpath expands its long name.
+	const root = fs.realpathSync.native(temporaryRoot);
 	const warnings = [], messages = [], executedCommands = [], memento = new Map(), settings = new Map([
 		['claudeCodeLauncher.hookExecutionMode', options.mode || 'exec'],
 		['claudeCodeLauncher.historyRetentionDays', 30],
@@ -148,7 +151,7 @@ function fixture(t, options = {}) {
 		fs.writeFileSync(path.join(root, '.claude', 'settings.local.json'), plan.nextText);
 		return plan.nextText;
 	}
-	return { root, dir, folder, controller, context, settings, warnings, messages, store, policy, configuredHooks,
+	return { root, temporaryRoot, dir, folder, controller, context, settings, warnings, messages, store, policy, configuredHooks,
 		workspaceHandlers, configurationHandlers, documentHandlers, watchers, controllerHistory, executedCommands, quickPicks, vscode, Uri,
 		editor, documents, openDocument, newController };
 }
