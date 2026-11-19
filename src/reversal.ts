@@ -1,6 +1,7 @@
 import { activeReview, commitReviewDecision, copyReview, planReviewDecision, ReviewContent, ReviewDecisionPlan, ReviewDecisionRequest, ReviewError, ReviewOperation, ReviewUndoItem, sameContent } from './review';
 import { ReviewStore } from './review-store';
 import type { ReviewState } from './review';
+import { blockedReviewResult, ReviewAction, ReviewItemResult, ReviewResultError, reviewResultReason } from './review-results';
 declare const require: (id: string) => any;
 const crypto = require('node:crypto');
 
@@ -16,7 +17,7 @@ async function serialized<T>(store: ReviewStore, file: string, work: () => Promi
 	const tail = next.catch(() => undefined); queue.set(file, tail);
 	try { return await next; } finally { if (queue.get(file) === tail) { queue.delete(file); } }
 }
-function code(error: unknown): string { return error instanceof ReviewError ? error.code : error instanceof Error ? error.message : 'operationFailed'; }
+function code(error: unknown): string { return reviewResultReason(error); }
 function supported(content: ReviewContent): void {
 	if (content.kind === 'unavailable') { throw new ReviewError('unknownSnapshot'); }
 	if (content.kind === 'text' && (/\r(?!\n)/.test(content.text) || content.text.includes('\r\n') && content.text.replace(/\r\n/g, '').includes('\n'))) { throw new ReviewError('unsupportedEncoding'); }
@@ -87,7 +88,9 @@ export async function reconcileResource(store: ReviewStore, file: string, adapte
 }
 
 export async function executeDecision(store: ReviewStore, file: string, request: ReviewDecisionRequest, adapter: ResourceAdapter, options: { batchId?: string } = {}): Promise<'committed' | 'recovered'> {
-	return serialized(store, file, async () => {
+	return serialized(store, file, () => executeDecisionUnlocked(store, file, request, adapter, options));
+}
+async function executeDecisionUnlocked(store: ReviewStore, file: string, request: ReviewDecisionRequest, adapter: ResourceAdapter, options: { batchId?: string }): Promise<'committed' | 'recovered'> {
 		if (!store.writable) { throw new ReviewError(store.blockReason || 'readOnlyOwner'); }
 		if (await reconcileResource(store, file, adapter)) { return 'recovered' as const; }
 		const review = activeReview(store.get(), file); if (!review) { throw new ReviewError('missingReview'); }
@@ -106,7 +109,6 @@ export async function executeDecision(store: ReviewStore, file: string, request:
 			}
 			await complete(store, op); return 'committed' as const;
 		} catch (error) { await recordFailure(store, op, adapter, error); throw error; }
-	});
 }
 
 function sameDecision(a: import('./review').SharedReview, b: import('./review').SharedReview): boolean {
@@ -151,11 +153,14 @@ async function resumeUndo(store: ReviewStore, op: ReviewOperation, adapter: Reso
 export async function undoItem(store: ReviewStore, itemId: string, adapter: ResourceAdapter): Promise<void> {
 	const original = store.get().undo.find((item) => item.id === itemId);
 	if (!original || original.phase === 'consumed') { throw new ReviewError('missingUndo'); }
-	return serialized(store, original.file, async () => {
+	return serialized(store, original.file, () => undoItemUnlocked(store, itemId, adapter));
+}
+async function undoItemUnlocked(store: ReviewStore, itemId: string, adapter: ResourceAdapter): Promise<void> {
 		if (!store.writable) { throw new ReviewError(store.blockReason || 'readOnlyOwner'); }
 		const previousIntent = Object.values(store.get().operations).find((op) => op.kind === 'undo' && op.undoItemId === itemId && op.stage !== 'complete');
 		if (previousIntent) { await resumeUndo(store, previousIntent, adapter); return; }
-		const item = store.get().undo.find((candidate) => candidate.id === itemId)!;
+		const item = store.get().undo.find((candidate) => candidate.id === itemId);
+		if (!item || item.phase === 'consumed') { throw new ReviewError('missingUndo'); }
 		const view = store.get().reviews[item.file]?.find((r) => r.firstId === item.reviewBefore?.firstId);
 		if (item.reviewAfterRevision !== undefined && view?.revision !== item.reviewAfterRevision) { throw new ReviewError('staleRevision'); }
 		const current = await adapter.read(item.file);
@@ -169,5 +174,67 @@ export async function undoItem(store: ReviewStore, itemId: string, adapter: Reso
 			try { await store.update((state) => { const saved = state.undo.find((candidate) => candidate.id === item.id); if (saved) { saved.phase = 'needsReconciliation'; } state.operations[operationId].stage = 'needsReconciliation'; state.operations[operationId].reason = code(error); }); } catch { /* Intent remains available. */ }
 			throw error;
 		}
-	});
+}
+
+export interface ReviewExecutionResult { result: ReviewItemResult; error?: ReviewResultError }
+async function detailed(store: ReviewStore, file: string, action: ReviewAction, adapter: ResourceAdapter,
+	work: () => Promise<'committed' | 'recovered'>, ids?: readonly string[]): Promise<ReviewExecutionResult> {
+	const before = store.get();
+	let outcome: 'committed' | 'recovered' | undefined, failure: unknown;
+	try { outcome = await work(); } catch (error) { failure = error; }
+	const after = store.get();
+	const old = new Map(Object.values(before.operations).filter(op => op.file === file).map(op => [op.id, op]));
+	const operations = Object.values(after.operations).filter(op => op.file === file);
+	const operation = operations.filter(op => !old.has(op.id) || old.get(op.id)?.stage !== op.stage && old.get(op.id)?.stage !== 'complete').at(-1)
+		?? operations.find(op => old.get(op.id)?.stage !== 'complete' && op.stage !== 'complete');
+	const requested = operation?.request as ReviewDecisionRequest | undefined;
+	const actualAction: ReviewAction = operation?.kind === 'undo' ? 'undo' : requested?.action === 'accept' || requested?.action === 'reject' ? requested.action : action;
+	const result = blockedReviewResult(file, operation?.ids ?? ids ?? activeReview(before, file)?.ids ?? [], actualAction, failure);
+	result.requestedAction = action; result.operationId = operation?.id ?? null; result.lastKnownStage = operation?.stage;
+	if (outcome) {
+		result.outcome = outcome === 'recovered' ? 'recovered' : 'complete';
+		result.content = operation && !sameContent(operation.expected, operation.target) ? 'persisted' : 'unchanged';
+		result.decision = 'persisted'; result.reason = outcome === 'recovered' ? 'previousOperationRecovered'
+			: after.legacyProjection.phase === 'pending' ? 'legacyProjectionPending' : 'completed';
+		result.nextAction = outcome === 'recovered' ? 'reviewAgain' : after.legacyProjection.phase === 'pending' ? 'reconcile' : 'none';
+		return { result };
+	}
+	let current: ReviewContent | undefined, disk: ReviewContent | undefined;
+	try { current = await adapter.read(file); } catch { /* A failed observation is not absence. */ }
+	try { disk = await adapter.readPersisted(file); } catch { /* Keep the result unknown. */ }
+	const expected = operation?.expected ?? activeReview(before, file)?.expected;
+	if (operation && !sameContent(operation.expected, operation.target) && current && disk && sameContent(current, operation.target) && sameContent(disk, operation.target)) {
+		result.content = 'persisted';
+	} else if (operation && !sameContent(operation.expected, operation.target) && current && disk && sameContent(current, operation.target) && !sameContent(disk, operation.target)) {
+		result.content = 'buffer';
+	} else if (expected && current && disk && sameContent(current, expected) && sameContent(disk, expected)) { result.content = 'unchanged'; }
+	else { result.content = 'unknown'; }
+	result.decision = operation?.stage === 'complete' ? 'persisted' : operation && result.content !== 'unchanged' ? 'failed' : 'notPersisted';
+	if (result.reason === 'operationFailed' && result.content === 'persisted' && result.decision === 'failed') { result.reason = 'stateWriteFailed'; }
+	result.outcome = result.content === 'buffer' || result.content === 'persisted' || operation && result.content === 'unknown' ? 'partial'
+		: result.conflict ? 'blocked' : result.reason === 'operationFailed' || result.content === 'unknown' ? 'failed' : 'blocked';
+	result.cancellation = result.reason === 'cancelledBeforeEffect' ? 'beforeEffect' : result.reason === 'cancelledAfterEffect' ? 'afterEffect' : 'none';
+	if (result.nextAction !== 'recoverWriter') {
+		result.nextAction = result.content === 'buffer' ? 'retrySave' : result.content === 'persisted' || operation && result.content === 'unknown' ? 'reconcile'
+			: result.conflict || result.content === 'unknown' ? 'compare' : result.nextAction;
+	}
+	return { result, error: new ReviewResultError(result, failure) };
+}
+/** Detailed wrappers retain the original APIs and inspect effects under the same resource queue. */
+export async function executeDecisionDetailed(store: ReviewStore, file: string, request: ReviewDecisionRequest, adapter: ResourceAdapter,
+	options: { batchId?: string } = {}): Promise<ReviewExecutionResult> {
+	return serialized(store, file, () => detailed(store, file, request.action, adapter,
+		() => executeDecisionUnlocked(store, file, request, adapter, options)));
+}
+export async function undoItemDetailed(store: ReviewStore, itemId: string, adapter: ResourceAdapter): Promise<ReviewExecutionResult> {
+	const item = store.get().undo.find(candidate => candidate.id === itemId);
+	if (!item || item.phase === 'consumed') {
+		const result = blockedReviewResult(item?.file ?? '', item?.ids ?? [], 'undo', 'missingUndo');
+		return { result, error: new ReviewResultError(result, new ReviewError('missingUndo')) };
+	}
+	return serialized(store, item.file, () => detailed(store, item.file, 'undo', adapter,
+		async () => {
+			const recovering = Object.values(store.get().operations).some(op => op.kind === 'undo' && op.undoItemId === itemId && op.stage !== 'complete');
+			await undoItemUnlocked(store, itemId, adapter); return recovering ? 'recovered' : 'committed';
+		}, item.ids));
 }

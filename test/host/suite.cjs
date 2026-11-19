@@ -28,6 +28,7 @@ exports.run = async () => {
     editor: vscode.env.appName, vscode: vscode.version, node: process.version,
     platform: process.platform, arch: process.arch,
     artifactSha256: process.env.LAUNCHER_HOST_ARTIFACT_SHA256 ?? null,
+    sourceVerification: process.env.LAUNCHER_HOST_SOURCE_VERIFICATION ?? 'development-source',
     trustScenario: 'trusted synthetic workspace; Restricted Mode not tested',
     checks,
   };
@@ -143,6 +144,8 @@ exports.run = async () => {
     checks.push('manual content survives rejection during a new capture');
 
     if (report.artifactSha256) {
+      await require('./unsupported-resources.cjs').verifyUnsupportedResources(workspace, checks);
+      await require('./encoding.cjs').verifyEncoding(workspace, checks);
       const hookPath = path.join(extension.extensionPath, 'hooks/record-change.js');
       const installedHookSha256 = sha256(await fs.readFile(hookPath));
       assert.equal(installedHookSha256, process.env.LAUNCHER_HOST_HOOK_SHA256,

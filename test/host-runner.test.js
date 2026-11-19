@@ -6,7 +6,7 @@ const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const {
-  parseArguments, assertHookNode, hostEnvironment, provisionEditor, cliScript, editorFixtureArguments, run,
+  parseArguments, assertHookNode, hostEnvironment, provisionEditor, cliScript, editorFixtureArguments, run, runUntilReport, validateContractReport,
   validDiagnosticEvent, createEvidenceDirectory, exportEvidence,
 } = require('../scripts/host-tooling.cjs');
 
@@ -28,6 +28,7 @@ test('host runner requires exact editor pins and rejects ambiguous or unsupporte
     ['--download-version', '1.94.0', '--executable', 'code'],
     ['--download-version', '1.94.0', '--cli', 'cli.js'],
     ['--editor', 'code', '--editor', 'cursor'], ['--vsix', '--keep'], ['--unknown'],
+    ['--source-root', 'one', '--source-root', 'two'],
     ['--no-sandbox'], ['--disable-gpu-sandbox'],
   ]) assert.throws(() => parseArguments(invalid));
   assert.equal(parseArguments(['--editor', 'cursor', '--executable', 'Cursor', '--keep']).keep, true);
@@ -106,6 +107,66 @@ test('missing executable and timeout remain failing evidence', async t => {
   const result = await run(process.execPath, ['-e', 'setInterval(()=>{},1000)'], process.env, { timeout: 100 });
   assert.equal(result.timedOut, true);
   assert.notEqual(result.code, 0);
+});
+
+test('coordinated host cancellation terminates its child and distinguishes cancellation from timeout', async t => {
+  const directory = await temporary(t);
+  const cancellation = new AbortController();
+  const work = run(process.execPath, ['-e', 'setInterval(()=>{},1000)'], process.env, { cwd: directory, signal: cancellation.signal });
+  cancellation.abort();
+  const result = await work;
+  assert.equal(result.cancelled, true); assert.equal(result.timedOut, false); assert.notEqual(result.code, 0);
+  await assert.rejects(run(process.execPath, ['-e', 'throw Error("must not spawn")'], process.env, { signal: cancellation.signal }), /before spawn/);
+});
+
+test('atomic completion supervises a surviving editor child without accepting failed reports or deadlines', async t => {
+  const directory = await temporary(t);
+  const validateReport = report => assert.equal(report.status, 'passed');
+  const launch = async (name, program, timeout = 1000) => {
+    const reportFile = path.join(directory, name + '.json');
+    return runUntilReport(process.execPath, ['-e', program, reportFile], process.env,
+      { reportFile, validateReport, timeout });
+  };
+  const write = 'const fs=require("node:fs");const p=process.argv[1];';
+  const passed = 'fs.writeFileSync(p+".tmp",JSON.stringify({status:"passed"}));fs.renameSync(p+".tmp",p);';
+  const result = await launch('survives', write + passed + 'setInterval(()=>{},1000);');
+  assert.equal(result.shutdown, 'completed-report'); assert.equal(result.cancelled, true);
+  assert.equal(result.timedOut, false); assert.equal(result.report.status, 'passed');
+  const normal = await launch('normal', write + passed);
+  assert.equal(normal.report.status, 'passed'); assert.equal(normal.timedOut, false);
+  await assert.rejects(launch('failed', write + 'fs.writeFileSync(p,JSON.stringify({status:"failed"}));setInterval(()=>{},1000);'), /passed/);
+  await assert.rejects(launch('malformed', write + 'fs.writeFileSync(p,"invalid");setInterval(()=>{},1000);'), SyntaxError);
+  await assert.rejects(launch('missing', 'setInterval(()=>{},1000);', 80), { code: 'ENOENT' });
+  await assert.rejects(launch('exit-error', write + passed + 'process.exit(7);'), /did not finish cleanly/);
+  // A SIGTERM handler cannot turn a timed-out run into a successful late report.
+  // Windows kills abruptly, so its handler never creates the report:
+  // https://github.com/nodejs/node/blob/v22.x/doc/api/child_process.md#subprocesskillsignal
+  await assert.rejects(launch('late', write + 'process.on("SIGTERM",()=>{' + passed + 'process.exit(0);});setInterval(()=>{},1000);', 150),
+    process.platform === 'win32' ? { code: 'ENOENT' } : /did not finish cleanly/);
+});
+
+test('external cancellation cannot be reclassified as report-driven completion', async t => {
+  const directory = await temporary(t);
+  const reportFile = path.join(directory, 'cancelled.json');
+  const cancellation = new AbortController();
+  const task = runUntilReport(process.execPath, ['-e', 'setInterval(()=>{},1000)'], process.env,
+    { reportFile, validateReport: () => {}, signal: cancellation.signal });
+  cancellation.abort();
+  await assert.rejects(task);
+  await assert.rejects(fs.access(reportFile), { code: 'ENOENT' });
+});
+
+test('contract report validation rejects length-shaped strings and stale identities before child shutdown', () => {
+  const expected = { scenario: 'multi-window', role: 'reader', sha256: 'a'.repeat(64), version: '0.10.0', vscodeVersion: '1.94.0' };
+  const valid = { status: 'passed', scenario: 'two-real-windows', role: 'reader', artifactSha256: expected.sha256,
+    extensionVersion: expected.version, vscode: expected.vscodeVersion, reloadedWindow: true, checks: ['initial', 'reload', 'transfer'] };
+  assert.doesNotThrow(() => validateContractReport(valid, expected));
+  for (const patch of [{ checks: 'abc' }, { checks: { length: 3 } }, { checks: ['initial', 1, 'transfer'] },
+    { checks: ['initial', '', 'transfer'] }, { checks: ['initial', 'reload'] }, { status: 'failed' },
+    { reloadedWindow: false }, { role: 'writer' }, { artifactSha256: 'stale' }, { extensionVersion: '0.9.0' }, { vscode: '1.95.0' }]) {
+    assert.throws(() => validateContractReport({ ...valid, ...patch }, expected), /Invalid or failed contract report/);
+  }
+  assert.throws(() => validateContractReport(null, expected), /Invalid or failed contract report/);
 });
 
 test('reusing an evidence base keeps old results separate from an early failing runner execution', async t => {

@@ -92,7 +92,8 @@
 		if (options.pressed !== undefined) {
 			node.setAttribute('aria-pressed', String(options.pressed));
 		}
-		if (options.disabled || (readOnly && MUTATIONS.has(options.command))) {
+		const recoveryPurge = options.recoveryPurge === true && options.command === 'clearAllReviewData';
+		if (options.disabled || (readOnly && MUTATIONS.has(options.command) && !recoveryPurge)) {
 			node.disabled = true;
 		}
 		node.addEventListener('click', (event) => {
@@ -150,7 +151,10 @@
 	/** Avisos da extensão: revisão só para leitura, cobertura parcial e captura. */
 	function renderNotices(state) {
 		if (state.readOnlyReason) {
-			const recover = state.wide ? null : button({
+			const recover = state.readOnlyAction === 'clearAllReviewData' ? button({
+				className: 'btn-secondary btn-sm', icon: 'clear-all', label: 'Concluir limpeza…', command: 'clearAllReviewData',
+				focusKey: 'recover-purge', recoveryPurge: true,
+			}) : state.wide ? null : button({
 				className: 'btn-secondary btn-sm',
 				icon: 'unlock',
 				label: 'Recuperar acesso…',
@@ -202,6 +206,62 @@
 			body.append(action);
 		}
 		box.append(body);
+		return box;
+	}
+
+	function reviewPartsLabel(item) {
+		const valid = value => Number.isSafeInteger(value) && value >= 0;
+		if (!['pending', 'blocked', 'complete'].includes(item.phase)) { return ''; }
+		const parts = [];
+		if (valid(item.acceptedParts) && item.acceptedParts) { parts.push(item.acceptedParts + (item.acceptedParts === 1 ? ' aceite' : ' aceites')); }
+		if (valid(item.rejectedParts) && item.rejectedParts) { parts.push(item.rejectedParts + (item.rejectedParts === 1 ? ' recusa' : ' recusas')); }
+		if (item.phase !== 'complete') {
+			parts.push(valid(item.pendingParts) ? item.pendingParts + (item.pendingParts === 1 ? ' trecho pendente' : ' trechos pendentes') : 'Quantidade de trechos pendentes indisponível');
+		}
+		return parts.join(' · ');
+	}
+
+	function operationDescription(operation) {
+		if (!operation || !['complete', 'partial', 'blocked', 'failed', 'recovered'].includes(operation.outcome)
+			|| !['unchanged', 'buffer', 'persisted', 'unknown'].includes(operation.content)
+			|| !['persisted', 'notPersisted', 'failed'].includes(operation.decision)) { return ''; }
+		const actions = {
+			retrySave: 'Salve o arquivo ou repita a ação no painel para conferir a intenção existente.',
+			reconcile: 'Atualize o painel para conferir o registro pendente e repita a ação se a revisão continuar disponível.',
+			compare: 'Confira o arquivo e a comparação antes de decidir novamente.',
+			recoverWriter: 'Aguarde a operação ativa ou use os comandos de liberar e recuperar a revisão.',
+			retry: 'Confira a condição informada antes de tentar novamente.',
+			reviewAgain: 'Confira o resultado recuperado antes de repetir a nova ação.',
+		};
+		let message;
+		if (operation.outcome === 'recovered') { message = 'Operação anterior recuperada; a nova ação não foi executada.'; }
+		else if (operation.outcome === 'complete' && operation.decision === 'persisted') { message = 'Última decisão concluída e registrada.'; }
+		else if (operation.decision === 'persisted') { message = operation.content === 'persisted' ? 'Conteúdo salvo e decisão canônica registrada; há um impedimento adicional.' : 'Decisão canônica registrada; o efeito atual no conteúdo precisa ser conferido.'; }
+		else if (operation.lastKnownStage && operation.content === 'unknown') { message = 'Há uma operação interrompida; o conteúdo atual precisa ser conferido.'; }
+		else if (operation.content === 'buffer') { message = 'Conteúdo aplicado no editor; salvamento não confirmado e decisão pendente.'; }
+		else if (operation.content === 'persisted' && operation.decision !== 'persisted') { message = 'Conteúdo salvo; registro da decisão pendente.'; }
+		else if (operation.content === 'unknown') { message = 'Efeito no conteúdo desconhecido; nenhuma conclusão anunciada.'; }
+		else { message = 'Operação não concluída; conteúdo inalterado.'; }
+		if (operation.cancellation === 'beforeEffect' && operation.content === 'unchanged') { message = 'Operação cancelada antes de alterar o conteúdo.'; }
+		else if (operation.cancellation === 'afterEffect') { message = 'Operação cancelada após a aplicação. ' + message; }
+		const guidance = operation.reason === 'purgeNeedsRecovery'
+			? 'Use Apagar todos os dados locais de revisão para concluir a limpeza; não remova o marcador manualmente.'
+			: operation.reason === 'legacyProjectionPending' && operation.decision === 'persisted'
+			? 'Use Atualizar mudanças para recuperar a projeção de compatibilidade; a decisão canônica já foi concluída.' : actions[operation.nextAction];
+		return [message, guidance].filter(Boolean).join(' ');
+	}
+
+	function renderReviewState(item) {
+		const parts = reviewPartsLabel(item), operation = operationDescription(item.lastOperation);
+		const blocked = item.phase === 'blocked' || typeof item.blockedReason === 'string' && Boolean(item.blockedReason);
+		if (!parts && !operation && !blocked) { return null; }
+		const box = el('div', 'review-state');
+		if (parts) { box.append(el('p', 'muted', parts)); }
+		if (blocked) {
+			const reason = typeof item.blockedReason === 'string' ? item.blockedReason.slice(0, 800) : 'Confira o contexto antes de decidir.';
+			const message = el('p'); message.append(icon('lock'), el('span', null, ' Revisão bloqueada: ' + reason)); box.append(message);
+		}
+		if (operation) { box.append(el('p', 'operation-result', operation)); }
 		return box;
 	}
 
@@ -327,6 +387,8 @@
 		} else {
 			row.append(el('span', 'entry-action-spacer'));
 		}
+		const reviewState = renderReviewState(entry);
+		if (reviewState) { row.classList.add('has-review-state'); row.append(reviewState); }
 		return row;
 	}
 
@@ -512,8 +574,8 @@
 				icon: 'check',
 				command: 'acceptFile',
 				extra: identity,
-				disabled: blocked,
-				title: blocked ? file.blockedReason : 'Aceitar as mudanças neste arquivo',
+				disabled: blocked && file.canAcceptCurrent !== true,
+				title: blocked && file.canAcceptCurrent === true ? 'Aceitar explicitamente o estado atual, preservando as contribuições manuais' : blocked ? file.blockedReason : 'Aceitar as mudanças neste arquivo',
 				ariaLabel: 'Aceitar ' + file.file,
 				focusKey: 'accept:' + file.key,
 			}));
@@ -528,6 +590,8 @@
 				focusKey: 'reject:' + file.key,
 			}));
 			row.append(rowActions);
+			const reviewState = renderReviewState(file);
+			if (reviewState) { row.classList.add('has-review-state'); row.append(reviewState); }
 			list.append(row);
 		}
 		box.append(list);
@@ -625,7 +689,13 @@
 			tag.title = 'Revisada: partes aceitas e partes recusadas';
 			title.append(tag);
 		}
+		if (entry.phase === 'blocked') {
+			const tag = el('span', 'status-tag'); tag.append(icon('lock'), el('span', null, 'bloqueada'));
+			tag.title = typeof entry.blockedReason === 'string' ? entry.blockedReason.slice(0, 800) : 'Revisão bloqueada'; title.append(tag);
+		}
 		head.append(title);
+		const parts = reviewPartsLabel(entry);
+		if (parts) { head.append(el('span', 'muted review-parts', parts)); }
 
 		const meta = el('div', 'card-meta');
 		meta.append(renderStats(entry, true));
@@ -684,9 +754,8 @@
 			note.append(text);
 			body.append(note);
 		}
-		if (entry.blockedReason) {
-			body.append(banner('lock', entry.blockedReason, 'warning'));
-		}
+		const reviewState = renderReviewState(entry);
+		if (reviewState) { body.append(reviewState); }
 
 		entry.hunks.forEach((hunk, index) => body.append(renderHunk(entry, hunk, index)));
 

@@ -7,149 +7,21 @@ const os = require('node:os');
 const path = require('node:path');
 const vm = require('node:vm');
 const { createRequire } = require('node:module');
-const OUT = process.env.LAUNCHER_TEST_OUT || path.resolve(__dirname, '../out');
+const { fixture, entry, writeLog, readLog, writeDiagnostic, until, OUT } = require('./helpers/changes-fixture.cjs');
 const { ReviewStore } = require(path.join(OUT, 'review-store.js'));
 const { ingestEntries } = require(path.join(OUT, 'review.js'));
 const history = require(path.join(OUT, 'history.js'));
 const hooks = require(path.join(OUT, 'hooks.js'));
 
-/** Actual compiled controller, with only editor/IO boundaries replaced by explicit adapters. */
-function fixture(t, options = {}) {
-	const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'launcher-changes-')));
-	const warnings = [], messages = [], executedCommands = [], memento = new Map(), settings = new Map([
-		['claudeCodeLauncher.hookExecutionMode', options.mode || 'exec'],
-		['claudeCodeLauncher.historyRetentionDays', 30],
-	]);
-	const disposable = () => ({ dispose() {} });
-	class Uri {
-		constructor(file, scheme = 'file') { this.fsPath = file; this.path = file; this.scheme = scheme; }
-		toString() { return this.scheme + '://' + this.fsPath; }
-		static file(file) { return new Uri(options.uriFilePath ? options.uriFilePath(file) : path.resolve(file)); }
-		static joinPath(base, ...parts) { return new Uri(path.join(base.fsPath, ...parts), base.scheme); }
-		static from(value) { return new Uri(value.path, value.scheme); }
-	}
-	class EventEmitter {
-		listeners = [];
-		event = (fn) => { this.listeners.push(fn); return disposable(); };
-		fire(value) { this.listeners.forEach((fn) => fn(value)); }
-		dispose() { this.listeners = []; }
-	}
-	const folder = { uri: Uri.file(root), name: 'fixture', index: 0 };
-	const configurationHandlers = [], workspaceHandlers = [], watchers = [];
-	const vscode = {
-		Uri, EventEmitter, StatusBarAlignment: { Right: 2 }, ThemeColor: class {},
-		commands: { executeCommand: async (...args) => { executedCommands.push(args); return undefined; } },
-		extensions: { getExtension: () => options.extension },
-		window: {
-			createStatusBarItem: () => ({ show() {}, hide() {}, dispose() {} }),
-			showWarningMessage: async (message, ...args) => { warnings.push(message); return options.confirm === false ? undefined : args.find((arg) => typeof arg === 'string'); },
-			showInformationMessage: async (message) => { messages.push(message); return undefined; },
-			showErrorMessage: async (message) => { warnings.push(message); return undefined; },
-		},
-		workspace: {
-			workspaceFolders: [folder], textDocuments: [], notebookDocuments: [],
-			getWorkspaceFolder: (uri) => uri.fsPath === root || uri.fsPath.startsWith(root + path.sep) ? folder : undefined,
-			asRelativePath: (file) => path.relative(root, file),
-			getConfiguration: (section) => ({ get: (key, fallback) => settings.has(section + '.' + key) ? settings.get(section + '.' + key) : fallback }),
-			createFileSystemWatcher: (pattern) => {
-				const watcher = { pattern, created: [], changed: [], deleted: [] }; watchers.push(watcher);
-				return { ...disposable(), onDidCreate: (fn) => { watcher.created.push(fn); return disposable(); },
-					onDidChange: (fn) => { watcher.changed.push(fn); return disposable(); }, onDidDelete: (fn) => { watcher.deleted.push(fn); return disposable(); } };
-			},
-			onDidChangeWorkspaceFolders: (handler) => { workspaceHandlers.push(handler); return disposable(); },
-			onDidChangeConfiguration: (handler) => { configurationHandlers.push(handler); return disposable(); },
-		},
-	};
-	const context = {
-		extensionUri: Uri.file(path.resolve(__dirname, '..')), globalStorageUri: Uri.file(path.join(root, 'global')), subscriptions: [],
-		workspaceState: {
-			get: (key, fallback) => memento.has(key) ? memento.get(key) : fallback,
-			async update(key, value) {
-				if (options.failMemento) { throw new Error('synthetic memento failure'); }
-				memento.set(key, value);
-			},
-		},
-	};
-	const source = path.join(OUT, 'changes.js');
-	const sourceRequire = createRequire(source);
-	const sessionModule = sourceRequire('./sessions');
-	const module = { exports: {} };
-	const controllerHistory = { ...history, ...(options.history || {}) };
-	const run = vm.runInThisContext('(function(require,module,exports){' + fs.readFileSync(source, 'utf8') + '\n})', { filename: source });
-	run((id) => {
-		if (id === 'vscode') { return vscode; }
-		if (id === './history') { return controllerHistory; }
-		if (id === './sessions') { return { ...sessionModule, sessionsDir: () => path.join(root, 'sessions'), ...(options.sessions || {}) }; }
-		if (id === 'node:fs' && options.nodeFs) { return options.nodeFs; }
-		if (id === 'node:path' && options.nodePath) { return options.nodePath; }
-		return sourceRequire(id);
-	}, module, module.exports);
-	class ControlledController extends module.exports.ChangesController {
-		scheduleRefresh() { if (options.autoRefresh) { super.scheduleRefresh(); } }
-		async refresh() { if (options.autoRefresh) { return super.refresh(); } }
-		publish() { if (options.autoRefresh) { super.publish(); } }
-	}
-	const controller = new ControlledController(context);
-	const stores = new Set();
-	t.after(async () => {
-		controller.dispose();
-		await controller.whenDisposed();
-		for (const store of [...stores, ...controller.stores.values()]) { await store.close(); }
-		fs.rmSync(root, { recursive: true, force: true });
-	});
-	const dir = path.join(root, '.claude', 'launcher-changes');
-	async function store() {
-		let value = controller.stores.get(folder.uri.toString());
-		if (!value) { value = await ReviewStore.open(root); controller.stores.set(folder.uri.toString(), value); }
-		stores.add(value); return value;
-	}
-	function policy(fields = {}) {
-		fs.mkdirSync(dir, { recursive: true });
-		const value = { ...history.makeCapturePolicy({ generation: 'fixture-generation' }), ...fields };
-		fs.writeFileSync(path.join(dir, history.CAPTURE_POLICY_FILE), JSON.stringify(value) + '\n');
-		return value;
-	}
-	function configuredHooks() {
-		const plan = hooks.planHooks({ read: { kind: 'absent' }, scriptPath: controller.scriptPath(folder), enable: true,
-			capability: { status: 'confirmed', harness: 'fixture-contract' } });
-		fs.mkdirSync(path.join(root, '.claude'), { recursive: true });
-		fs.writeFileSync(path.join(root, '.claude', 'settings.local.json'), plan.nextText);
-		return plan.nextText;
-	}
-	return { root, dir, folder, controller, context, settings, warnings, messages, store, policy, configuredHooks,
-		workspaceHandlers, configurationHandlers, watchers, controllerHistory, executedCommands, Uri };
-}
-
-function entry(root, id, name = id + '.txt', time = '2026-11-19T12:00:00.000Z') {
-	return { id, time, file: path.join(root, name), before: { exists: true, text: 'before', large: false }, after: { exists: true, text: 'after', large: false }, reason: null };
-}
-function writeLog(f, entries) {
-	fs.mkdirSync(f.dir, { recursive: true });
-	fs.writeFileSync(path.join(f.dir, 'log.jsonl'), entries.map((value) => JSON.stringify(value) + '\n').join(''));
-}
-function readLog(f) {
-	return fs.readFileSync(path.join(f.dir, 'log.jsonl'), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line));
-}
-let diagnosticNumber = 0;
-function writeDiagnostic(f, fields = {}) {
-	const value = { schemaVersion: 2, id: (++diagnosticNumber).toString(16).padStart(32, '0'), kind: 'observation',
-		phase: 'pre', stage: 'policy', code: 'capturePaused', contentCoverage: 'none',
-		observedAt: new Date().toISOString(), ...fields };
-	const directory = path.join(f.dir, ...history.CAPTURE_DIAGNOSTICS_DIR.split('/'), value.kind === 'completion' ? 'completions' : 'observations');
-	fs.mkdirSync(directory, { recursive: true });
-	fs.writeFileSync(path.join(directory, history.captureDiagnosticFilename(value)), JSON.stringify(value));
-	return value;
-}
-async function until(predicate, message) {
-	const deadline = Date.now() + 5000;
-	while (Date.now() < deadline) { if (predicate()) { return; } await new Promise((resolve) => setTimeout(resolve, 20)); }
-	assert.fail(message);
-}
-
 function windowsProjection(t) {
 	const root = String.raw`d:\Fixture\workspace`;
 	const uriFilePath = file => /^[A-Za-z]:[\\/]/.test(file) ? file.replace(/^[A-Z]:/, drive => drive.toLowerCase()) : path.resolve(file);
-	const f = fixture(t, { nodePath: path.win32, uriFilePath });
+	const f = fixture(t, { nodePath: path.win32, uriFilePath, history: {
+		// This test models Windows identity in memory, not a Windows filesystem.
+		// Explicitly model absence of the new durable purge guard at the IO boundary.
+		safeReadText: async (file, ...args) => /^[A-Za-z]:[\\/]/.test(file) && file.endsWith('purge-state.v1.json')
+			? { kind: 'absent' } : history.safeReadText(file, ...args),
+	} });
 	f.folder.uri = new f.Uri(root);
 	return { ...f, windowsRoot: root };
 }

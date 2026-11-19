@@ -68,10 +68,11 @@ async function main() {
     let developmentPath = root;
     if (options.vsix) {
       const artifact = path.resolve(options.vsix);
-      const verified = await verifyPackage(artifact);
+      const verified = await verifyPackage(artifact, options['source-root'] ? path.resolve(options['source-root']) : root);
       await fs.writeFile(path.join(temporary, 'package-verification.json'), JSON.stringify(verified, null, 2));
       env.LAUNCHER_HOST_ARTIFACT_SHA256 = verified.sha256;
       env.LAUNCHER_HOST_ARTIFACT_VERSION = verified.version;
+      env.LAUNCHER_HOST_SOURCE_VERIFICATION = options['source-root'] ? 'explicit-source-snapshot' : 'current-workspace';
       const hook = verified.entries.find(entry => entry.name === 'extension/hooks/record-change.js');
       if (!hook) throw new Error('VSIX verificado não contém o hook de captura.');
       env.LAUNCHER_HOST_HOOK_SHA256 = hook.sha256;
@@ -90,6 +91,7 @@ async function main() {
       await fs.writeFile(path.join(developmentPath, 'package.json'), JSON.stringify({
         name: 'launcher-test-driver', publisher: 'local', version: '1.0.0',
         engines: { vscode: '^1.94.0' }, main: './index.js', activationEvents: ['*'],
+        contributes: { notebooks: [{ type: 'launcher-contract-notebook', displayName: 'Synthetic contract notebook', selector: [{ filenamePattern: '*.launcher-nb' }] }] },
       }));
       await fs.writeFile(path.join(developmentPath, 'index.js'), 'exports.activate = () => {};\n');
     }
