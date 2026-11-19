@@ -2,7 +2,7 @@
   "name": "claude-code-launcher",
   "displayName": "Claude Code Launcher",
   "description": "Abre o chat oficial do Claude Code e mostra, de forma didática, o que ele mudou em cada arquivo.",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "publisher": "kauan",
   "license": "MIT",
   "repository": {
@@ -25,7 +25,7 @@
         "command": "claude-code-launcher.openSidebar",
         "title": "Abrir chat na barra lateral",
         "category": "Claude Code Launcher",
-        "icon": "$(comment-discussion)"
+        "icon": "$(layout-sidebar-right)"
       },
       {
         "command": "claude-code-launcher.openTab",
@@ -42,22 +42,25 @@
         "command": "claude-code-launcher.showChanges",
         "title": "Mostrar mudanças do Claude",
         "category": "Claude Code Launcher",
-        "icon": "$(diff)"
+        "icon": "$(screen-full)"
       },
       {
         "command": "claude-code-launcher.enableChangeLog",
         "title": "Ativar registro de mudanças",
-        "category": "Claude Code Launcher"
+        "category": "Claude Code Launcher",
+        "icon": "$(record)"
       },
       {
         "command": "claude-code-launcher.disableChangeLog",
         "title": "Desligar registro de mudanças",
-        "category": "Claude Code Launcher"
+        "category": "Claude Code Launcher",
+        "icon": "$(debug-pause)"
       },
       {
         "command": "claude-code-launcher.clearChanges",
         "title": "Limpar histórico de mudanças",
-        "category": "Claude Code Launcher"
+        "category": "Claude Code Launcher",
+        "icon": "$(trash)"
       },
       {
         "command": "claude-code-launcher.toggleInlineChanges",
@@ -98,17 +101,20 @@
       {
         "command": "claude-code-launcher.acceptEverything",
         "title": "Aceitar todas as mudanças pendentes do Claude",
-        "category": "Claude Code Launcher"
+        "category": "Claude Code Launcher",
+        "icon": "$(check-all)"
       },
       {
         "command": "claude-code-launcher.rejectEverything",
         "title": "Recusar todas as mudanças pendentes do Claude",
-        "category": "Claude Code Launcher"
+        "category": "Claude Code Launcher",
+        "icon": "$(close-all)"
       },
       {
         "command": "claude-code-launcher.undoReject",
         "title": "Desfazer a última recusa",
-        "category": "Claude Code Launcher"
+        "category": "Claude Code Launcher",
+        "icon": "$(discard)"
       },
       {
         "command": "claude-code-launcher.nextChange",
@@ -129,6 +135,18 @@
         "command": "claude-code-launcher.rejectChange",
         "title": "Recusar trecho",
         "category": "Claude Code Launcher"
+      },
+      {
+        "command": "claude-code-launcher.refreshChanges",
+        "title": "Atualizar mudanças",
+        "category": "Claude Code Launcher",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "claude-code-launcher.refreshSessions",
+        "title": "Atualizar conversas",
+        "category": "Claude Code Launcher",
+        "icon": "$(refresh)"
       }
     ],
     "menus": {
@@ -145,9 +163,54 @@
           "group": "navigation@0"
         },
         {
-          "command": "claude-code-launcher.showChanges",
+          "command": "claude-code-launcher.refreshSessions",
+          "when": "view == claude-code-launcher.home",
+          "group": "navigation@1"
+        },
+        {
+          "command": "claude-code-launcher.undoReject",
+          "when": "view == claude-code-launcher.changes && claudeCodeLauncher.canUndoReject",
+          "group": "navigation@0"
+        },
+        {
+          "command": "claude-code-launcher.refreshChanges",
           "when": "view == claude-code-launcher.changes",
           "group": "navigation@1"
+        },
+        {
+          "command": "claude-code-launcher.showChanges",
+          "when": "view == claude-code-launcher.changes",
+          "group": "navigation@2"
+        },
+        {
+          "command": "claude-code-launcher.acceptEverything",
+          "when": "view == claude-code-launcher.changes && claudeCodeLauncher.hasPendingChanges",
+          "group": "1_review@1"
+        },
+        {
+          "command": "claude-code-launcher.rejectEverything",
+          "when": "view == claude-code-launcher.changes && claudeCodeLauncher.hasPendingChanges",
+          "group": "1_review@2"
+        },
+        {
+          "command": "claude-code-launcher.toggleInlineChanges",
+          "when": "view == claude-code-launcher.changes",
+          "group": "2_view@1"
+        },
+        {
+          "command": "claude-code-launcher.enableChangeLog",
+          "when": "view == claude-code-launcher.changes && !claudeCodeLauncher.changeLogEnabled",
+          "group": "3_log@1"
+        },
+        {
+          "command": "claude-code-launcher.disableChangeLog",
+          "when": "view == claude-code-launcher.changes && claudeCodeLauncher.changeLogEnabled",
+          "group": "3_log@1"
+        },
+        {
+          "command": "claude-code-launcher.clearChanges",
+          "when": "view == claude-code-launcher.changes && claudeCodeLauncher.hasChangeHistory",
+          "group": "3_log@2"
         }
       ],
       "commandPalette": [
@@ -165,6 +228,10 @@
         },
         {
           "command": "claude-code-launcher.rejectChange",
+          "when": "false"
+        },
+        {
+          "command": "claude-code-launcher.refreshSessions",
           "when": "false"
         }
       ]
@@ -235,6 +302,7 @@
   },
   "devDependencies": {
     "@types/vscode": "^1.85.0",
+    "@vscode/codicons": "^0.0.36",
     "@vscode/vsce": "^3.6.0",
     "typescript": "^5.6.0"
   }

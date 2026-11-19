@@ -4,7 +4,7 @@ Extensão para o Cursor e o VS Code que abre o chat oficial do Claude Code e mos
 
 O chat é o da extensão oficial **Claude Code** (`anthropic.claude-code`), com as ferramentas e as permissões dela. Esta extensão não coloca um botão dentro do painel do Agent do Cursor e não substitui esse painel.
 
-Versão atual do pacote: `claude-code-launcher-0.7.0.vsix`.
+Versão atual do pacote: `claude-code-launcher-0.8.0.vsix`.
 
 ## Requisitos
 
@@ -15,7 +15,7 @@ Versão atual do pacote: `claude-code-launcher-0.7.0.vsix`.
 ## Instalar
 
 1. Em Extensions, abra o menu `...` e escolha **Install from VSIX**.
-2. Selecione `claude-code-launcher-0.7.0.vsix`.
+2. Selecione `claude-code-launcher-0.8.0.vsix`.
 3. Na primeira abertura do chat, aceite instalar o Claude Code oficial, se ele ainda não estiver presente.
 
 Para desenvolver a partir deste repositório, abra a pasta no Cursor e use **Run Extension** (F5). O código TypeScript em `src/` é compilado para `out/`.
@@ -43,9 +43,13 @@ O botão de nova conversa do próprio Claude Code segue a preferência `claudeCo
 
 A view **Claude Code**, na barra de atividades, mostra:
 
-- **+ Nova conversa em aba**
-- **Abas abertas**: clique numa linha para ir até a aba; **×** fecha essa aba
-- **Conversas recentes**: as 15 conversas mais recentes do projeto aberto (com várias pastas no workspace, de todas elas). Clique para retomar a conversa numa aba. Uma conversa já aberta leva até a aba existente.
+- **Nova conversa**, que abre uma conversa nova em aba
+- uma lista só de conversas, uma linha cada, com o tempo à direita:
+  - **Abertas**: as conversas abertas em aba, com um ponto cheio na aba ativa e vazado nas outras. Clique para ir até a aba; **×**, ao passar o mouse, fecha essa aba.
+  - **Hoje**, **Ontem**, **Esta semana**, **Este mês** e **Mais antigas**: as 15 conversas mais recentes do projeto aberto (com várias pastas no workspace, de todas elas), sem repetir as que já estão abertas. Clique para retomar a conversa numa aba.
+- **Buscar conversas**, quando a lista passa de 6 conversas. A busca ignora acentos e maiúsculas; `Esc` limpa.
+
+O título da view tem **Nova conversa** e **Atualizar conversas**. As listas funcionam pelo teclado: `Tab` entra na lista e as setas para cima e para baixo andam entre as linhas.
 
 Os títulos vêm dos transcripts do Claude Code em `~/.claude/projects/` (ou em `CLAUDE_CONFIG_DIR`, se essa variável existir). A lista usa o título escolhido por você, senão o título gerado pelo Claude, senão a primeira mensagem. Sem uma pasta aberta, as conversas recentes não aparecem.
 
@@ -53,36 +57,47 @@ Os títulos vêm dos transcripts do Claude Code em `~/.claude/projects/` (ou em 
 
 A view **Mudanças** guarda cada arquivo que o Claude criar ou editar com as ferramentas Edit, Write, MultiEdit e NotebookEdit.
 
-No topo, um bloco **N arquivos para revisar** lista os arquivos com mudanças do Claude que você ainda não aceitou nem recusou, no mesmo espírito da lista de arquivos do Cursor. Cada linha mostra o nome, `+` linhas novas ou modificadas, `−` linhas removidas, e a marca **novo** quando o arquivo foi criado. O número junta a primeira edição pendente com a última. Clique na linha para ver a mudança no código; se o arquivo foi apagado, o clique tenta abri-lo. **Revisar**, nesse bloco, abre o painel em tela maior.
+No topo, um bloco **N arquivos para revisar** lista os arquivos com mudanças do Claude que você ainda não aceitou nem recusou, no mesmo espírito da lista de arquivos do Cursor. Cada linha mostra o nome, `+` linhas novas ou modificadas, `−` linhas removidas, e a marca **novo** quando o arquivo foi criado. O número junta a primeira edição pendente com a última. Clique na linha para ver a mudança no código; se o arquivo foi apagado, o clique tenta abri-lo.
 
 Aceitar e recusar:
 
-- **✓** e **✕**, que aparecem ao passar o mouse numa linha, aceitam ou recusam aquele arquivo.
-- **✓ Aceitar todos** mantém tudo como o Claude deixou e esvazia o bloco. O histórico continua, com a marca **aceita**.
-- **✕ Recusar todos** pede confirmação e volta cada arquivo para como era antes do Claude: o texto anterior é restaurado, arquivos criados por ele vão para a lixeira e arquivos apagados por ele são recriados. O histórico ganha a marca **recusada**.
+- **✓** e **✕**, no fim de cada linha, aceitam ou recusam aquele arquivo. Ficam mais fortes ao passar o mouse ou focar a linha.
+- **Aceitar todos** mantém tudo como o Claude deixou e esvazia o bloco. O histórico continua, com a marca **aceita**.
+- **Recusar todos** pede confirmação e volta cada arquivo para como era antes do Claude: o texto anterior é restaurado, arquivos criados por ele vão para a lixeira e arquivos apagados por ele são recriados. O histórico ganha a marca **recusada**.
 - Recusar nunca mexe num arquivo que mudou depois da última edição do Claude, nem num arquivo sem cópia do conteúdo anterior (mais de 512 KB). Esses ficam no bloco e um aviso lista quais foram. Dá para recusá-los trecho a trecho em **Ver no código**.
-- Depois de recusar, o aviso tem **Desfazer**, e a barra do painel mostra **↶ Desfazer recusa**. Dá para desfazer as 5 últimas recusas, da mais recente para trás, inclusive depois de recarregar a janela. Desfazer só devolve arquivos que continuam como a recusa deixou.
+- Depois de recusar, o aviso tem **Desfazer**, e o título da view (ou a barra da tela maior) mostra **Desfazer recusa**. Dá para desfazer as 5 últimas recusas, da mais recente para trás, inclusive depois de recarregar a janela. Desfazer só devolve arquivos que continuam como a recusa deixou.
 
 Quando nada está pendente, o bloco some e o painel diz que tudo foi revisado.
 
-Abaixo fica o histórico. As edições feitas para atender a mesma mensagem sua ficam agrupadas sob **Pedido**, com o texto da mensagem e quantos arquivos ela mudou. **Desfazer pedido** volta esses arquivos para como eram antes do pedido, com as mesmas proteções de **Recusar todos**. O pedido vem do transcript da conversa; edições sem transcript aparecem soltas.
+Abaixo fica o histórico.
 
-Cada card de edição mostra:
+Na barra lateral, o histórico é uma lista compacta, sem diff: cada edição ocupa uma linha com o status (ponto laranja para revisar, ✓ aceita, ↶ recusada), o arquivo, `+`/`−` e quando. Clique na linha para ver a mudança no código; o ícone de diff, ao passar o mouse, abre o antes e depois daquela edição. O tooltip da linha traz o resumo e o que o Claude disse. **Ver os diffs na tela maior**, no fim da lista, abre o painel completo. O estado do registro (**Registrando** ou **Registro desligado**) aparece ao lado do título da view, e o número de arquivos para revisar aparece no ícone do Claude Code na barra de atividades.
+
+Na tela maior, cada edição é um card com o diff. As edições feitas para atender a mesma mensagem sua ficam agrupadas sob **Seu pedido**, com o texto da mensagem e quantos arquivos ela mudou. **Desfazer pedido**, que aparece ao passar o mouse no pedido, volta esses arquivos para como eram antes do pedido, com as mesmas proteções de **Recusar todos**. O pedido vem do transcript da conversa; edições sem transcript aparecem soltas.
+
+Cada card da tela maior mostra:
 
 - a ação (criou, reescreveu, editou, editou notebook);
 - um resumo em texto, com contagem de linhas novas, removidas e modificadas;
 - o que o Claude disse logo antes de editar;
-- os trechos, com linhas novas em verde e removidas em vermelho. Numa linha modificada, as versões de antes e de depois aparecem juntas, e as palavras que mudaram ficam em destaque.
+- os trechos, com linhas novas em verde e removidas em vermelho. Numa linha modificada, as versões de antes e de depois aparecem juntas, e as palavras que mudaram ficam em destaque. Trechos com mais de 60 linhas começam recolhidos, com **Mostrar mais N linhas**.
 
-Ações do card e da barra:
+O corpo do card só é montado quando ele abre, e o código usa tabulação de 4 espaços. Quais cards estão abertos, o bloco **Para revisar** recolhido ou não e a legenda continuam como você deixou ao esconder e reabrir a view, e a rolagem não pula quando chega uma mudança nova.
+
+Ações do card:
 
 - **Ver no código** abre o arquivo e mostra as marcas da revisão no editor.
 - **Lado a lado** abre o diff nativo, antes e depois daquela edição.
 - **Abrir arquivo** aparece quando não há um antes e um depois para comparar.
-- **Tela maior** abre o mesmo painel numa aba do editor. O ícone de diff no título da view faz o mesmo.
+
+Na barra lateral, as ações do painel ficam no título da view:
+
+- **Desfazer recusa** aparece quando há recusa para desfazer.
 - **Atualizar** relê o histórico.
-- **Limpar** apaga o histórico deste projeto e mantém o registro ligado.
-- **Ativar** e **Desligar** ligam e desligam o registro.
+- **Tela maior** abre o mesmo painel numa aba do editor.
+- No menu `...`: **Aceitar todas** e **Recusar todas** as mudanças pendentes, **Ligar/desligar marcas** no código, **Ativar** ou **Desligar** o registro e **Limpar histórico**, que pede confirmação, apaga o histórico deste projeto e mantém o registro ligado.
+
+Na tela maior, as mesmas ações ficam na barra do topo, com um alternador **Unificado / Lado a lado** para os trechos: lado a lado, o antes fica à esquerda e o depois à direita, com as linhas quebradas em vez de rolar.
 
 O registro só vale para conversas iniciadas depois de ativar. Um arquivo com mais de 512 KB não tem o texto guardado; o card avisa isso. O histórico mostra as 60 edições mais recentes. O log guarda até 400 edições: acima disso, as revisadas mais antigas saem, e as pendentes ficam sempre.
 
@@ -141,7 +156,8 @@ Na paleta de comandos, categoria **Claude Code Launcher**:
 | Mostrar mudanças do Claude | Abre o painel de mudanças numa aba |
 | Ativar registro de mudanças | Instala o hook no projeto |
 | Desligar registro de mudanças | Remove o hook do projeto |
-| Limpar histórico de mudanças | Apaga o `log.jsonl` |
+| Limpar histórico de mudanças | Apaga o `log.jsonl`, com confirmação |
+| Atualizar mudanças | Relê o histórico de mudanças |
 | Ligar/desligar marcas das mudanças no código | Liga ou desliga as marcas no editor |
 | Aceitar todas as mudanças pendentes do Claude | Aceita todos os arquivos do bloco **para revisar** |
 | Recusar todas as mudanças pendentes do Claude | Recusa todos os arquivos do bloco, com confirmação |

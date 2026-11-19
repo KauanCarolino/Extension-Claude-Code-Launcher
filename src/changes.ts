@@ -94,6 +94,7 @@ export function registerChanges(context: vscode.ExtensionContext): ChangesContro
 		vscode.commands.registerCommand('claude-code-launcher.acceptEverything', () => controller.acceptEverything()),
 		vscode.commands.registerCommand('claude-code-launcher.rejectEverything', () => controller.rejectEverything()),
 		vscode.commands.registerCommand('claude-code-launcher.undoReject', () => controller.undoReject()),
+		vscode.commands.registerCommand('claude-code-launcher.refreshChanges', () => controller.refresh()),
 	);
 	void controller.repairHooks();
 	return controller;
@@ -223,6 +224,7 @@ export class ChangesController implements
 	resolveWebviewView(webviewView: vscode.WebviewView): void {
 		this.view = webviewView;
 		this.setupWebview(webviewView.webview, false);
+		this.updateViewChrome();
 		webviewView.onDidDispose(() => {
 			this.view = undefined;
 		});
@@ -239,6 +241,7 @@ export class ChangesController implements
 			vscode.ViewColumn.Active,
 			{ enableScripts: true, localResourceRoots: [this.mediaUri()] },
 		);
+		this.panel.iconPath = vscode.Uri.joinPath(this.mediaUri(), 'icon.svg');
 		this.setupWebview(this.panel.webview, true);
 		this.panel.onDidDispose(() => {
 			this.panel = undefined;
@@ -308,6 +311,16 @@ export class ChangesController implements
 	}
 
 	async clear(): Promise<void> {
+		if (this.entries.length > 0) {
+			const ok = await confirm(
+				'Limpar o histórico de mudanças do Claude?',
+				'Apaga o registro deste projeto, inclusive as mudanças ainda não revisadas. Os arquivos não são alterados, e o registro continua ligado.',
+				'Limpar',
+			);
+			if (!ok) {
+				return;
+			}
+		}
 		for (const folder of vscode.workspace.workspaceFolders ?? []) {
 			try {
 				await vscode.workspace.fs.delete(vscode.Uri.joinPath(folder.uri, ...LOG_PATH));
@@ -593,7 +606,7 @@ export class ChangesController implements
 		}, 250);
 	}
 
-	private async refresh(): Promise<void> {
+	async refresh(): Promise<void> {
 		// Uma gravação de status.json em andamento precisa terminar antes da leitura.
 		await this.writeChain;
 		this.entries = await this.loadEntries();
@@ -620,6 +633,7 @@ export class ChangesController implements
 		}
 
 		const groups = this.pendingGroups();
+		this.updateViewChrome(groups.length);
 		const next = new Map(
 			groups.filter((list) => list[0].after?.exists !== false).map((list) => [fileKey(list[0].file), list[0].file]),
 		);
@@ -639,6 +653,7 @@ export class ChangesController implements
 			this.statusItem.hide();
 		}
 		void vscode.commands.executeCommand('setContext', PENDING_CONTEXT, groups.length > 0);
+		this.updateViewContexts();
 	}
 
 	private post(webview: vscode.Webview, wide: boolean): void {
@@ -1053,7 +1068,30 @@ export class ChangesController implements
 		this.saveUndo();
 	}
 
+	/**
+	 * O estado do registro fica ao lado do título da view, e os pendentes viram um
+	 * número no ícone da barra de atividades, como o Git faz.
+	 */
+	private updateViewChrome(pending = this.pendingGroups().length): void {
+		if (!this.view) {
+			return;
+		}
+		const hasFolder = (vscode.workspace.workspaceFolders ?? []).length > 0;
+		this.view.description = hasFolder ? (this.enabled ? 'Registrando' : 'Registro desligado') : undefined;
+		this.view.badge = pending > 0
+			? { value: pending, tooltip: `${capitalize(countFiles(pending))} com mudanças do Claude para revisar` }
+			: undefined;
+	}
+
+	/** Contextos que decidem quais botões aparecem no título da view Mudanças. */
+	private updateViewContexts(): void {
+		void vscode.commands.executeCommand('setContext', 'claudeCodeLauncher.changeLogEnabled', this.enabled);
+		void vscode.commands.executeCommand('setContext', 'claudeCodeLauncher.hasChangeHistory', this.entries.length > 0);
+		void vscode.commands.executeCommand('setContext', 'claudeCodeLauncher.canUndoReject', this.undoStack.length > 0);
+	}
+
 	private saveUndo(): void {
+		this.updateViewContexts();
 		const fits = this.undoStack.reduce((total, item) => total + undoSize(item), 0) <= MAX_UNDO_CHARS;
 		// Uma recusa enorme ainda pode ser desfeita nesta sessão, mas não é guardada.
 		void this.context.workspaceState.update(UNDO_KEY, fits ? this.undoStack : []);
@@ -1146,17 +1184,21 @@ export class ChangesController implements
 		const nonce = createNonce();
 		const script = webview.asWebviewUri(vscode.Uri.joinPath(this.mediaUri(), 'changes.js'));
 		const style = webview.asWebviewUri(vscode.Uri.joinPath(this.mediaUri(), 'changes.css'));
+		const base = webview.asWebviewUri(vscode.Uri.joinPath(this.mediaUri(), 'base.css'));
+		const codicons = webview.asWebviewUri(vscode.Uri.joinPath(this.mediaUri(), 'codicons', 'codicon.css'));
 		return `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
 	<meta charset="UTF-8" />
-	<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';" />
+	<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; font-src ${webview.cspSource}; script-src 'nonce-${nonce}';" />
 	<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+	<link rel="stylesheet" href="${codicons}" />
+	<link rel="stylesheet" href="${base}" />
 	<link rel="stylesheet" href="${style}" />
 	<title>Mudanças do Claude</title>
 </head>
 <body>
-	<div id="root"><p class="muted">Carregando…</p></div>
+	<div id="root"><p class="loading muted"><span class="codicon codicon-loading codicon-modifier-spin"></span> Carregando…</p></div>
 	<script nonce="${nonce}" src="${script}"></script>
 </body>
 </html>`;

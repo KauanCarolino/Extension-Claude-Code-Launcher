@@ -1,87 +1,54 @@
+/* View inicial: nova conversa e uma lista só de conversas. Base em base.css. */
+
 body {
-	margin: 0;
-	padding: 12px;
-	color: var(--vscode-foreground);
-	background: transparent;
-	font-family: var(--vscode-font-family);
-	font-size: var(--vscode-font-size);
-	line-height: 1.4;
+	padding: 10px 8px 16px;
 }
 
-[hidden] {
-	display: none !important;
-}
-
-p {
-	margin: 0 0 8px;
-}
-
-.muted {
-	color: var(--vscode-descriptionForeground);
-}
-
-.warning {
-	color: var(--vscode-errorForeground);
-}
-
-button {
-	border: none;
-	border-radius: 2px;
-	cursor: pointer;
-	font: inherit;
-}
-
-button.primary,
-button.secondary {
-	padding: 6px 10px;
-}
-
-button.primary {
-	background: var(--vscode-button-background);
-	color: var(--vscode-button-foreground);
-}
-
-button.primary:hover {
-	background: var(--vscode-button-hoverBackground);
-}
-
-button.secondary {
-	background: var(--vscode-button-secondaryBackground);
-	color: var(--vscode-button-secondaryForeground);
-}
-
-button.secondary:hover {
-	background: var(--vscode-button-secondaryHoverBackground);
-}
-
-button.wide {
-	width: 100%;
-}
-
-.actions {
-	display: grid;
-	grid-template-columns: 1fr;
-	gap: 6px;
-	margin-bottom: 16px;
-}
-
-section {
-	margin-bottom: 16px;
-}
-
-.section-head {
+/* "Nova conversa" com cara de campo de mensagem: convida sem competir com o resto. */
+.new-chat {
 	display: flex;
-	align-items: center;
-	justify-content: space-between;
+	justify-content: flex-start;
+	gap: 8px;
+	width: 100%;
+	margin-bottom: 14px;
+	padding: 7px 10px;
+	border: 1px solid var(--border-subtle);
+	border-radius: var(--radius-lg);
+	background: var(--vscode-input-background, var(--surface));
+	color: var(--muted);
+	font-size: var(--text);
+	transition: border-color 0.12s ease, color 0.12s ease;
 }
 
-h2 {
-	margin: 0 0 6px;
-	color: var(--vscode-descriptionForeground);
-	font-size: 11px;
+.new-chat .codicon {
+	color: var(--accent);
+}
+
+.new-chat:hover {
+	border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+	color: var(--vscode-foreground);
+}
+
+.new-chat-hint {
+	margin-left: auto;
+	font-size: var(--text-xs);
+	opacity: 0.7;
+}
+
+.search {
+	margin-bottom: 10px;
+}
+
+.group {
+	margin-bottom: 12px;
+}
+
+.group-title {
+	margin: 0 0 2px;
+	padding: 0 8px;
+	color: var(--muted);
+	font-size: var(--text-xs);
 	font-weight: 600;
-	letter-spacing: 0.04em;
-	text-transform: uppercase;
 }
 
 .list {
@@ -90,71 +57,87 @@ h2 {
 	list-style: none;
 }
 
-.item {
+.row {
 	display: flex;
 	align-items: center;
-	gap: 8px;
-	padding: 5px 6px;
-	border-radius: 3px;
-	cursor: pointer;
+	border-radius: var(--radius);
 }
 
-.item:hover {
-	background: var(--vscode-list-hoverBackground);
+.row:hover {
+	background: var(--hover);
 }
 
-.item.active {
-	background: var(--vscode-list-inactiveSelectionBackground);
+.row.active {
+	background: var(--vscode-list-inactiveSelectionBackground, var(--surface-strong));
 }
 
-.icon {
-	flex: none;
-	width: 16px;
-	color: var(--vscode-descriptionForeground);
-	font-size: 11px;
-	text-align: center;
-}
-
-.item.active .icon,
-.item.open .item-meta {
-	color: var(--vscode-textLink-foreground);
-}
-
-.item-text {
-	display: flex;
+.row-main {
 	flex: 1;
-	flex-direction: column;
+	justify-content: flex-start;
+	gap: 8px;
 	min-width: 0;
+	height: 26px;
+	padding: 0 8px;
+	border: none;
+	border-radius: var(--radius);
+	color: var(--vscode-foreground);
+	font-size: var(--text);
+	text-align: left;
 }
 
-.item-title {
+.row-title {
+	flex: 1;
+	min-width: 0;
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
 }
 
-.item-meta {
-	color: var(--vscode-descriptionForeground);
-	font-size: 11px;
-}
-
-.icon-button {
+.row-time {
 	flex: none;
-	padding: 0 6px;
-	background: transparent;
-	color: var(--vscode-descriptionForeground);
-	font-size: 14px;
-	line-height: 20px;
-	visibility: hidden;
+	color: var(--muted);
+	font-size: var(--text-xs);
+	font-variant-numeric: tabular-nums;
 }
 
-.item:hover .icon-button,
-.section-head .icon-button {
-	visibility: visible;
+/* Ponto das conversas abertas: cheio na aba ativa, vazado nas outras. */
+.live-dot {
+	flex: none;
+	width: 7px;
+	height: 7px;
+	border: 1.5px solid var(--accent);
+	border-radius: 50%;
 }
 
-.icon-button:hover {
-	border-radius: 3px;
-	background: var(--vscode-toolbar-hoverBackground);
-	color: var(--vscode-foreground);
+.live-dot.on {
+	background: var(--accent);
+}
+
+/* Aparece ao passar o mouse ou focar a linha, e continua alcançável pelo teclado. */
+.row-action {
+	margin-right: 2px;
+	opacity: 0;
+}
+
+.row:hover .row-action,
+.row:focus-within .row-action {
+	opacity: 1;
+}
+
+.hint {
+	padding: 0 8px;
+	font-size: var(--text-sm);
+}
+
+.hint-box {
+	display: flex;
+	align-items: flex-start;
+	gap: 8px;
+	padding: 8px;
+	color: var(--muted);
+	font-size: var(--text-sm);
+}
+
+.hint-box .codicon {
+	margin-top: 1px;
 }
