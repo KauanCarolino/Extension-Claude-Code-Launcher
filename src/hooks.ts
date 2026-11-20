@@ -1,6 +1,5 @@
 /** Pure, conservative ownership and configuration of Claude command hooks. */
-declare const require: (id: string) => any;
-const crypto = require('node:crypto');
+import * as crypto from 'node:crypto';
 
 export const HOOK_MATCHER = 'Edit|Write|MultiEdit|NotebookEdit';
 export const HOOK_NAME = 'launcher-record-change.js';
@@ -88,7 +87,7 @@ function parsedSettings(read: SettingsRead): { settings?: Record<string, unknown
 	if (!object(value) || (value.hooks !== undefined && !object(value.hooks))) {
 		return { code: 'invalidSettingsShape' };
 	}
-	const hooks = value.hooks as Record<string, unknown> | undefined;
+	const hooks = value.hooks;
 	for (const [event] of EVENTS) {
 		if (hooks?.[event] === undefined) {
 			continue;

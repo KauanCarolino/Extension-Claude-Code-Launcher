@@ -5,6 +5,7 @@ scripts/**
 docs/**
 .github/**
 tsconfig.json
+eslint.config.mjs
 **/*.ts
 **/*.map
 

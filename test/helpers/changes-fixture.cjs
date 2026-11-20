@@ -83,7 +83,9 @@ function fixture(t, options = {}) {
 			fs: { async delete(uri, settings) { editor.deleteCalls.push({ file: uri.fsPath, options: settings }); if (editor.deleteError) { throw editor.deleteError; } fs.unlinkSync(uri.fsPath); } },
 			getWorkspaceFolder: (uri) => uri.fsPath === root || uri.fsPath.startsWith(root + path.sep) ? folder : undefined,
 			asRelativePath: (file) => path.relative(root, file),
-			getConfiguration: (section) => ({ get: (key, fallback) => settings.has(section + '.' + key) ? settings.get(section + '.' + key) : fallback }),
+			getConfiguration: (section) => ({ get: (key, fallback) => settings.has(section + '.' + key) ? settings.get(section + '.' + key) : fallback,
+				// Scoped values only where a test declares them; otherwise the controller reads the effective value.
+				inspect: (key) => options.inspect?.(section + '.' + key) }),
 			createFileSystemWatcher: (pattern) => {
 				const watcher = { pattern, created: [], changed: [], deleted: [] }; watchers.push(watcher);
 				return { ...disposable(), onDidCreate: (fn) => { watcher.created.push(fn); return disposable(); },

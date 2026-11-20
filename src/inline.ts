@@ -132,7 +132,7 @@ class InlineChanges implements vscode.CodeLensProvider, vscode.Disposable {
 	readonly onDidChangeCodeLenses = this.lensEmitter.event;
 
 	private readonly lenses = new Map<string, vscode.CodeLens[]>();
-	private readonly pending = new Map<string, unknown>();
+	private readonly pending = new Map<string, ReturnType<typeof setTimeout>>();
 	private readonly disposables: vscode.Disposable[] = [];
 
 	constructor(private readonly source: EntrySource) {

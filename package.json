@@ -1,10 +1,19 @@
 {
   "name": "claude-code-launcher",
   "displayName": "Claude Code Launcher",
-  "description": "Abre o chat oficial do Claude Code e mostra, de forma didática, o que ele mudou em cada arquivo.",
-  "version": "0.10.0",
+  "description": "Abre o chat oficial do Claude Code e mostra, de forma didática, o que ele mudou em cada arquivo. Extensão independente: não é um produto da Anthropic.",
+  "version": "0.11.0",
   "publisher": "kauan",
   "license": "MIT",
+  "icon": "media/icon.png",
+  "keywords": [
+    "claude",
+    "claude code",
+    "launcher",
+    "revisão de mudanças",
+    "diff",
+    "code review"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/KauanCarolino/Extension-Claude-Code-Launcher.git"
@@ -24,6 +33,10 @@
     "untrustedWorkspaces": {
       "supported": false,
       "description": "A revisão pode restaurar arquivos e configurar hooks locais. Confie no workspace para habilitar o launcher."
+    },
+    "virtualWorkspaces": {
+      "supported": "limited",
+      "description": "A revisão e o registro de mudanças exigem pastas no disco local. A abertura do chat depende do suporte da extensão oficial a esse tipo de workspace."
     }
   },
   "contributes": {
@@ -280,11 +293,13 @@
       {
         "command": "claude-code-launcher.nextChange",
         "key": "alt+]",
+        "mac": "ctrl+alt+]",
         "when": "editorTextFocus && claudeCodeLauncher.hasPendingChanges && !inlineSuggestionVisible"
       },
       {
         "command": "claude-code-launcher.previousChange",
         "key": "alt+[",
+        "mac": "ctrl+alt+[",
         "when": "editorTextFocus && claudeCodeLauncher.hasPendingChanges && !inlineSuggestionVisible"
       }
     ],
@@ -304,7 +319,7 @@
       "activitybar": [
         {
           "id": "claude-code-launcher",
-          "title": "Claude Code",
+          "title": "Claude Code Launcher",
           "icon": "media/icon.svg"
         }
       ]
@@ -314,7 +329,7 @@
         {
           "type": "webview",
           "id": "claude-code-launcher.home",
-          "name": "Claude Code"
+          "name": "Conversas"
         },
         {
           "type": "webview",
@@ -338,6 +353,7 @@
         },
         "claudeCodeLauncher.hookExecutionMode": {
           "type": "string",
+          "scope": "machine",
           "enum": [
             "auto",
             "exec",
@@ -349,7 +365,7 @@
             "Usa executável e argumentos separados após você confirmar que sua versão do Claude Code suporta esse formato.",
             "Desativa a instalação e execução dos hooks geridos pelo launcher."
           ],
-          "description": "Formato de execução do registro de mudanças. Versões sem suporte confirmado permanecem desativadas; não há alternativa automática via shell."
+          "description": "Formato de execução do registro de mudanças. Versões sem suporte confirmado permanecem desativadas; não há alternativa automática via shell. Vale para a máquina: as configurações de um projeto não alteram esta opção."
         },
         "claudeCodeLauncher.historyExcludedPatterns": {
           "type": "array",
@@ -370,7 +386,7 @@
             "**/id_ed25519",
             "**/credentials.json"
           ],
-          "description": "Padrões de caminhos excluídos de novas cópias de conteúdo no histórico local. Alterar a lista não apaga cópias já existentes."
+          "description": "Padrões de caminhos excluídos de novas cópias de conteúdo no histórico local. Os padrões definidos no projeto somam-se aos do usuário e não os substituem. Alterar a lista não apaga cópias já existentes."
         },
         "claudeCodeLauncher.historyRetentionDays": {
           "type": "integer",
@@ -392,6 +408,7 @@
   "scripts": {
     "compile": "node scripts/build.cjs",
     "typecheck": "tsc -p ./ --noEmit",
+    "lint": "eslint src",
     "watch": "tsc -watch -p ./",
     "test": "npm run compile && node --test \"test/*.test.js\"",
     "vscode:prepublish": "npm run compile",
@@ -402,12 +419,15 @@
     "test:host:contracts": "node scripts/test-host-contracts.cjs"
   },
   "devDependencies": {
+    "@types/node": "20.16.15",
     "@types/vscode": "1.94.0",
     "@vscode/codicons": "0.0.36",
+    "@vscode/test-electron": "3.1.0",
     "@vscode/vsce": "4.1.1",
+    "eslint": "10.15.0",
     "typescript": "^5.6.0",
-    "yauzl": "3.4.0",
-    "@vscode/test-electron": "3.1.0"
+    "typescript-eslint": "8.73.0",
+    "yauzl": "3.4.0"
   },
   "overrides": {
     "@vscode/vsce": {

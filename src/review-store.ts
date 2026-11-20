@@ -1,12 +1,18 @@
-/* The runtime is Node; keep the dependency surface local instead of adding a type package. */
-declare const require: (id: string) => any;
-const fs = require('node:fs');
-const path = require('node:path');
-const crypto = require('node:crypto');
-const runtimeProcess = require('node:process');
-const BufferImpl = require('node:buffer').Buffer;
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as crypto from 'node:crypto';
+import * as runtimeProcess from 'node:process';
+import { Buffer as BufferImpl } from 'node:buffer';
 
 import { copyReview, ReviewError, ReviewState, ReviewResolution } from './review';
+
+/** Structural equality. Snapshot strings are shared by copyReview, so equal drafts compare by reference. */
+function sameValue(a: unknown, b: unknown): boolean {
+	if (a === b) { return true; }
+	if (!a || !b || typeof a !== 'object' || typeof b !== 'object' || Array.isArray(a) !== Array.isArray(b)) { return false; }
+	const left = a as Record<string, unknown>, right = b as Record<string, unknown>, keys = Object.keys(left);
+	return keys.length === Object.keys(right).length && keys.every((key) => Object.hasOwn(right, key) && sameValue(left[key], right[key]));
+}
 
 export interface ReviewStoreOptions {
 	fault?: (stage: 'blob' | 'state' | 'projection' | 'backup') => void;
@@ -23,7 +29,14 @@ export class ReviewStore {
 	private owner = false;
 	private state!: ReviewState;
 	private chain: Promise<unknown> = Promise.resolve();
-	private decodedBlobs = new Map<string, string>();
+	/**
+	 * Blobs whose content this instance wrote or verified, with the file identity seen then.
+	 * A later pass trusts the text only while that identity is unchanged; otherwise it reads again.
+	 */
+	private knownBlobs = new Map<string, { text: string; size: number; mtimeMs: number; ino: number }>();
+	/** Digest and UTF-8 size of texts already hashed. Drafts share string instances, so the lookup is by reference. */
+	private textDigests = new Map<string, { digest: string; size: number; eol?: string }>();
+	private decodedBlobs = new Set<string>();
 	private materializedBytes = 0;
 	private encodedBlobs = new Set<string>();
 	private encodedBytes = 0;
@@ -69,7 +82,7 @@ export class ReviewStore {
 			const stat = fs.fstatSync(fd);
 			if (!stat.isFile()) { throw new ReviewError('unsupportedStore'); }
 			if (stat.size > limit) { throw new ReviewError('storeBudgetExceeded'); }
-			const chunks: unknown[] = [];
+			const chunks: Uint8Array[] = [];
 			let length = 0;
 			while (length <= limit) {
 				const chunk = BufferImpl.alloc(Math.min(64 * 1024, limit + 1 - length));
@@ -87,6 +100,26 @@ export class ReviewStore {
 		finally { if (fd !== undefined) { fs.closeSync(fd); } }
 	}
 	private hash(text: string | null): string | null { return text === null ? null : crypto.createHash('sha256').update(text, 'utf8').digest('hex'); }
+	private blobFile(digest: string): string { return this.file(`review-blobs/v1/${digest}.txt`); }
+	/** Text already verified for this digest, only while the regular file on disk is the one verified. */
+	private trustedBlob(digest: string): string | undefined {
+		const known = this.knownBlobs.get(digest);
+		if (!known) { return undefined; }
+		try {
+			const stat = fs.lstatSync(this.blobFile(digest));
+			if (stat.isFile() && !stat.isSymbolicLink() && stat.size === known.size && stat.mtimeMs === known.mtimeMs && stat.ino === known.ino) { return known.text; }
+		} catch (error) { if ((error as { code?: string }).code !== 'ENOENT') { throw error; } }
+		this.knownBlobs.delete(digest);
+		return undefined;
+	}
+	private rememberBlob(digest: string, text: string): void {
+		const stat = fs.lstatSync(this.blobFile(digest));
+		if (stat.isFile() && !stat.isSymbolicLink()) { this.knownBlobs.set(digest, { text, size: stat.size, mtimeMs: stat.mtimeMs, ino: stat.ino }); }
+	}
+	private forgetUnused(used: ReadonlySet<string>): void {
+		for (const digest of this.knownBlobs.keys()) { if (!used.has(digest)) { this.knownBlobs.delete(digest); } }
+		for (const [text, known] of this.textDigests) { if (!used.has(known.digest)) { this.textDigests.delete(text); } }
+	}
 	acquireWriter(): boolean {
 		if (this.owner) { this.assertOwner(); return true; }
 		this.ensureDirectories();
@@ -103,6 +136,19 @@ export class ReviewStore {
 		if (!this.owner || !this.writable) { throw new ReviewError(this.blockReason || 'readOnlyOwner'); }
 		const lock = JSON.parse(this.readOptional(this.file('review-writer.lock')) || 'null');
 		if (!lock || lock.token !== this.token) { this.owner = false; this.blockReason = 'ownerLost'; throw new ReviewError('ownerLost'); }
+	}
+	/**
+	 * True only when the recorded writer is provably gone. A live process, an unreadable or
+	 * unrecognized lock and any other doubt answer false. It observes; it never takes the lock.
+	 */
+	writerExited(): boolean {
+		if (this.owner) { return false; }
+		try {
+			const lock = JSON.parse(this.readOptional(this.file('review-writer.lock')) || 'null');
+			if (!lock || !Number.isSafeInteger(lock.pid) || lock.pid <= 0 || typeof lock.token !== 'string') { return false; }
+			try { runtimeProcess.kill(lock.pid, 0); return false; }
+			catch (error) { return (error as { code?: string }).code === 'ESRCH'; }
+		} catch { return false; }
 	}
 	/** Explicit recovery only: a live/ambiguous PID or age never permits taking a lock. */
 	async recoverWriter(): Promise<boolean> {
@@ -164,6 +210,7 @@ export class ReviewStore {
 		this.decodedBlobs.clear(); this.materializedBytes = 0;
 		this.state = this.decode(raw) as ReviewState;
 		this.validate(this.state);
+		this.forgetUnused(this.decodedBlobs);
 	}
 	private validate(state: ReviewState): void {
 		const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
@@ -198,13 +245,22 @@ export class ReviewStore {
 		if (obj.kind === 'text') {
 			const ref = obj.contentRef as { algorithm?: unknown; digest?: unknown } | undefined;
 			if (!ref || ref.algorithm !== 'sha256' || typeof ref.digest !== 'string' || !/^[a-f0-9]{64}$/.test(ref.digest)) { throw new ReviewError('invalidSnapshot'); }
-			const cached = this.decodedBlobs.has(ref.digest);
-			const text = cached ? this.decodedBlobs.get(ref.digest)! : this.readOptional(this.file(`review-blobs/v1/${ref.digest}.txt`));
-			if (text === null || this.hash(text) !== ref.digest || BufferImpl.byteLength(text, 'utf8') !== obj.byteLength) { throw new ReviewError('invalidSnapshot'); }
-			if (!cached) {
-				this.materializedBytes += BufferImpl.byteLength(text, 'utf8');
+			// Reading and hashing every snapshot on each reload blocks the Extension Host; a blob
+			// already verified is reused while its file identity (size, mtime, inode) is unchanged.
+			let text: string | null | undefined = this.trustedBlob(ref.digest);
+			if (text === undefined) {
+				text = this.readOptional(this.blobFile(ref.digest));
+				if (text === null || this.hash(text) !== ref.digest) { throw new ReviewError('invalidSnapshot'); }
+				this.rememberBlob(ref.digest, text);
+			}
+			// A text read back with its digest verified is valid UTF-8 by construction of readOptional.
+			let identity = this.textDigests.get(text);
+			if (!identity || identity.digest !== ref.digest) { identity = { digest: ref.digest, size: BufferImpl.byteLength(text, 'utf8') }; this.textDigests.set(text, identity); }
+			if (identity.size !== obj.byteLength) { throw new ReviewError('invalidSnapshot'); }
+			if (!this.decodedBlobs.has(ref.digest)) {
+				this.materializedBytes += identity.size;
 				if (this.materializedBytes > (this.options.maxMaterializedBytes ?? 64 * 1024 * 1024)) { throw new ReviewError('storeBudgetExceeded'); }
-				this.decodedBlobs.set(ref.digest, text);
+				this.decodedBlobs.add(ref.digest);
 			}
 			return { kind: 'text', text };
 		}
@@ -219,21 +275,33 @@ export class ReviewStore {
 		const obj = value as Record<string, unknown>;
 		if (obj.kind === 'text') {
 			if (typeof obj.text !== 'string') { throw new ReviewError('invalidSnapshot'); }
-			if (BufferImpl.from(obj.text, 'utf8').toString('utf8') !== obj.text) { throw new ReviewError('unsupportedEncoding'); }
-			const digest = this.hash(obj.text)!;
-			const size = BufferImpl.byteLength(obj.text, 'utf8');
+			// Encoding validity, digest and size depend only on the text, so they are computed once per text.
+			let identity = this.textDigests.get(obj.text);
+			if (!identity) {
+				if (BufferImpl.from(obj.text, 'utf8').toString('utf8') !== obj.text) { throw new ReviewError('unsupportedEncoding'); }
+				identity = { digest: this.hash(obj.text)!, size: BufferImpl.byteLength(obj.text, 'utf8') };
+				this.textDigests.set(obj.text, identity);
+			}
+			const { digest, size } = identity;
+			if (identity.eol === undefined) {
+				const crlf = obj.text.includes('\r\n');
+				identity.eol = /\r(?!\n)/.test(obj.text) || crlf && obj.text.replace(/\r\n/g, '').includes('\n') ? 'mixed' : crlf ? 'CRLF' : obj.text.includes('\n') ? 'LF' : 'none';
+			}
 			if (size > (this.options.maxBlobBytes ?? 2 * 1024 * 1024)) { throw new ReviewError('storeBudgetExceeded'); }
 			if (!this.encodedBlobs.has(digest)) {
 				this.encodedBlobs.add(digest); this.encodedBytes += size;
 				if (this.encodedBytes > (this.options.maxMaterializedBytes ?? 64 * 1024 * 1024)) { throw new ReviewError('storeBudgetExceeded'); }
 			}
-			const file = this.file(`review-blobs/v1/${digest}.txt`);
+			const file = this.blobFile(digest);
 			this.options.fault?.('blob'); this.assertRegular(file);
-			try { const fd = fs.openSync(file, 'wx', 0o600); try { fs.writeFileSync(fd, obj.text, 'utf8'); fs.fsyncSync(fd); } finally { fs.closeSync(fd); } }
-			catch (error) { if ((error as { code?: string }).code !== 'EEXIST' || this.readOptional(file) !== obj.text) { throw error; } }
-			const crlf = obj.text.includes('\r\n');
-			const eol = /\r(?!\n)/.test(obj.text) || crlf && obj.text.replace(/\r\n/g, '').includes('\n') ? 'mixed' : crlf ? 'CRLF' : obj.text.includes('\n') ? 'LF' : 'none';
-			return { kind: 'text', contentRef: { algorithm: 'sha256', digest }, byteLength: BufferImpl.byteLength(obj.text, 'utf8'), encoding: 'utf8', bom: obj.text.startsWith('\uFEFF'), eol, finalNewline: obj.text.endsWith('\n') };
+			// The first reference in this instance writes the blob or compares an existing one byte
+			// for byte. Later updates only confirm that the verified file is still the same.
+			if (this.trustedBlob(digest) !== obj.text) {
+				try { const fd = fs.openSync(file, 'wx', 0o600); try { fs.writeFileSync(fd, obj.text, 'utf8'); fs.fsyncSync(fd); } finally { fs.closeSync(fd); } }
+				catch (error) { if ((error as { code?: string }).code !== 'EEXIST' || this.readOptional(file) !== obj.text) { throw error; } }
+				this.rememberBlob(digest, obj.text);
+			}
+			return { kind: 'text', contentRef: { algorithm: 'sha256', digest }, byteLength: size, encoding: 'utf8', bom: obj.text.startsWith('\uFEFF'), eol: identity.eol, finalNewline: obj.text.endsWith('\n') };
 		}
 		const result: Record<string, unknown> = {};
 		for (const [key, item] of Object.entries(obj)) { if (['__proto__', 'constructor', 'prototype'].includes(key)) { throw new ReviewError('invalidReviewState'); } result[key] = this.encode(item, depth + 1); }
@@ -271,6 +339,7 @@ export class ReviewStore {
 		this.encodedBlobs.clear(); this.encodedBytes = 0;
 		const encoded = JSON.stringify(this.encode(next)) + '\n';
 		if (BufferImpl.byteLength(encoded, 'utf8') > (this.options.maxStateBytes ?? 16 * 1024 * 1024)) { throw new ReviewError('storeBudgetExceeded'); }
+		this.forgetUnused(this.encodedBlobs);
 		const old = this.readOptional(this.file('review-state.v1.json'));
 		if (old !== null) { this.atomic(this.file('review-state.v1.json.prev'), old); }
 		this.atomic(this.file('review-state.v1.json'), encoded);
@@ -297,9 +366,51 @@ export class ReviewStore {
 			if (this.state.legacyProjection.phase === 'pending') { throw new ReviewError('legacyProjectionPending'); }
 			const disk = this.readOptional(this.file('review-state.v1.json'));
 			if (disk !== null && JSON.parse(disk).generation !== this.state.generation) { this.blockReason = 'stateChanged'; throw new ReviewError('stateChanged'); }
-			const next = copyReview(this.state); mutator(next); next.generation = this.state.generation + 1;
-			next.legacyProjection = { phase: 'pending', observedHash: this.hash(this.readOptional(this.file('status.json'))), targetHash: this.hash(this.projection(next)), targetGeneration: next.generation };
-			this.writeCanonical(next); this.recoverProjection();
+			const next = copyReview(this.state); mutator(next);
+			// Ownership and generation were just proven; an unchanged draft has nothing to persist.
+			if (disk !== null && sameValue(next, this.state)) { return; }
+			next.generation = this.state.generation + 1;
+			const observedHash = this.hash(this.readOptional(this.file('status.json'))), targetHash = this.hash(this.projection(next));
+			// The two-phase projection exists to survive a crash between the canonical state and
+			// status.json. When status.json already holds the target there is no second write to protect.
+			next.legacyProjection = { phase: observedHash === targetHash ? 'complete' : 'pending', observedHash, targetHash, targetGeneration: next.generation };
+			this.writeCanonical(next);
+			if (next.legacyProjection.phase === 'pending') { this.recoverProjection(); }
+		});
+		this.chain = work.catch(() => undefined);
+		return work;
+	}
+	/**
+	 * Removes snapshot copies that no canonical, previous or backed-up state mentions. It runs in the
+	 * update queue, so no draft of this writer can reference a blob while it is being collected.
+	 * Any unreadable reference source cancels the collection: unknown references keep every blob.
+	 */
+	async collectUnreferencedBlobs(graceMs = 10 * 60 * 1000): Promise<number> {
+		const work = this.chain.then(() => {
+			this.assertOwner();
+			if (this.state.legacyProjection.phase === 'pending') { throw new ReviewError('legacyProjectionPending'); }
+			const referenced = new Set<string>();
+			const collect = (file: string) => { for (const match of (this.readOptional(file) ?? '').matchAll(/[a-f0-9]{64}/g)) { referenced.add(match[0]); } };
+			collect(this.file('review-state.v1.json')); collect(this.file('review-state.v1.json.prev'));
+			const backups = this.file('review-migration-backups');
+			let names: string[] = [];
+			try { const stat = fs.lstatSync(backups); if (!stat.isDirectory() || stat.isSymbolicLink()) { throw new ReviewError('unsupportedStore'); } names = fs.readdirSync(backups); }
+			catch (error) { if ((error as { code?: string }).code !== 'ENOENT') { throw error; } }
+			for (const name of names) {
+				const directory = path.join(backups, name), stat = fs.lstatSync(directory);
+				if (stat.isSymbolicLink()) { throw new ReviewError('unsupportedStore'); }
+				if (stat.isDirectory()) { collect(path.join(directory, 'review-state.v1.json')); collect(path.join(directory, 'review-state.v1.json.prev')); }
+			}
+			const directory = this.file('review-blobs/v1'), now = Date.now();
+			let removed = 0;
+			for (const name of fs.readdirSync(directory)) {
+				const digest = /^([a-f0-9]{64})\.txt$/.exec(name)?.[1];
+				if (!digest || referenced.has(digest)) { continue; }
+				const file = path.join(directory, name), stat = fs.lstatSync(file);
+				if (!stat.isFile() || stat.isSymbolicLink() || now - stat.mtimeMs <= graceMs) { continue; }
+				fs.unlinkSync(file); this.knownBlobs.delete(digest); removed += 1;
+			}
+			return removed;
 		});
 		this.chain = work.catch(() => undefined);
 		return work;

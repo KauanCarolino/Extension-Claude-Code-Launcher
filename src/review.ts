@@ -1,7 +1,6 @@
 import { diffLines, groupsOf, groupSignature, joinText, splitText } from './diff';
 import { RawEntry, Snapshot, Status } from './logic';
-declare const require: (id: string) => any;
-const fingerprintHash = require('node:crypto');
+import * as fingerprintHash from 'node:crypto';
 
 export type ReviewResolution = Status | 'mixed';
 export type ReviewContent = { kind: 'absent' } | { kind: 'text'; text: string } | { kind: 'unavailable'; reason: string };

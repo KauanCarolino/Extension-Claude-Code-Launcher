@@ -14,7 +14,7 @@ const cli = path.join(root, 'node_modules/@vscode/vsce/vsce');
 async function fixture(t) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'launcher-package-'));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
-  for (const name of ['package.json', '.vscodeignore', 'tsconfig.json', 'LICENSE', 'README.md']) {
+  for (const name of ['package.json', '.vscodeignore', 'tsconfig.json', 'LICENSE', 'README.md', 'CHANGELOG.md']) {
     await fs.copyFile(path.join(root, name), path.join(directory, name));
   }
   for (const name of ['media', 'hooks', 'scripts']) {
@@ -48,6 +48,7 @@ test('package compila uma árvore limpa e exclui documentos locais e testes', as
   const report = await verifyPackage(artifact, directory);
   assert.equal(report.runtimeMatchesSource, true);
   assert(report.entries.every(entry => !/\/(docs|scripts|test|node_modules)\//.test(entry.name)));
+  assert(report.entries.some(entry => entry.name === 'extension/changelog.md'));
   assert.match(await fs.readFile(path.join(directory, 'out/extension.js'), 'utf8'), /fresh-package-sentinel/);
 });
 

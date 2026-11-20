@@ -86,7 +86,7 @@ function fixture(options = {}) {
     clearTimeout(timer) { clearTimeout(timer); timers.delete(timer); },
     require: id => {
       if (id === 'vscode') return vscode;
-      if (id === './changes') return { registerChanges() {} };
+      if (id === './changes') return { registerChanges() { return options.changesController; } };
       if (id === './inline') return { registerInline() {} };
       if (id === './sessions') return { sessionsDir: () => '/fixture/sessions',
         listSessionsAsync: options.listSessions || (async () => ({ sessions: [], partial: false })) };
@@ -113,6 +113,7 @@ function fixture(options = {}) {
   };
   return { calls, errors, messages, updates, disposed, createView, settings, changeSetting,
     command: name => commands.get('claude-code-launcher.' + name)(),
+    deactivate: () => module.exports.deactivate(),
     dispose() { module.exports.deactivate(); context.subscriptions.forEach(item => item.dispose()); timers.forEach(clearTimeout); } };
 }
 
@@ -215,4 +216,23 @@ test('already matching preferences are observed without later overriding a human
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(f.settings.get('claudeCode.preferredLocation').globalValue, 'sidebar');
   assert.equal(f.updates.length, 0);
+});
+
+test('deactivate returns the controller disposal so the editor waits for the review lock to be released', async t => {
+  let release, disposeCalls = 0;
+  const disposal = new Promise(resolve => { release = resolve; });
+  const changesController = { dispose() { disposeCalls++; }, whenDisposed: () => disposal };
+  const f = fixture({ changesController }); t.after(() => f.dispose());
+  const result = f.deactivate();
+  assert.equal(disposeCalls, 1); assert.equal(typeof result?.then, 'function');
+  let settled = false; result.then(() => { settled = true; });
+  await new Promise(resolve => setTimeout(resolve, 20)); assert.equal(settled, false);
+  release(); await result; assert.equal(settled, true);
+  // A second deactivation has nothing left to wait for and does not dispose again.
+  assert.equal(f.deactivate(), undefined); assert.equal(disposeCalls, 1);
+});
+
+test('deactivate without a change controller completes synchronously', t => {
+  const f = fixture(); t.after(() => f.dispose());
+  assert.equal(f.deactivate(), undefined);
 });
