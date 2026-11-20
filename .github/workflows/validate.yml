@@ -14,7 +14,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -26,3 +26,36 @@ jobs:
       - run: npm test
       - run: npm run test:package
       - run: npm audit --audit-level=moderate
+      - name: Build candidate VSIX
+        run: npm run package -- --out "${{ runner.temp }}/launcher-candidate.vsix" --no-dependencies
+      - name: Verify candidate bytes against source
+        run: npm run verify:package -- "${{ runner.temp }}/launcher-candidate.vsix"
+      - name: Run installed VSIX and real capture chain (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm run test:host -- --vsix "${{ runner.temp }}/launcher-candidate.vsix" --download-version 1.94.0 --report-dir "${{ runner.temp }}/launcher-host-evidence"
+      - name: Run installed VSIX and real capture chain (macOS / Windows)
+        if: runner.os != 'Linux'
+        run: npm run test:host -- --vsix "${{ runner.temp }}/launcher-candidate.vsix" --download-version 1.94.0 --report-dir "${{ runner.temp }}/launcher-host-evidence"
+      - name: Run ownership and reload contracts (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm run test:host:contracts -- multi-window --vsix "${{ runner.temp }}/launcher-candidate.vsix" --download-version 1.94.0 --report-dir "${{ runner.temp }}/launcher-contract-evidence"
+      - name: Run lifecycle contracts (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm run test:host:contracts -- lifecycle --vsix "${{ runner.temp }}/launcher-candidate.vsix" --download-version 1.94.0 --report-dir "${{ runner.temp }}/launcher-contract-evidence"
+      - name: Run ownership and reload contracts (macOS / Windows)
+        if: runner.os != 'Linux'
+        run: npm run test:host:contracts -- multi-window --vsix "${{ runner.temp }}/launcher-candidate.vsix" --download-version 1.94.0 --report-dir "${{ runner.temp }}/launcher-contract-evidence"
+      - name: Run lifecycle contracts (macOS / Windows)
+        if: runner.os != 'Linux'
+        run: npm run test:host:contracts -- lifecycle --vsix "${{ runner.temp }}/launcher-candidate.vsix" --download-version 1.94.0 --report-dir "${{ runner.temp }}/launcher-contract-evidence"
+      - name: Retain candidate and synthetic evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: installed-vsix-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/launcher-candidate.vsix
+            ${{ runner.temp }}/launcher-host-evidence/
+            ${{ runner.temp }}/launcher-contract-evidence/
+          retention-days: 7
+          if-no-files-found: warn

@@ -247,8 +247,30 @@ export interface TranscriptMeta {
 	requests: Map<string, RequestInfo>;
 }
 
+export interface TranscriptMetaOptions {
+	toolUseIds?: readonly string[];
+	cache?: boolean;
+}
+export const MAX_TRANSCRIPT_META_TOOL_IDS = 256;
+function metaSelection(options: TranscriptMetaOptions | undefined): { ids?: Set<string>; cache: boolean } | undefined {
+	if (options === undefined) { return { cache: true }; }
+	if (options === null || typeof options !== 'object' || Array.isArray(options)
+		|| Object.keys(options).some(key => key !== 'toolUseIds' && key !== 'cache')
+		|| options.cache !== undefined && typeof options.cache !== 'boolean') { return undefined; }
+	if (options.toolUseIds === undefined) { return { cache: options.cache !== false }; }
+	if (!Array.isArray(options.toolUseIds) || options.toolUseIds.length > MAX_TRANSCRIPT_META_TOOL_IDS
+		|| Array.from(options.toolUseIds).some(id => typeof id !== 'string' || !/^[^\u0000-\u001f\u007f]{1,256}$/.test(id))) { return undefined; }
+	// Selected metadata is intentionally ephemeral, even when the legacy full-transcript cache is populated.
+	return { ids: new Set(options.toolUseIds), cache: false };
+}
+function emptyTranscriptMeta(): TranscriptMeta { return { reasons: new Map(), requests: new Map() }; }
+
 /** Explicação e pedido de cada chamada de ferramenta, numa só passada pelo texto do transcript. */
-export function parseTranscriptMeta(text: string, transcriptPath: string): TranscriptMeta {
+export function parseTranscriptMeta(text: string, transcriptPath: string, options?: TranscriptMetaOptions): TranscriptMeta {
+	const selection = metaSelection(options);
+	return selection ? parseSelectedTranscriptMeta(text, transcriptPath, selection.ids) : emptyTranscriptMeta();
+}
+function parseSelectedTranscriptMeta(text: string, transcriptPath: string, ids?: ReadonlySet<string>): TranscriptMeta {
 	const reasons = new Map<string, string>();
 	const requests = new Map<string, RequestInfo>();
 	let texts: string[] = [];
@@ -280,7 +302,7 @@ export function parseTranscriptMeta(text: string, transcriptPath: string): Trans
 				texts.push(block.text.trim());
 			} else if (block.type === 'thinking' && typeof block.thinking === 'string' && block.thinking.trim()) {
 				progress = block.thinking.trim();
-			} else if (block.type === 'tool_use' && typeof block.id === 'string') {
+			} else if (block.type === 'tool_use' && typeof block.id === 'string' && (!ids || ids.has(block.id))) {
 				const reason = texts.length > 0 ? texts.join('\n\n') : progress;
 				reasons.set(block.id, reason.length > MAX_REASON_CHARS ? `${reason.slice(0, MAX_REASON_CHARS)}…` : reason);
 				if (current) {
@@ -294,19 +316,50 @@ export function parseTranscriptMeta(text: string, transcriptPath: string): Trans
 
 const metaCache = new Map<string, { size: number; mtime: number; meta: TranscriptMeta }>();
 const MAX_META_CACHE = 20;
+let metaCacheEpoch = 0;
+
+function metadataRoots(roots: readonly string[]): string[] {
+	if (!Array.isArray(roots) || roots.length > 128 || roots.some(root => typeof root !== 'string' || root.length < 1 || root.length > 8192 || /[\u0000-\u001f\u007f]/.test(root))) { return []; }
+	return roots.filter(root => (/^(?:[A-Za-z]:[\\/]|\\\\)/.test(root) ? path.win32 : path.posix).isAbsolute(root));
+}
+function metadataUnderRoot(file: string, root: string): boolean {
+	const paths = /^(?:[A-Za-z]:[\\/]|\\\\)/.test(root) ? path.win32 : path.posix;
+	if (!paths.isAbsolute(file)) { return false; }
+	const normalizedRoot = paths.normalize(root), normalizedFile = paths.normalize(file), relative = paths.relative(normalizedRoot, normalizedFile);
+	if (!relative || relative === '..' || relative.startsWith('..' + paths.sep) || paths.isAbsolute(relative)) { return false; }
+	// Win32.relative folds case; verify the reconstructed path without folding directory/file names.
+	const identity = (value: string) => value.replace(/^[A-Z]:/, drive => drive.toLowerCase());
+	return identity(paths.join(normalizedRoot, relative)) === identity(normalizedFile);
+}
+/** Counts transcript cache entries, not prompts/reasons. Performs no filesystem IO. */
+export function transcriptMetadataCacheCount(roots: readonly string[]): number {
+	const allowed = metadataRoots(roots);
+	return [...metaCache.keys()].filter(file => allowed.some(root => metadataUnderRoot(file, root))).length;
+}
+/** Explicit purge/disposal only. Existing saved metadata and other project caches stay untouched. */
+export function clearTranscriptMetadataForRoots(roots: readonly string[]): number {
+	const allowed = metadataRoots(roots); if (!allowed.length) { return 0; }
+	metaCacheEpoch += 1; // A read started before invalidation must not repopulate the global cache afterwards.
+	let removed = 0;
+	for (const file of metaCache.keys()) { if (allowed.some(root => metadataUnderRoot(file, root))) { metaCache.delete(file); removed += 1; } }
+	return removed;
+}
 
 /**
  * Lê o fim do transcript sem travar o editor. Guarda o resultado e só relê
  * quando o arquivo muda. Transcript inexistente devolve mapas vazios.
  */
-export async function readTranscriptMeta(transcriptPath: string): Promise<TranscriptMeta> {
+export async function readTranscriptMeta(transcriptPath: string, options?: TranscriptMetaOptions): Promise<TranscriptMeta> {
+	const selection = metaSelection(options), epoch = metaCacheEpoch;
+	if (!selection || selection.ids?.size === 0 || typeof transcriptPath !== 'string' || transcriptPath.length < 1 || transcriptPath.length > 8192 || /[\u0000-\u001f\u007f]/.test(transcriptPath)) { return emptyTranscriptMeta(); }
 	let stat: { size: number; mtimeMs: number };
 	try {
 		stat = await fs.promises.stat(transcriptPath);
 	} catch {
-		return { reasons: new Map(), requests: new Map() };
+		return emptyTranscriptMeta();
 	}
-	const cached = metaCache.get(transcriptPath);
+	if (!Number.isSafeInteger(stat.size) || stat.size < 0 || !Number.isFinite(stat.mtimeMs)) { return emptyTranscriptMeta(); }
+	const cached = selection.cache ? metaCache.get(transcriptPath) : undefined;
 	if (cached && cached.size === stat.size && cached.mtime === stat.mtimeMs) {
 		return cached.meta;
 	}
@@ -315,19 +368,19 @@ export async function readTranscriptMeta(transcriptPath: string): Promise<Transc
 	try {
 		handle = await fs.promises.open(transcriptPath, 'r');
 		const start = Math.max(0, stat.size - REASON_TAIL_BYTES);
-		const buffer = Buffer.alloc(stat.size - start);
-		await handle.read(buffer, 0, stat.size - start, start);
-		text = buffer.toString('utf8');
+		const buffer = ByteBuffer.alloc(stat.size - start);
+		const { bytesRead } = await handle.read(buffer, 0, stat.size - start, start);
+		text = buffer.toString('utf8', 0, bytesRead);
 	} catch {
-		return { reasons: new Map(), requests: new Map() };
+		return emptyTranscriptMeta();
 	} finally {
 		await handle?.close().catch(() => undefined);
 	}
-	const meta = parseTranscriptMeta(text, transcriptPath);
-	metaCache.delete(transcriptPath);
-	metaCache.set(transcriptPath, { size: stat.size, mtime: stat.mtimeMs, meta });
-	while (metaCache.size > MAX_META_CACHE) {
-		metaCache.delete(metaCache.keys().next().value as string);
+	const meta = parseSelectedTranscriptMeta(text, transcriptPath, selection.ids);
+	if (selection.cache && epoch === metaCacheEpoch) {
+		metaCache.delete(transcriptPath);
+		metaCache.set(transcriptPath, { size: stat.size, mtime: stat.mtimeMs, meta });
+		while (metaCache.size > MAX_META_CACHE) { metaCache.delete(metaCache.keys().next().value as string); }
 	}
 	return meta;
 }

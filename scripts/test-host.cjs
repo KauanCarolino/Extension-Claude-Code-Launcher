@@ -3,44 +3,11 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
-const { spawn } = require('node:child_process');
+const { parseArguments, hostEnvironment, provisionEditor, cliScript, editorFixtureArguments, run,
+  createEvidenceDirectory, exportEvidence } = require('./host-tooling.cjs');
 const { verifyPackage } = require('./verify-package.cjs');
 
 const root = path.resolve(__dirname, '..');
-
-function parseArguments(args) {
-  const result = { editor: 'code', keep: false };
-  while (args.length) {
-    const name = args.shift();
-    if (name === '--keep') result.keep = true;
-    else if (['--editor', '--executable', '--cli', '--vsix'].includes(name) && args.length) {
-      result[name.slice(2)] = args.shift();
-    } else throw new Error('Argumento inválido: ' + name);
-  }
-  if (!['code', 'cursor'].includes(result.editor)) throw new Error('Editor deve ser code ou cursor.');
-  return result;
-}
-
-function run(executable, args, env, timeout = 120000) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(executable, args, { cwd: root, env, shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
-    let output = '';
-    let timedOut = false;
-    const append = data => { output = (output + data.toString()).slice(-128000); };
-    child.stdout.on('data', append);
-    child.stderr.on('data', append);
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill('SIGTERM');
-      setTimeout(() => child.kill('SIGKILL'), 5000).unref();
-    }, timeout);
-    child.on('error', error => { clearTimeout(timer); reject(error); });
-    child.on('exit', (code, signal) => {
-      clearTimeout(timer);
-      resolve({ code, signal, timedOut, output });
-    });
-  });
-}
 
 async function seedWorkspace(workspace) {
   const cases = [
@@ -70,26 +37,22 @@ async function seedWorkspace(workspace) {
 
 async function main() {
   const options = parseArguments(process.argv.slice(2));
-  const application = options.editor === 'cursor' ? 'Cursor' : 'Visual Studio Code';
-  const app = '/Applications/' + application + '.app/Contents';
-  const executable = options.executable || (process.platform === 'darwin'
-    ? path.join(app, 'MacOS', options.editor === 'cursor' ? 'Cursor' : 'Code') : undefined);
-  if (!executable) throw new Error('Informe --executable com o executável do editor instalado.');
-  await fs.access(executable);
+  const fixtureArguments = editorFixtureArguments(process.platform, Boolean(options['download-version']));
+  const editorSandboxPolicy = fixtureArguments.length ? 'disabled-for-downloaded-linux-synthetic-fixture' : 'editor-default';
   const temporary = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'launcher-host-')));
   const workspace = path.join(temporary, 'workspace');
   const profile = path.join(temporary, 'profile');
   const extensions = path.join(temporary, 'extensions');
   const reportPath = path.join(temporary, 'result.json');
-  const env = { ...process.env,
-    CLAUDE_CONFIG_DIR: path.join(temporary, 'claude'),
-    LAUNCHER_HOST_REPORT: reportPath,
-    LAUNCHER_HOST_WORKSPACE: workspace,
-  };
-  delete env.ELECTRON_RUN_AS_NODE;
-  delete env.NODE_OPTIONS;
-  delete env.VSCODE_IPC_HOOK_CLI;
+  let reportDirectory;
+  let passed = false;
+  let env;
   try {
+    if (options['report-dir']) reportDirectory = await createEvidenceDirectory(options['report-dir']);
+    env = hostEnvironment(temporary, workspace, reportPath);
+    const executable = await provisionEditor(options, temporary);
+    await fs.access(executable);
+    if (options['download-version']) env.LAUNCHER_HOST_EXPECTED_VERSION = options['download-version'];
     for (const dir of [workspace, path.join(profile, 'User'), extensions, env.CLAUDE_CONFIG_DIR]) {
       await fs.mkdir(dir, { recursive: true });
     }
@@ -105,43 +68,80 @@ async function main() {
     let developmentPath = root;
     if (options.vsix) {
       const artifact = path.resolve(options.vsix);
-      const verified = await verifyPackage(artifact);
+      const verified = await verifyPackage(artifact, options['source-root'] ? path.resolve(options['source-root']) : root);
+      await fs.writeFile(path.join(temporary, 'package-verification.json'), JSON.stringify(verified, null, 2));
       env.LAUNCHER_HOST_ARTIFACT_SHA256 = verified.sha256;
-      const cli = options.cli || (process.platform === 'darwin' ? path.join(app, 'Resources/app/out/cli.js') : undefined);
-      if (!cli) throw new Error('Modo --vsix exige --cli com o cli.js deste editor.');
+      env.LAUNCHER_HOST_ARTIFACT_VERSION = verified.version;
+      env.LAUNCHER_HOST_SOURCE_VERIFICATION = options['source-root'] ? 'explicit-source-snapshot' : 'current-workspace';
+      const hook = verified.entries.find(entry => entry.name === 'extension/hooks/record-change.js');
+      if (!hook) throw new Error('VSIX verificado não contém o hook de captura.');
+      env.LAUNCHER_HOST_HOOK_SHA256 = hook.sha256;
+      // Invoke the editor's own CLI JS through Electron on all three OSes. This
+      // avoids passing a Windows .cmd or any artifact/profile path to a shell.
+      const cli = options.cli ? path.resolve(options.cli) : cliScript(executable);
+      await fs.access(cli);
       const installation = await run(executable, [
         cli, '--user-data-dir', profile, '--extensions-dir', extensions,
         '--install-extension', artifact, '--force', '--do-not-sync',
-      ], { ...env, ELECTRON_RUN_AS_NODE: '1' });
-      if (installation.code !== 0) throw new Error('Instalação isolada falhou: ' + installation.output.slice(-4000));
+      ], { ...env, ELECTRON_RUN_AS_NODE: '1' }, { cwd: root });
+      await fs.writeFile(path.join(temporary, 'installation.log'), installation.output);
+      if (installation.code !== 0 || installation.timedOut) throw new Error('Instalação isolada falhou: ' + installation.output.slice(-4000));
       developmentPath = path.join(temporary, 'test-driver');
       await fs.mkdir(developmentPath);
       await fs.writeFile(path.join(developmentPath, 'package.json'), JSON.stringify({
         name: 'launcher-test-driver', publisher: 'local', version: '1.0.0',
         engines: { vscode: '^1.94.0' }, main: './index.js', activationEvents: ['*'],
+        contributes: { notebooks: [{ type: 'launcher-contract-notebook', displayName: 'Synthetic contract notebook', selector: [{ filenamePattern: '*.launcher-nb' }] }] },
       }));
       await fs.writeFile(path.join(developmentPath, 'index.js'), 'exports.activate = () => {};\n');
     }
     // This is a trusted synthetic fixture, not a Restricted Mode validation.
     const execution = await run(executable, [
+      ...fixtureArguments,
       '--new-window', '--disable-gpu', '--skip-welcome', '--skip-release-notes',
       '--disable-workspace-trust', '--disable-telemetry',
       '--user-data-dir=' + profile, '--extensions-dir=' + extensions,
       '--extensionDevelopmentPath=' + developmentPath,
       '--extensionTestsPath=' + path.join(root, 'test/host/suite.cjs'), workspace,
-    ], env);
+    ], env, { cwd: root });
     await fs.writeFile(path.join(temporary, 'host.log'), execution.output);
     let report;
     try { report = JSON.parse(await fs.readFile(reportPath, 'utf8')); } catch {}
-    if (execution.code !== 0 || execution.timedOut || !report || report.status !== 'passed') {
+    if (execution.code !== 0 || execution.timedOut || !report || report.status !== 'passed'
+      || (options.vsix && (report.artifactSha256 !== env.LAUNCHER_HOST_ARTIFACT_SHA256
+        || report.extensionVersion !== env.LAUNCHER_HOST_ARTIFACT_VERSION
+        || report.captureIntegration?.stage !== 'rejected-and-persisted'))
+      || (options['download-version'] && report.vscode !== options['download-version'])) {
       options.keep = true;
       throw new Error('Host não aprovado: ' + JSON.stringify({
         exitCode: execution.code, timedOut: execution.timedOut, report: report ?? null,
         logTail: execution.output.slice(-2500),
       }));
     }
+    passed = true;
     console.log(JSON.stringify(report, null, 2));
+  } catch (error) {
+    options.keep = true;
+    await fs.writeFile(path.join(temporary, 'runner-failure.json'), JSON.stringify({
+      status: 'failed', error: error.message, platform: process.platform, arch: process.arch,
+      runnerNode: process.version, requestedEditorVersion: options['download-version'] ?? null,
+      editorSandboxPolicy,
+      artifactSha256: env?.LAUNCHER_HOST_ARTIFACT_SHA256 ?? null,
+      source: 'synthetic fixtures; no Claude authentication, AI or paid service',
+    }, null, 2));
+    throw error;
   } finally {
+    if (reportDirectory) {
+      // Only synthetic evidence is exported. Never copy the profile or caller's environment.
+      const summary = await exportEvidence(temporary, reportDirectory, {
+        schemaVersion: 1, status: passed ? 'passed' : 'failed', runnerNode: process.version,
+        platform: process.platform, arch: process.arch,
+        editorSandboxPolicy,
+        requestedEditorVersion: options['download-version'] ?? null,
+        artifactSha256: env?.LAUNCHER_HOST_ARTIFACT_SHA256 ?? null,
+      });
+      console.log('Evidências desta execução: ' + JSON.stringify(summary));
+    }
     if (options.keep) console.log('Evidências do perfil isolado: ' + temporary);
     else await fs.rm(temporary, { recursive: true, force: true });
   }

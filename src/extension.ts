@@ -119,17 +119,21 @@ class LauncherViewProvider implements vscode.WebviewViewProvider, vscode.Disposa
 		const nonce = createNonce();
 		const script = webview.asWebviewUri(vscode.Uri.joinPath(media, 'home.js'));
 		const style = webview.asWebviewUri(vscode.Uri.joinPath(media, 'home.css'));
+		const base = webview.asWebviewUri(vscode.Uri.joinPath(media, 'base.css'));
+		const codicons = webview.asWebviewUri(vscode.Uri.joinPath(media, 'codicons', 'codicon.css'));
 		return `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
 	<meta charset="UTF-8" />
-	<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';" />
+	<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; font-src ${webview.cspSource}; script-src 'nonce-${nonce}';" />
 	<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+	<link rel="stylesheet" href="${codicons}" />
+	<link rel="stylesheet" href="${base}" />
 	<link rel="stylesheet" href="${style}" />
 	<title>Claude Code</title>
 </head>
 <body>
-	<div id="root"><p class="muted">Carregando…</p></div>
+	<div id="root"><p class="loading muted"><span class="codicon codicon-loading codicon-modifier-spin"></span> Carregando…</p></div>
 	<script nonce="${nonce}" src="${script}"></script>
 </body>
 </html>`;
@@ -220,6 +224,7 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.commands.registerCommand('claude-code-launcher.install', () => installClaude()),
 		vscode.extensions.onDidChange(() => provider?.refresh()),
 		vscode.commands.registerCommand('claude-code-launcher.newTab', () => openClaude('tab')),
+		vscode.commands.registerCommand('claude-code-launcher.refreshSessions', () => provider?.refresh(0)),
 		vscode.window.tabGroups.onDidChangeTabs(() => provider?.refresh()),
 		vscode.window.tabGroups.onDidChangeTabGroups(() => provider?.refresh()),
 		vscode.window.tabGroups.onDidChangeTabs((event) => {
