@@ -3,6 +3,7 @@ import { DiffLine, diffLines, groupsOf, groupSignature } from './diff';
 import { DROP_REVIEW_COMMAND } from './changes';
 import { fileKey, RawEntry, Status } from './logic';
 import { ReviewDecisionRequest, SharedReview } from './review';
+import { blockedReviewResult, formatReviewItemResult, ReviewResultError } from './review-results';
 
 const CONFIG_SECTION = 'claudeCodeLauncher';
 const CONFIG_KEY = 'inlineChanges';
@@ -26,6 +27,8 @@ export interface EntrySource {
 /** Read-only projection; durable authority belongs to EntrySource. */
 interface Review {
 	base: string;
+	current: string;
+	hiddenBom: boolean;
 	revision: number;
 	file: string;
 	ids: string[];
@@ -219,14 +222,22 @@ class InlineChanges implements vscode.CodeLensProvider, vscode.Disposable {
 
 	private async decide(uri: string | undefined, request: ReviewDecisionRequest): Promise<void> {
 		const target = uri ? vscode.Uri.parse(uri) : vscode.window.activeTextEditor?.document.uri;
-		if (!target || target.scheme !== 'file') { return; }
+		if (!target) { return; }
+		if (target.scheme !== 'file') {
+			void vscode.window.showWarningMessage(formatReviewItemResult(blockedReviewResult('', [], request.action, 'unsupportedResource')));
+			return;
+		}
 		const review = this.source.getSharedReview(target.fsPath);
 		if (!review) { return; }
 		try {
 			await this.source.executeReviewDecision(target.fsPath, { ...request, revision: request.revision ?? review.revision });
 			this.applyAll();
-		} catch {
-			void vscode.window.showWarningMessage('A revisão não foi concluída. O arquivo pode ter mudado ou o registro/salvamento está pendente. Confira o painel Mudanças.');
+		} catch (error) {
+			const result = error instanceof ReviewResultError ? error.result : {
+				...blockedReviewResult(target.fsPath, review.ids, request.action, error),
+				outcome: 'failed' as const, content: 'unknown' as const, nextAction: 'reconcile' as const,
+			};
+			void vscode.window.showWarningMessage(formatReviewItemResult(result));
 		}
 	}
 
@@ -285,7 +296,7 @@ class InlineChanges implements vscode.CodeLensProvider, vscode.Disposable {
 			return [];
 		}
 		const last = Math.max(0, editor.document.lineCount - 1);
-		return groupsOf(diffLines(review.base, editor.document.getText()).lines)
+		return groupsOf(diffLines(review.base, review.current).lines)
 			.map((group) => Math.min(group.newStart, last));
 	}
 
@@ -341,10 +352,16 @@ class InlineChanges implements vscode.CodeLensProvider, vscode.Disposable {
 	private evaluate(document: vscode.TextDocument): Review | undefined {
 		const shared = this.source.getSharedReview(document.uri.fsPath);
 		if (!shared || shared.phase !== 'pending' || shared.base.kind === 'unavailable'
-			|| shared.expected.kind !== 'text' || shared.expected.text !== document.getText()) { return undefined; }
+			|| shared.expected.kind !== 'text') { return undefined; }
+		// TextDocument omits an encoding BOM. Keep full snapshot identity for the
+		// domain diff/signature; the executor still verifies actual persisted bytes.
+		const text = document.getText();
+		const hiddenBom = shared.expected.text.startsWith('\uFEFF') && !text.startsWith('\uFEFF');
+		const current = (hiddenBom ? '\uFEFF' : '') + text;
+		if (shared.expected.text !== current) { return undefined; }
 		const entries = this.source.getEntries();
 		const placeholder = (id: string): RawEntry => ({ id, file: shared.file, time: '', before: null, after: null });
-		return { base: shared.base.kind === 'text' ? shared.base.text : '', revision: shared.revision, file: shared.file, ids: [...shared.ids],
+		return { base: shared.base.kind === 'text' ? shared.base.text : '', current, hiddenBom, revision: shared.revision, file: shared.file, ids: [...shared.ids],
 			first: entries.find((entry) => entry.id === shared.firstId) ?? placeholder(shared.firstId),
 			last: entries.find((entry) => entry.id === shared.lastId) ?? placeholder(shared.lastId), reason: shared.reason };
 	}
@@ -352,7 +369,7 @@ class InlineChanges implements vscode.CodeLensProvider, vscode.Disposable {
 }
 
 function build(review: Review, document: vscode.TextDocument): Built {
-	const { lines } = diffLines(review.base, document.getText());
+	const { lines } = diffLines(review.base, review.current);
 	const language = document.languageId;
 	const head = hoverHeader(review);
 	const built: Built = {
@@ -417,7 +434,9 @@ function build(review: Review, document: vscode.TextDocument): Built {
 			let offset = 0;
 			for (const segment of line.segments ?? []) {
 				if (segment.changed && segment.text.trim()) {
-					built.words.push(new vscode.Range(lineIndex, offset, lineIndex, offset + segment.text.length));
+					const hidden = lineIndex === 0 && review.hiddenBom ? 1 : 0;
+					const start = Math.max(0, offset - hidden), end = Math.max(0, offset + segment.text.length - hidden);
+					if (end > start) { built.words.push(new vscode.Range(lineIndex, start, lineIndex, end)); }
 				}
 				offset += segment.text.length;
 			}

@@ -83,20 +83,24 @@ test('raw bytes are validated as UTF-8 and cursors use bytes instead of string u
 	assert.equal(parsed.sources[1].offset, Buffer.byteLength(first) + 2);
 });
 
-// Caminhos simulados são POSIX; no Windows o código monta os mesmos caminhos com "\".
+// Normaliza ambos os operandos: as fixtures também podem ser caminhos nativos do host.
 function virtualPaths(linkAt, denialAt) {
 	const posix = (file) => String(file).replace(/\\/g, '/');
 	return {
-		realpath: async (file) => { if (posix(file) === denialAt) { throw { code: 'EACCES' }; } return file; },
-		lstat: async (file) => ({ isSymbolicLink: () => posix(file) === linkAt, isFile: () => file.endsWith('.txt'), isDirectory: () => !file.endsWith('.txt') }),
+		realpath: async (file) => { if (posix(file) === posix(denialAt)) { throw { code: 'EACCES' }; } return file; },
+		lstat: async (file) => ({ isSymbolicLink: () => posix(file) === posix(linkAt), isFile: () => file.endsWith('.txt'), isDirectory: () => !file.endsWith('.txt') }),
 	};
 }
 test('resource and storage policies evaluate simulated scope and links without external effects', async () => {
-	assert.equal((await h.assessResourceScope('/other/a.txt', '/workspace', virtualPaths())).allowed, false);
-	assert.equal((await h.assessResourceScope('/workspace/a.txt', '/workspace', virtualPaths())).allowed, true);
-	assert.equal((await h.assessResourceScope('/workspace/a.txt', '/workspace', virtualPaths(undefined, '/workspace'))).allowed, false);
-	assert.equal((await h.assessStoragePath('/workspace/data/a.txt', '/workspace', virtualPaths('/workspace/data'))).code, 'unsafeStorageType');
-	assert.equal((await h.assessStoragePath('/workspace/data/a.txt', '/workspace', virtualPaths())).allowed, true);
+	const root = path.resolve(path.sep, 'workspace');
+	const file = path.join(root, 'a.txt');
+	const data = path.join(root, 'data');
+	const stored = path.join(data, 'a.txt');
+	assert.equal((await h.assessResourceScope(path.resolve(path.sep, 'other', 'a.txt'), root, virtualPaths())).allowed, false);
+	assert.equal((await h.assessResourceScope(file, root, virtualPaths())).allowed, true);
+	assert.equal((await h.assessResourceScope(file, root, virtualPaths(undefined, root))).allowed, false);
+	assert.equal((await h.assessStoragePath(stored, root, virtualPaths(data))).code, 'unsafeStorageType');
+	assert.equal((await h.assessStoragePath(stored, root, virtualPaths())).allowed, true);
 });
 
 test('blob digest mismatch never resolves a snapshot reference', () => {
@@ -180,4 +184,116 @@ test('bounded local reads resume a normal log, preserve a BOM blob and distingui
 	const blob = path.join(root, 'blob.txt');
 	fs.writeFileSync(blob, text);
 	assert.equal(await h.readVerifiedBlob(blob, root, hash), text);
+});
+
+function diagnostic(fields = {}) {
+	return { schemaVersion: 2, id: 'a'.repeat(32), kind: 'observation', phase: 'pre', stage: 'pending', code: 'capturePrepared',
+		contentCoverage: 'complete', observedAt: '2020-01-01T00:00:00.000Z', ...fields };
+}
+function diagnosticFixture(t) {
+	const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'launcher-diagnostics-')));
+	t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+	const directory = path.join(root, '.claude', 'launcher-changes');
+	fs.mkdirSync(directory, { recursive: true });
+	return { root, directory, put(event, text) {
+		const bucket = path.join(directory, ...h.CAPTURE_DIAGNOSTICS_DIR.split('/'), event.kind === 'completion' ? 'completions' : 'observations');
+		fs.mkdirSync(bucket, { recursive: true });
+		const file = path.join(bucket, h.captureDiagnosticFilename(event));
+		fs.writeFileSync(file, text ?? JSON.stringify(event)); return file;
+	} };
+}
+
+test('diagnostic validation has exact fields, allowlisted categories and guarded completion semantics', () => {
+	assert.deepEqual(h.validateCaptureDiagnostic(diagnostic()), diagnostic());
+	for (const value of [null, diagnostic({ schemaVersion: 1 }), diagnostic({ stage: 'unknown' }), diagnostic({ code: 'arbitrary exception' }),
+		diagnostic({ path: '/ordinary/private/fixture' }), diagnostic({ contentCoverage: 'all' }), diagnostic({ kind: 'completion' }),
+		diagnostic({ kind: 'completion', phase: 'post', stage: 'append', code: 'capturePrepared' }), diagnostic({ observedAt: 'invalid' }),
+		diagnostic({ observedAt: new Date(Date.now() + 10 * 60 * 1000).toISOString() })]) { assert.equal(h.validateCaptureDiagnostic(value), undefined); }
+	const runtime = require('../hooks/record-change.js');
+	assert.deepEqual(runtime.DIAGNOSTIC_STAGES, h.CAPTURE_DIAGNOSTIC_STAGES);
+	assert.deepEqual(runtime.DIAGNOSTIC_CODES, h.CAPTURE_DIAGNOSTIC_CODES);
+});
+
+test('projection separates observation and completion and is monotonic across stale concurrent orderings', () => {
+	const completion = diagnostic({ kind: 'completion', phase: 'post', stage: 'append', code: 'captureRecorded', observedAt: '2020-01-01T00:02:00.000Z' });
+	const observation = diagnostic({ id: 'b'.repeat(32), stage: 'snapshot', code: 'storagePermissionDenied', contentCoverage: 'none', observedAt: '2020-01-01T00:03:00.000Z' });
+	const stale = diagnostic({ id: 'c'.repeat(32), observedAt: '2020-01-01T00:01:00.000Z' });
+	for (const values of [[completion, observation, stale], [stale, observation, completion], [observation, stale, completion]]) {
+		const projected = h.projectCaptureDiagnostics(values);
+		assert.deepEqual(projected.latestObservation, observation);
+		assert.deepEqual(projected.lastCompletion, completion);
+		assert.equal(projected.coverage, 'complete');
+	}
+	const partial = h.projectCaptureDiagnostics([completion, diagnostic({ schemaVersion: 999 })], ['fileBudget']);
+	assert.equal(partial.kind, 'known'); assert.equal(partial.coverage, 'partial');
+	assert.deepEqual(partial.lastCompletion, completion);
+	assert.deepEqual(h.projectCaptureDiagnostics([diagnostic()]).lastCompletion, null);
+	assert.deepEqual(h.projectCaptureDiagnostics([], ['arbitrary-private-fixture']).issues, ['invalidEvent']);
+});
+
+test('reader preserves legacy, corrupt, future and oversized diagnostics without erasing known completion', async (t) => {
+	const fixture = diagnosticFixture(t);
+	const legacy = path.join(fixture.directory, h.CAPTURE_STATUS_FILE), legacyText = '{"schemaVersion":1,"state":"active"}';
+	fs.writeFileSync(legacy, legacyText);
+	assert.equal((await h.readCaptureDiagnostics(fixture.directory, fixture.root)).kind, 'unknown');
+	assert.deepEqual((await h.readCaptureDiagnostics(fixture.directory, fixture.root)).issues, ['legacyStatus']);
+	const completion = diagnostic({ kind: 'completion', phase: 'post', stage: 'append', code: 'captureRecorded' });
+	const completedFile = fixture.put(completion);
+	const future = fixture.put(diagnostic({ id: 'b'.repeat(32), observedAt: new Date(Date.now() + 10 * 60 * 1000).toISOString() }));
+	const corrupt = fixture.put(diagnostic({ id: 'c'.repeat(32) }), 'unfinished fixture');
+	const unsupported = fixture.put(diagnostic({ id: 'd'.repeat(32) }), '{"schemaVersion":999}');
+	const oversized = fixture.put(diagnostic({ id: 'e'.repeat(32) }), ' '.repeat(h.MAX_CAPTURE_DIAGNOSTIC_BYTES + 1));
+	const before = [legacy, completedFile, future, corrupt, unsupported, oversized].map((file) => fs.readFileSync(file));
+	const result = await h.readCaptureDiagnostics(fixture.directory, fixture.root);
+	assert.equal(result.kind, 'known'); assert.equal(result.coverage, 'partial');
+	assert.deepEqual(result.lastCompletion, completion);
+	for (const issue of ['futureEvent', 'invalidEvent', 'unsupportedVersion', 'readUnavailable']) { assert.ok(result.issues.includes(issue)); }
+	assert.deepEqual([legacy, completedFile, future, corrupt, unsupported, oversized].map((file) => fs.readFileSync(file)), before);
+});
+
+test('diagnostic budget and mismatched event identity remain partial while completion is retained', async (t) => {
+	const fixture = diagnosticFixture(t);
+	const completion = diagnostic({ kind: 'completion', phase: 'post', stage: 'append', code: 'captureRecorded' });
+	fixture.put(completion);
+	const directory = path.join(fixture.directory, ...h.CAPTURE_DIAGNOSTICS_DIR.split('/'), 'observations');
+	fs.mkdirSync(directory, { recursive: true });
+	for (let i = 0; i <= h.MAX_CAPTURE_DIAGNOSTIC_FILES; i += 1) { fs.writeFileSync(path.join(directory, `unknown-${i}.json`), '{}'); }
+	const result = await h.readCaptureDiagnostics(fixture.directory, fixture.root);
+	assert.equal(result.coverage, 'partial'); assert.ok(result.issues.includes('fileBudget'));
+	assert.deepEqual(result.lastCompletion, completion);
+	assert.equal(fs.readdirSync(directory).length, h.MAX_CAPTURE_DIAGNOSTIC_FILES + 1);
+	fs.rmSync(directory, { recursive: true });
+	fixture.put(diagnostic(), JSON.stringify(diagnostic({ id: 'f'.repeat(32) })));
+	assert.ok((await h.readCaptureDiagnostics(fixture.directory, fixture.root)).issues.includes('invalidEvent'));
+});
+
+test('real hook evidence retains newer completion when an older producer finishes its diagnostic later', async (t) => {
+	const fixture = diagnosticFixture(t), runtime = require('../hooks/record-change.js');
+	const file = path.join(fixture.root, 'ordinary.txt'); fs.writeFileSync(file, 'ordinary content');
+	const input = (id) => ({ cwd: fixture.root, session_id: 'ordinary-session', tool_use_id: id, tool_name: 'Edit', tool_input: { file_path: file } });
+	const initial = Date.now() - 60000;
+	const options = { env: { CLAUDE_PROJECT_DIR: fixture.root }, now: () => initial + 2000 };
+	assert.equal(runtime.run('pre', input('newer'), options).state, 'prepared');
+	assert.equal(runtime.run('post', input('newer'), options).state, 'recorded');
+	const before = await h.readCaptureDiagnostics(fixture.directory, fixture.root);
+	let interleaved = false;
+	const io = { ...fs, openSync(name, flags, ...args) {
+		if (!interleaved && String(name).includes(`${path.sep}observations${path.sep}`) && flags & fs.constants.O_EXCL) {
+			interleaved = true;
+			runtime.run('pre', input('concurrent-newer'), { ...options, now: () => initial + 3000 });
+		}
+		return fs.openSync(name, flags, ...args);
+	} };
+	assert.equal(runtime.run('pre', input('stale'), { ...options, fs: io, now: () => initial + 1000 }).state, 'prepared');
+	assert.equal(interleaved, true);
+	const after = await h.readCaptureDiagnostics(fixture.directory, fixture.root);
+	assert.deepEqual(after.lastCompletion, before.lastCompletion);
+	assert.equal(after.latestObservation.observedAt, new Date(initial + 3000).toISOString());
+});
+
+test('diagnostic ownership cleanup includes the ledger and keeps active coordination files protected', () => {
+	const relative = 'capture-diagnostics/v2/completions/ordinary.json';
+	const files = [{ relative, type: 'file', mtime: 0 }, { relative: 'capture-maintenance.lock', type: 'file', mtime: 0 }];
+	assert.deepEqual(h.planFullCleanup(files, { owned: true, quiescent: true }).paths, [relative]);
+	assert.equal(h.planFullCleanup([{ relative, type: 'link', mtime: 0 }], { owned: true, quiescent: true }).kind, 'blocked');
 });

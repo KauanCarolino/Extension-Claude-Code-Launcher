@@ -7,123 +7,100 @@ const os = require('node:os');
 const path = require('node:path');
 const vm = require('node:vm');
 const { createRequire } = require('node:module');
-const { ReviewStore } = require('../out/review-store.js');
-const { ingestEntries } = require('../out/review.js');
-const history = require('../out/history.js');
-const hooks = require('../out/hooks.js');
+const { fixture, entry, writeLog, readLog, writeDiagnostic, until, OUT } = require('./helpers/changes-fixture.cjs');
+const { ReviewStore } = require(path.join(OUT, 'review-store.js'));
+const { ingestEntries } = require(path.join(OUT, 'review.js'));
+const history = require(path.join(OUT, 'history.js'));
+const hooks = require(path.join(OUT, 'hooks.js'));
 
-/** Actual compiled controller, with only editor/IO boundaries replaced by explicit adapters. */
-function fixture(t, options = {}) {
-	const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'launcher-changes-')));
-	const warnings = [], messages = [], memento = new Map(), settings = new Map([
-		['claudeCodeLauncher.hookExecutionMode', options.mode || 'exec'],
-		['claudeCodeLauncher.historyRetentionDays', 30],
-	]);
-	const disposable = () => ({ dispose() {} });
-	class Uri {
-		constructor(file, scheme = 'file') { this.fsPath = file; this.path = file; this.scheme = scheme; }
-		toString() { return this.scheme + '://' + this.fsPath; }
-		static file(file) { return new Uri(path.resolve(file)); }
-		static joinPath(base, ...parts) { return new Uri(path.join(base.fsPath, ...parts), base.scheme); }
-		static from(value) { return new Uri(value.path, value.scheme); }
-	}
-	class EventEmitter {
-		listeners = [];
-		event = (fn) => { this.listeners.push(fn); return disposable(); };
-		fire(value) { this.listeners.forEach((fn) => fn(value)); }
-		dispose() { this.listeners = []; }
-	}
-	const folder = { uri: Uri.file(root), name: 'fixture', index: 0 };
-	const configurationHandlers = [], workspaceHandlers = [];
-	const vscode = {
-		Uri, EventEmitter, StatusBarAlignment: { Right: 2 }, ThemeColor: class {},
-		commands: { executeCommand: async () => undefined },
-		extensions: { getExtension: () => undefined },
-		window: {
-			createStatusBarItem: () => ({ show() {}, hide() {}, dispose() {} }),
-			showWarningMessage: async (message, ...args) => { warnings.push(message); return options.confirm === false ? undefined : args.find((arg) => typeof arg === 'string'); },
-			showInformationMessage: async (message) => { messages.push(message); return undefined; },
-			showErrorMessage: async (message) => { warnings.push(message); return undefined; },
-		},
-		workspace: {
-			workspaceFolders: [folder], textDocuments: [], notebookDocuments: [],
-			getWorkspaceFolder: (uri) => uri.fsPath === root || uri.fsPath.startsWith(root + path.sep) ? folder : undefined,
-			asRelativePath: (file) => path.relative(root, file),
-			getConfiguration: (section) => ({ get: (key, fallback) => settings.has(section + '.' + key) ? settings.get(section + '.' + key) : fallback }),
-			createFileSystemWatcher: () => ({ ...disposable(), onDidCreate: () => disposable(), onDidChange: () => disposable(), onDidDelete: () => disposable() }),
-			onDidChangeWorkspaceFolders: (handler) => { workspaceHandlers.push(handler); return disposable(); },
-			onDidChangeConfiguration: (handler) => { configurationHandlers.push(handler); return disposable(); },
-		},
-	};
-	const context = {
-		extensionUri: Uri.file(path.resolve(__dirname, '..')), globalStorageUri: Uri.file(path.join(root, 'global')), subscriptions: [],
-		workspaceState: {
-			get: (key, fallback) => memento.has(key) ? memento.get(key) : fallback,
-			async update(key, value) {
-				if (options.failMemento) { throw new Error('synthetic memento failure'); }
-				memento.set(key, value);
-			},
-		},
-	};
-	const source = path.resolve(__dirname, '../out/changes.js');
-	const sourceRequire = createRequire(source);
-	const sessionModule = sourceRequire('./sessions');
-	const module = { exports: {} };
-	const controllerHistory = { ...history, ...(options.history || {}) };
-	const run = vm.runInThisContext('(function(require,module,exports){' + fs.readFileSync(source, 'utf8') + '\n})', { filename: source });
-	run((id) => {
-		if (id === 'vscode') { return vscode; }
-		if (id === './history') { return controllerHistory; }
-		if (id === './sessions') { return { ...sessionModule, sessionsDir: () => path.join(root, 'sessions'), ...(options.sessions || {}) }; }
-		if (id === 'node:fs' && options.nodeFs) { return options.nodeFs; }
-		return sourceRequire(id);
-	}, module, module.exports);
-	class ControlledController extends module.exports.ChangesController {
-		scheduleRefresh() { /* Each test explicitly drives a refresh or a method. */ }
-		async refresh() { /* No autonomous IO outside this test's scenario. */ }
-		publish() { /* post() is exercised explicitly by the state tests. */ }
-	}
-	const controller = new ControlledController(context);
-	const stores = new Set();
-	t.after(async () => {
-		controller.dispose();
-		await controller.whenDisposed();
-		for (const store of [...stores, ...controller.stores.values()]) { await store.close(); }
-		fs.rmSync(root, { recursive: true, force: true });
-	});
-	const dir = path.join(root, '.claude', 'launcher-changes');
-	async function store() {
-		let value = controller.stores.get(folder.uri.toString());
-		if (!value) { value = await ReviewStore.open(root); controller.stores.set(folder.uri.toString(), value); }
-		stores.add(value); return value;
-	}
-	function policy(fields = {}) {
-		fs.mkdirSync(dir, { recursive: true });
-		const value = { ...history.makeCapturePolicy({ generation: 'fixture-generation' }), ...fields };
-		fs.writeFileSync(path.join(dir, history.CAPTURE_POLICY_FILE), JSON.stringify(value) + '\n');
-		return value;
-	}
-	function configuredHooks() {
-		const plan = hooks.planHooks({ read: { kind: 'absent' }, scriptPath: controller.scriptPath(folder), enable: true,
-			capability: { status: 'confirmed', harness: 'fixture-contract' } });
-		fs.mkdirSync(path.join(root, '.claude'), { recursive: true });
-		fs.writeFileSync(path.join(root, '.claude', 'settings.local.json'), plan.nextText);
-		return plan.nextText;
-	}
-	return { root, dir, folder, controller, context, settings, warnings, messages, store, policy, configuredHooks,
-		workspaceHandlers, controllerHistory, Uri };
+function windowsProjection(t) {
+	const root = String.raw`d:\Fixture\workspace`;
+	const uriFilePath = file => /^[A-Za-z]:[\\/]/.test(file) ? file.replace(/^[A-Z]:/, drive => drive.toLowerCase()) : path.resolve(file);
+	const f = fixture(t, { nodePath: path.win32, uriFilePath, history: {
+		// This test models Windows identity in memory, not a Windows filesystem.
+		// Explicitly model absence of the new durable purge guard at the IO boundary.
+		safeReadText: async (file, ...args) => /^[A-Za-z]:[\\/]/.test(file) && file.endsWith('purge-state.v1.json')
+			? { kind: 'absent' } : history.safeReadText(file, ...args),
+	} });
+	f.folder.uri = new f.Uri(root);
+	return { ...f, windowsRoot: root };
+}
+/** Pure store boundary; decisions still execute the real reversal module. */
+function projectedStore(root, file, id = 'windows-entry') {
+	const state = { schemaVersion: 1, generation: 0, contextId: root, reviews: {}, statuses: {}, operations: {}, undo: [],
+		legacyProjection: { phase: 'complete', observedHash: null, targetHash: null, targetGeneration: 0 } };
+	ingestEntries(state, [{ id, time: '2026-11-19T12:00:00.000Z', file,
+		before: { exists: true, large: false, text: 'before\r\n' }, after: { exists: true, large: false, text: 'after\r\n' } }]);
+	return { root, writable: true, get: () => structuredClone(state), update: async mutate => { mutate(state); state.generation += 1; }, close: async () => {}, state };
 }
 
-function entry(root, id, name = id + '.txt', time = '2026-11-19T12:00:00.000Z') {
-	return { id, time, file: path.join(root, name), before: { exists: true, text: 'before', large: false }, after: { exists: true, text: 'after', large: false }, reason: null };
-}
-function writeLog(f, entries) {
-	fs.mkdirSync(f.dir, { recursive: true });
-	fs.writeFileSync(path.join(f.dir, 'log.jsonl'), entries.map((value) => JSON.stringify(value) + '\n').join(''));
-}
-function readLog(f) {
-	return fs.readFileSync(path.join(f.dir, 'log.jsonl'), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line));
-}
+test('Windows URI drive aliases resolve persisted reviews without new entries and dispatch the canonical decision', async t => {
+	const f = windowsProjection(t), canonical = String.raw`D:\Fixture\workspace\crlf.txt`, document = String.raw`d:\Fixture\workspace\crlf.txt`;
+	const store = projectedStore(f.windowsRoot, canonical);
+	f.controller.stores.set(f.folder.uri.toString(), store);
+	f.controller.synchronizeViews();
+	assert.deepEqual(f.controller.getEntries(), [], 'the alias is also rebuilt for persisted state without a new log entry');
+	assert.equal(f.controller.getSharedReview(document).file, canonical);
+	assert.equal(f.controller.getSharedReview(document).phase, 'pending');
+	let content = { kind: 'text', text: 'after\r\n' }; const writes = [];
+	f.controller.resourceAdapter = () => ({ read: async file => { assert.equal(file, canonical); return content; },
+		readPersisted: async file => { assert.equal(file, canonical); return content; },
+		write: async (file, target) => { writes.push(file); content = target; } });
+	await f.controller.executeReviewDecision(document, { action: 'reject', revision: 1 });
+	assert.deepEqual(writes, [canonical]);
+	assert.equal(content.text, 'before\r\n');
+	assert.equal(store.state.statuses['windows-entry'], 'rejected');
+	assert.equal(store.state.contextId, f.windowsRoot);
+	assert.deepEqual(Object.keys(store.state.reviews), [canonical]);
+});
+
+test('Windows URI aliases preserve directory and filename case and reject unrelated resources', async t => {
+	const f = windowsProjection(t), upper = String.raw`D:\Fixture\workspace\Case\File.txt`, lower = String.raw`D:\Fixture\workspace\case\file.txt`;
+	const store = projectedStore(f.windowsRoot, upper, 'upper');
+	const other = projectedStore(f.windowsRoot, lower, 'lower');
+	store.state.reviews[lower] = other.state.reviews[lower];
+	f.controller.stores.set(f.folder.uri.toString(), store); f.controller.synchronizeViews();
+	assert.equal(f.controller.getSharedReview(String.raw`d:\Fixture\workspace\Case\File.txt`).firstId, 'upper');
+	assert.equal(f.controller.getSharedReview(String.raw`d:\Fixture\workspace\case\file.txt`).firstId, 'lower');
+	let effects = 0; f.controller.resourceAdapter = () => { effects += 1; throw new Error('unrelated resource must not reach the executor'); };
+	for (const file of [String.raw`d:\Fixture\workspace\Case\file.txt`, String.raw`E:\Fixture\workspace\Case\File.txt`, String.raw`D:\Fixture\workspace-other\Case\File.txt`]) {
+		assert.equal(f.controller.getSharedReview(file), undefined);
+		await assert.rejects(f.controller.executeReviewDecision(file, { action: 'reject' }), /reviewUnavailable/);
+	}
+	assert.equal(effects, 0);
+});
+
+test('ambiguous URI aliases and two or three owners stay blocked and a removed conflict is recomputed', async t => {
+	const f = windowsProjection(t), canonical = String.raw`D:\Fixture\workspace\crlf.txt`, document = String.raw`d:\Fixture\workspace\crlf.txt`;
+	let effects = 0; f.controller.resourceAdapter = () => { effects += 1; throw new Error('ambiguous review must not reach the executor'); };
+	for (const count of [2, 3]) {
+		f.controller.stores.clear();
+		for (let index = 0; index < count; index += 1) { f.controller.stores.set('context-' + index, projectedStore(f.windowsRoot, canonical, 'entry-' + index)); }
+		f.controller.synchronizeViews();
+		assert.equal(f.controller.getSharedReview(canonical).blockReason, 'ambiguousContext');
+		assert.equal(f.controller.getSharedReview(document).phase, 'blocked');
+		assert.equal(f.controller.fileStores.has(canonical), false);
+		await assert.rejects(f.controller.executeReviewDecision(document, { action: 'reject' }), /ambiguousContext/);
+	}
+	f.controller.stores.clear();
+	f.controller.stores.set('upper-context', projectedStore(f.windowsRoot, canonical, 'upper'));
+	f.controller.stores.set('lower-context', projectedStore(f.windowsRoot, document, 'lower'));
+	f.controller.synchronizeViews();
+	for (const file of [canonical, document]) {
+		assert.equal(f.controller.getSharedReview(file).blockReason, 'ambiguousContext');
+		assert.equal(f.controller.fileStores.has(file), false);
+		await assert.rejects(f.controller.executeReviewDecision(file, { action: 'reject' }), /ambiguousContext/);
+	}
+	assert.equal(effects, 0);
+	f.controller.stores.delete('lower-context'); f.controller.synchronizeViews();
+	assert.equal(f.controller.getSharedReview(document).phase, 'pending');
+	assert.equal(f.controller.fileStores.has(canonical), true);
+	// A prior alias whose review left the projection must not keep a false conflict alive.
+	f.controller.stores.clear(); f.controller.stores.set('lower-context', projectedStore(f.windowsRoot, document, 'only-lower'));
+	f.controller.synchronizeViews();
+	assert.equal(f.controller.getSharedReview(document).firstId, 'only-lower');
+	assert.equal(f.controller.getSharedReview(document).phase, 'pending');
+});
 
 test('controller preflight blocks unknown capability before writing a policy or hook script', async (t) => {
 	const f = fixture(t, { mode: 'auto' });
@@ -293,18 +270,116 @@ test('retention removes only old reviewed records without undo, and log replacem
 test('capture quota is reflected in effective state, while active capture does not erase configuration warnings', async (t) => {
 	const f = fixture(t); f.configuredHooks(); f.policy(); writeLog(f, [entry(f.root, 'ordinary')]);
 	const key = f.folder.uri.toString(); f.controller.hookWarnings.set(key, 'configuration warning retained');
-	const status = path.join(f.dir, history.CAPTURE_STATUS_FILE);
-	fs.writeFileSync(status, JSON.stringify({ schemaVersion: 1, state: 'quotaExceeded', code: 'quotaExceeded' }));
+	writeDiagnostic(f, { stage: 'inventory', code: 'quotaExceeded' });
 	f.controller.entries = await f.controller.loadEntries();
 	assert.equal(await f.controller.hooksEnabled(), false);
 	const states = []; f.controller.post({ postMessage: async (state) => { states.push(state); } }, false);
-	assert.ok(states[0].coverageMessage.includes('quotaExceeded'));
+	assert.equal(states[0].captureHealth[0].observation.code, 'quotaExceeded');
+	assert.ok(states[0].coverageMessage.includes('Orçamento atingido'));
 	assert.ok(states[0].coverageMessage.includes('configuration warning retained'));
-	fs.writeFileSync(status, JSON.stringify({ schemaVersion: 1, state: 'active', code: 'captureReady' }));
+	writeDiagnostic(f, { phase: 'post', stage: 'append', code: 'captureRecorded', contentCoverage: 'complete' });
 	f.controller.entries = await f.controller.loadEntries();
 	assert.equal(f.controller.captureWarnings.has(key), false);
 	assert.equal(f.controller.hookWarnings.get(key), 'configuration warning retained');
 	assert.equal(await f.controller.hooksEnabled(), true);
+});
+
+test('configured hooks without an event do not publish a completed capture and unknown capability remains distinct', async (t) => {
+	const f = fixture(t); f.configuredHooks(); f.policy();
+	await f.controller.loadEntries();
+	const states = []; f.controller.post({ postMessage: async (state) => { states.push(state); } }, false);
+	assert.equal(states[0].captureHealth[0].configuration, 'configured');
+	assert.equal(states[0].captureHealth[0].completion, null);
+	assert.equal(states[0].captureHealth[0].observation, null);
+	f.settings.set('claudeCodeLauncher.hookExecutionMode', 'auto');
+	await f.controller.loadEntries();
+	states.length = 0; f.controller.post({ postMessage: async (state) => { states.push(state); } }, false);
+	assert.equal(states[0].captureHealth[0].capability, 'unknown');
+	assert.equal(states[0].captureHealth[0].configuration, 'configured');
+	assert.equal(states[0].captureHealth[0].completion, null);
+});
+
+test('native view title and menu context identify configuration without asserting observed capture', async (t) => {
+	const f = fixture(t); f.configuredHooks(); f.policy();
+	await f.controller.loadEntries();
+	f.controller.view = { webview: { postMessage: async () => undefined } };
+	f.controller.enabled = false;
+	f.controller.updateViewChrome(); f.controller.updateViewContexts();
+	assert.equal(f.controller.view.description, 'Registro configurado');
+	assert.equal(f.controller.captureHealthStates.get(f.folder.uri.toString()).completion, null);
+	assert.ok(f.executedCommands.some(([command, context, value]) => command === 'setContext'
+		&& context === 'claudeCodeLauncher.changeLogEnabled' && value === true));
+});
+
+test('diagnostic-only watcher events refresh the published state without appending a history record', async (t) => {
+	const f = fixture(t, { autoRefresh: true }); f.configuredHooks(); f.policy();
+	const states = []; f.controller.view = { webview: { postMessage: async (state) => { states.push(state); } } };
+	await until(() => states.length > 0, 'initial capture state did not publish');
+	const watcher = f.watchers.find((item) => item.pattern.includes('capture-diagnostics/v2'));
+	assert.ok(watcher && watcher.created.length && watcher.changed.length && watcher.deleted.length);
+	writeDiagnostic(f, { stage: 'snapshot', code: 'storagePermissionDenied', contentCoverage: 'unknown' });
+	watcher.created.forEach((handler) => handler());
+	await until(() => states.some((state) => state.captureHealth[0]?.observation?.code === 'storagePermissionDenied'), 'diagnostic-only update was not published');
+	assert.equal(fs.existsSync(path.join(f.dir, 'log.jsonl')), false);
+	assert.equal(states.at(-1).captureHealth[0].completion, null);
+});
+
+test('incompatible reloads retain prior completion and late diagnostic reads cannot repopulate a new epoch', async (t) => {
+	const f = fixture(t); f.configuredHooks(); f.policy();
+	const completed = writeDiagnostic(f, { kind: 'completion', phase: 'post', stage: 'append', code: 'captureRecorded', contentCoverage: 'complete' });
+	await f.controller.loadEntries();
+	const bucket = path.join(f.dir, ...history.CAPTURE_DIAGNOSTICS_DIR.split('/'), 'completions');
+	fs.writeFileSync(path.join(bucket, 'unknown.json'), JSON.stringify({ schemaVersion: 99, text: '/private/never-publish-this' }));
+	await f.controller.loadEntries();
+	let state; f.controller.post({ postMessage: async (value) => { state = value; } }, false);
+	assert.equal(state.captureHealth[0].completion.at, completed.observedAt);
+	assert.equal(state.captureHealth[0].partial, true);
+	assert.equal(JSON.stringify(state.captureHealth).includes('never-publish-this'), false);
+	let release, started;
+	const began = new Promise((resolve) => { started = resolve; });
+	f.controllerHistory.readCaptureDiagnostics = async () => { started(); return new Promise((resolve) => { release = resolve; }); };
+	const loading = f.controller.loadCaptureHealth(f.folder); await began;
+	f.controller.metaEpoch += 1; f.controller.captureEvidence.clear(); f.controller.captureHealthStates.clear();
+	release(history.projectCaptureDiagnostics([completed])); await loading;
+	assert.equal(f.controller.captureEvidence.size, 0);
+	assert.equal(f.controller.captureHealthStates.size, 0);
+});
+
+test('configuration and wrapper changes refresh capability without relying on hook or log writes', async (t) => {
+	const options = { autoRefresh: true, mode: 'auto' }; const f = fixture(t, options);
+	const extensionPath = path.join(f.root, 'official-fixture'); fs.mkdirSync(extensionPath);
+	fs.writeFileSync(path.join(extensionPath, 'claude-code-settings.schema.json'), JSON.stringify({ properties: {
+		hooks: { additionalProperties: { items: { properties: { hooks: { items: { anyOf: [{ properties: {
+			type: { const: 'command' }, command: { type: 'string' }, args: { type: 'array', items: { type: 'string' } },
+		} }] } } } } } },
+	} }));
+	options.extension = { extensionPath, packageJSON: { version: '2.1.326' } };
+	const states = []; f.controller.view = { webview: { postMessage: async (state) => { states.push(state); } } };
+	await until(() => states.at(-1)?.captureHealth[0]?.capability === 'confirmed', 'installed schema capability did not publish');
+	f.settings.set('claudeCodeLauncher.hookExecutionMode', 'disabled');
+	f.configurationHandlers.forEach((handler) => handler({ affectsConfiguration: (name) => name === 'claudeCodeLauncher' }));
+	await until(() => states.at(-1)?.captureHealth[0]?.capability === 'unsupported', 'configuration-only change did not refresh');
+	f.settings.set('claudeCodeLauncher.hookExecutionMode', 'auto');
+	f.settings.set('claudeCode.claudeProcessWrapper', '/private/fixture-wrapper');
+	f.configurationHandlers.forEach((handler) => handler({ affectsConfiguration: (name) => name === 'claudeCode.claudeProcessWrapper' }));
+	await until(() => states.at(-1)?.captureHealth[0]?.capability === 'unknown', 'wrapper-only change did not refresh');
+	assert.equal(JSON.stringify(states.at(-1).captureHealth).includes('fixture-wrapper'), false);
+	assert.equal(fs.existsSync(path.join(f.dir, 'log.jsonl')), false);
+	assert.equal(fs.existsSync(path.join(f.root, '.claude', 'settings.local.json')), false);
+});
+
+test('blocked purge preserves dated capture evidence for the root whose data could not be removed', async (t) => {
+	const f = fixture(t); f.configuredHooks(); f.policy(); const store = await f.store();
+	const completed = writeDiagnostic(f, { kind: 'completion', phase: 'post', stage: 'append', code: 'captureRecorded', contentCoverage: 'complete' });
+	await f.controller.loadEntries(); await store.close();
+	await f.controller.clearAllReviewData();
+	assert.equal(f.controller.captureEvidence.get(f.folder.uri.toString()).lastCompletion.observedAt, completed.observedAt);
+	f.controllerHistory.readCaptureDiagnostics = async () => history.projectCaptureDiagnostics([], ['readUnavailable']);
+	await f.controller.loadCaptureHealth(f.folder);
+	let state; f.controller.post({ postMessage: async (value) => { state = value; } }, false);
+	assert.equal(state.captureHealth[0].completion.at, completed.observedAt);
+	assert.equal(state.captureHealth[0].partial, true);
+	assert.ok(f.warnings.some((message) => message.includes('Limpeza parcial/bloqueada')));
 });
 
 test('dispose retains writer ownership until the registered maintenance completes', async (t) => {

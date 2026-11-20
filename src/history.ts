@@ -9,6 +9,112 @@ const Utf8Decoder = require('node:util').TextDecoder;
 
 export const CAPTURE_POLICY_FILE = 'capture-policy.json';
 export const CAPTURE_STATUS_FILE = 'capture-status.json';
+export const CAPTURE_DIAGNOSTICS_DIR = 'capture-diagnostics/v2';
+export const MAX_CAPTURE_DIAGNOSTIC_BYTES = 2048;
+export const MAX_CAPTURE_DIAGNOSTIC_FILES = 128;
+export const CAPTURE_DIAGNOSTIC_STAGES = ['input', 'scope', 'policy', 'inventory', 'snapshot', 'pending', 'append', 'completion', 'maintenance'] as const;
+export const CAPTURE_DIAGNOSTIC_CODES = [
+	'capturePrepared', 'captureRecorded', 'capturePaused', 'captureMaintenance', 'captureGenerationChanged',
+	'quotaExceeded', 'invalidPolicy', 'excludedByPolicy', 'resourceOutsideScope', 'inputBudgetExceeded',
+	'storagePermissionDenied', 'storageReadOnly', 'storageFull', 'storageInventoryBudget', 'unsafeStorageType',
+	'blobIntegrityFailed', 'pendingGenerationChanged', 'invalidPending', 'storageUnavailable',
+] as const;
+export type CaptureDiagnosticStage = typeof CAPTURE_DIAGNOSTIC_STAGES[number];
+export type CaptureDiagnosticCode = typeof CAPTURE_DIAGNOSTIC_CODES[number];
+export interface CaptureDiagnosticEvent {
+	schemaVersion: 2; id: string; kind: 'observation' | 'completion'; phase: 'pre' | 'post';
+	stage: CaptureDiagnosticStage; code: CaptureDiagnosticCode;
+	contentCoverage: 'complete' | 'limited' | 'none' | 'unknown'; observedAt: string;
+}
+export type CaptureDiagnosticIssue = 'legacyStatus' | 'unsupportedVersion' | 'invalidEvent' | 'futureEvent'
+	| 'fileBudget' | 'readUnavailable' | 'unsafeStorage';
+const DIAGNOSTIC_ISSUES: readonly CaptureDiagnosticIssue[] = ['legacyStatus', 'unsupportedVersion', 'invalidEvent', 'futureEvent', 'fileBudget', 'readUnavailable', 'unsafeStorage'];
+export interface CaptureDiagnostics {
+	kind: 'known' | 'unknown' | 'absent'; latestObservation: CaptureDiagnosticEvent | null;
+	lastCompletion: CaptureDiagnosticEvent | null; coverage: 'complete' | 'partial'; issues: CaptureDiagnosticIssue[];
+}
+/** Strict allowlist: diagnostic records never carry source paths, text or exception messages. */
+export function validateCaptureDiagnostic(value: unknown, now = Date.now()): CaptureDiagnosticEvent | undefined {
+	if (!Number.isFinite(now) || !object(value) || Object.keys(value).length !== 8 || Object.keys(value).some((key) =>
+		!['schemaVersion', 'id', 'kind', 'phase', 'stage', 'code', 'contentCoverage', 'observedAt'].includes(key))) { return undefined; }
+	return validateDiagnosticFields(value, now);
+}
+function validateDiagnosticFields(value: Record<string, unknown>, now: number): CaptureDiagnosticEvent | undefined {
+	const date = typeof value.observedAt === 'string' ? Date.parse(value.observedAt) : NaN;
+	if (value.schemaVersion !== 2 || typeof value.id !== 'string' || !/^[a-f0-9]{32}$/.test(value.id)
+		|| !['observation', 'completion'].includes(value.kind as string) || !['pre', 'post'].includes(value.phase as string)
+		|| !CAPTURE_DIAGNOSTIC_STAGES.includes(value.stage as CaptureDiagnosticStage)
+		|| !CAPTURE_DIAGNOSTIC_CODES.includes(value.code as CaptureDiagnosticCode)
+		|| !['complete', 'limited', 'none', 'unknown'].includes(value.contentCoverage as string)
+		|| !Number.isFinite(date) || date < 0 || date > now + 5 * 60 * 1000 || new Date(date).toISOString() !== value.observedAt
+		|| (value.kind === 'completion' && (value.phase !== 'post' || value.stage !== 'append' || value.code !== 'captureRecorded'))
+		|| (value.code === 'captureRecorded' && (value.phase !== 'post' || value.stage !== 'append'))
+		|| (value.code === 'capturePrepared' && (value.phase !== 'pre' || value.stage !== 'pending'))) { return undefined; }
+	return { schemaVersion: 2, id: value.id, kind: value.kind as CaptureDiagnosticEvent['kind'], phase: value.phase as CaptureDiagnosticEvent['phase'],
+		stage: value.stage as CaptureDiagnosticStage, code: value.code as CaptureDiagnosticCode,
+		contentCoverage: value.contentCoverage as CaptureDiagnosticEvent['contentCoverage'], observedAt: value.observedAt as string };
+}
+export function captureDiagnosticFilename(event: CaptureDiagnosticEvent): string {
+	return `${event.observedAt.replace(/[-:.]/g, '')}-${event.id}.json`;
+}
+export function projectCaptureDiagnostics(events: readonly unknown[], issues: readonly CaptureDiagnosticIssue[] = [], now = Date.now()): CaptureDiagnostics {
+	let latestObservation: CaptureDiagnosticEvent | null = null, lastCompletion: CaptureDiagnosticEvent | null = null;
+	const detected = new Set<CaptureDiagnosticIssue>(issues.map((issue) => DIAGNOSTIC_ISSUES.includes(issue) ? issue : 'invalidEvent'));
+	const newer = (candidate: CaptureDiagnosticEvent, previous: CaptureDiagnosticEvent | null) => !previous
+		|| candidate.observedAt > previous.observedAt || candidate.observedAt === previous.observedAt && candidate.id > previous.id;
+	for (const value of events) {
+		const event = validateCaptureDiagnostic(value, now);
+		if (!event) {
+			detected.add(object(value) && value.schemaVersion !== undefined && value.schemaVersion !== 2 ? 'unsupportedVersion'
+				: object(value) && typeof value.observedAt === 'string' && Date.parse(value.observedAt) > now + 5 * 60 * 1000 ? 'futureEvent' : 'invalidEvent');
+			continue;
+		}
+		if (event.kind === 'completion' && newer(event, lastCompletion)) { lastCompletion = event; }
+		if (event.kind === 'observation' && newer(event, latestObservation)) { latestObservation = event; }
+	}
+	return { kind: latestObservation || lastCompletion ? 'known' : detected.size ? 'unknown' : 'absent', latestObservation, lastCompletion,
+		coverage: detected.size ? 'partial' : 'complete', issues: [...detected].sort() };
+}
+/** Immutable evidence is projected by max(timestamp,id), never by a mutable last-writer pointer. */
+export async function readCaptureDiagnostics(historyDir: string, workspaceRoot: string): Promise<CaptureDiagnostics> {
+	const events: unknown[] = [], issues: CaptureDiagnosticIssue[] = [];
+	for (const [bucket, kind] of [['observations', 'observation'], ['completions', 'completion']] as const) {
+		const directory = path.join(historyDir, ...CAPTURE_DIAGNOSTICS_DIR.split('/'), bucket);
+		const scope = await assessStoragePath(directory, workspaceRoot);
+		if (!scope.allowed) { issues.push('unsafeStorage'); continue; }
+		const names: string[] = [];
+		let handle: any;
+		try {
+			handle = await fs.promises.opendir(directory, { bufferSize: 16 });
+			for (let index = 0; index <= MAX_CAPTURE_DIAGNOSTIC_FILES; index += 1) {
+				const entry = await handle.read();
+				if (entry === null) { break; }
+				if (index === MAX_CAPTURE_DIAGNOSTIC_FILES) { issues.push('fileBudget'); break; }
+				names.push(entry.name);
+			}
+		} catch (error) { if (!absent(error)) { issues.push('readUnavailable'); } }
+		finally { await handle?.close().catch(() => undefined); }
+		for (const name of names.sort().reverse()) {
+			if (!/^\d{8}T\d{9}Z-[a-f0-9]{32}\.json$/.test(name)) { issues.push('invalidEvent'); continue; }
+			const read = await safeReadText(path.join(directory, name), workspaceRoot, MAX_CAPTURE_DIAGNOSTIC_BYTES);
+			if (read.kind !== 'content') { issues.push('readUnavailable'); continue; }
+			try {
+				const value: unknown = JSON.parse(read.text);
+				const event = validateCaptureDiagnostic(value);
+				if (event && (event.kind !== kind || captureDiagnosticFilename(event) !== name)) { issues.push('invalidEvent'); continue; }
+				events.push(value);
+			} catch { issues.push('invalidEvent'); }
+		}
+	}
+	const projection = projectCaptureDiagnostics(events, issues);
+	if (projection.kind === 'known') { return projection; }
+	const legacy = await safeReadText(path.join(historyDir, CAPTURE_STATUS_FILE), workspaceRoot, MAX_CAPTURE_DIAGNOSTIC_BYTES);
+	if (legacy.kind === 'content') {
+		try { const value = JSON.parse(legacy.text); issues.push(value?.schemaVersion === 1 ? 'legacyStatus' : 'unsupportedVersion'); }
+		catch { issues.push('invalidEvent'); }
+	} else if (legacy.kind === 'error') { issues.push('readUnavailable'); }
+	return projectCaptureDiagnostics(events, issues);
+}
 export const CAPTURE_MAINTENANCE_FILE = 'capture-maintenance.lock';
 export const MAX_SNAPSHOT_BYTES = 512 * 1024;
 export const DEFAULT_EXCLUDED_PATTERNS = [
@@ -445,7 +551,7 @@ export function planFullCleanup(files: readonly HistoryFile[], ownership: { owne
 	if (files.some((file) => file.type !== 'directory' && (file.relative.startsWith('active/') || /^pending\/[^/]+\.post$/.test(file.relative)))) {
 		return { kind: 'blocked', code: 'captureInProgress', paths: [] };
 	}
-	const own = /^(?:log\.jsonl|status\.json|meta\.json|capture-status\.json|review-state\.v1\.json(?:\.prev)?|(?:blobs|pending|completed|review-blobs|review-migration-backups|settings-backups|quarantine-index)(?:\/[^\u0000]+)?)$/;
+	const own = /^(?:log\.jsonl|status\.json|meta\.json|capture-status\.json|review-state\.v1\.json(?:\.prev)?|(?:blobs|pending|completed|review-blobs|review-migration-backups|settings-backups|quarantine-index|capture-diagnostics)(?:\/[^\u0000]+)?)$/;
 	if (files.some((file) => file.type === 'link' && own.test(file.relative))) {
 		return { kind: 'blocked', code: 'cleanupUnsafeStorageType', paths: [] };
 	}

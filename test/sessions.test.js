@@ -6,9 +6,12 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const vm = require('node:vm');
+const OUT = process.env.LAUNCHER_TEST_OUT || path.resolve(__dirname, '../out');
 const {
 	findReasonInTranscript, findRequestsInTranscript, parseTranscriptMeta, readTranscriptMeta,
-} = require('../out/sessions.js');
+	clearTranscriptMetadataForRoots, transcriptMetadataCacheCount,
+} = require(path.join(OUT, 'sessions.js'));
 
 function transcript(lines) {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'launcher-test-'));
@@ -86,4 +89,84 @@ test('readTranscriptMeta lê de forma assíncrona e relê só quando o arquivo m
 	const second = await readTranscriptMeta(file);
 	assert.equal(second.requests.get('t2').id, 'p1');
 	assert.equal((await readTranscriptMeta(path.join(os.tmpdir(), 'nao-existe.jsonl'))).reasons.size, 0);
+});
+
+function syntheticReader(records, overrides = {}) {
+	const calls = { stat: 0, open: 0 };
+	const fileSystem = { ...fs, promises: { ...fs.promises,
+		async stat(file) { calls.stat++; const text = records.get(file); if (text === undefined) throw new Error('ordinary fixture absent'); return { size: Buffer.byteLength(text), mtimeMs: 1 }; },
+		async open(file) {
+			calls.open++; return { async read(buffer, offset, length, start) {
+				const value = Buffer.from(records.get(file)); const bytesRead = value.copy(buffer, offset, start, start + length); return { bytesRead };
+			}, async close() {} };
+		}, ...overrides,
+	} };
+	const filename = path.join(OUT, 'sessions.js'), module = { exports: {} };
+	vm.runInNewContext(fs.readFileSync(filename, 'utf8'), { module, exports: module.exports, Buffer, process: { env: {} },
+		require: name => name === 'fs' ? fileSystem : require(name) }, { filename });
+	return { api: module.exports, calls };
+}
+function transcriptText(lines) { return lines.map(line => JSON.stringify(line)).join('\n') + '\n'; }
+
+test('shared-transcript selection returns only permitted tool IDs and does not retain excluded metadata', async () => {
+	const file = '/fixture/A/shared.jsonl';
+	const text = transcriptText([user('p1', 'ordinary request'), assistant([{ type: 'text', text: 'ordinary reason' }, toolUse('excluded'), toolUse('permitted')])]);
+	const f = syntheticReader(new Map([[file, text]]));
+	const meta = await f.api.readTranscriptMeta(file, { toolUseIds: ['permitted'], cache: false });
+	assert.deepEqual([...meta.reasons.keys()], ['permitted']); assert.deepEqual([...meta.requests.keys()], ['permitted']);
+	assert.equal(meta.requests.get('permitted').id, 'p1'); assert.equal(f.api.transcriptMetadataCacheCount(['/fixture/A']), 0);
+	const parsed = parseTranscriptMeta(text, file, { toolUseIds: ['permitted'] });
+	assert.deepEqual([...parsed.reasons.keys()], ['permitted']); assert.equal(parsed.requests.has('excluded'), false);
+});
+
+test('cache:false and selective reads bypass a prior full cache and do not retain new content', async () => {
+	const file = '/fixture/A/cache.jsonl', make = reason => transcriptText([user('p1', 'ordinary request'), assistant([{ type: 'text', text: reason }, toolUse('t1')])]);
+	const records = new Map([[file, make('reason A')]]), f = syntheticReader(records);
+	const cached = await f.api.readTranscriptMeta(file);
+	assert.equal(f.api.transcriptMetadataCacheCount(['/fixture/A']), 1);
+	records.set(file, make('reason B')); // Same byte length and synthetic mtime, so legacy cache remains reusable.
+	const fresh = await f.api.readTranscriptMeta(file, { cache: false });
+	assert.equal(fresh.reasons.get('t1'), 'reason B'); assert.notEqual(fresh, cached);
+	assert.equal(await f.api.readTranscriptMeta(file), cached); assert.equal(cached.reasons.get('t1'), 'reason A');
+	assert.equal((await f.api.readTranscriptMeta(file, { toolUseIds: ['t1'] })).reasons.get('t1'), 'reason B');
+	assert.equal(f.api.clearTranscriptMetadataForRoots(['/fixture/A']), 1);
+	await f.api.readTranscriptMeta(file, { cache: false }); assert.equal(f.api.transcriptMetadataCacheCount(['/fixture/A']), 0);
+});
+
+test('cache invalidation is memory-only and respects project boundaries and Windows directory case', async () => {
+	const a = String.raw`D:\Fixture\A\chat.jsonl`, b = String.raw`D:\Fixture\B\chat.jsonl`, upper = String.raw`D:\Fixture\Case\chat.jsonl`;
+	const text = transcriptText([user('p1', 'ordinary request'), assistant([toolUse('t1')])]);
+	const f = syntheticReader(new Map([[a, text], [b, text], [upper, text]]));
+	for (const file of [a, b, upper]) await f.api.readTranscriptMeta(file);
+	const before = { ...f.calls };
+	assert.equal(f.api.transcriptMetadataCacheCount([String.raw`d:\Fixture\A`]), 1);
+	assert.equal(f.api.transcriptMetadataCacheCount([String.raw`D:\Fixture\case`]), 0);
+	assert.equal(f.api.clearTranscriptMetadataForRoots([String.raw`d:\Fixture\A`]), 1);
+	assert.equal(f.api.transcriptMetadataCacheCount([String.raw`D:\Fixture\B`]), 1);
+	assert.equal(f.api.transcriptMetadataCacheCount([String.raw`D:\Fixture\Case`]), 1);
+	assert.equal(f.api.clearTranscriptMetadataForRoots([String.raw`D:\Fixture\case`]), 0);
+	assert.equal(f.api.clearTranscriptMetadataForRoots(['relative-root']), 0); assert.deepEqual(f.calls, before);
+});
+
+test('malformed or over-budget metadata selections return before any filesystem IO', async () => {
+	const f = syntheticReader(new Map());
+	for (const options of [null, [], { cache: 'yes' }, { unknown: true }, { toolUseIds: [] }, { toolUseIds: 't1' },
+		{ toolUseIds: [''] }, { toolUseIds: ['bad\n'] }, { toolUseIds: ['a'.repeat(257)] }, { toolUseIds: Array(257).fill('t1') }, { toolUseIds: Array(1) }]) {
+		const meta = await f.api.readTranscriptMeta('/fixture/A/absent.jsonl', options); assert.equal(meta.reasons.size, 0); assert.equal(meta.requests.size, 0);
+	}
+	await f.api.readTranscriptMeta('/fixture/invalid\n.jsonl');
+	assert.deepEqual(f.calls, { stat: 0, open: 0 });
+});
+
+test('a read started before cache invalidation cannot repopulate the cleared scope afterwards', async () => {
+	const file = '/fixture/A/inflight.jsonl', text = transcriptText([user('p1', 'ordinary request'), assistant([toolUse('t1')])]);
+	let release, signal;
+	const waiting = new Promise(resolve => { release = resolve; }), opened = new Promise(resolve => { signal = resolve; });
+	const f = syntheticReader(new Map([[file, text]]), { async open() {
+		signal(); await waiting;
+		return { async read(buffer, offset, length, start) { return { bytesRead: Buffer.from(text).copy(buffer, offset, start, start + length) }; }, async close() {} };
+	} });
+	const read = f.api.readTranscriptMeta(file); await opened;
+	assert.equal(f.api.clearTranscriptMetadataForRoots(['/fixture/A']), 0); release();
+	assert.equal((await read).requests.has('t1'), true); assert.equal(f.api.transcriptMetadataCacheCount(['/fixture/A']), 0);
 });

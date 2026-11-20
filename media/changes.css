@@ -841,6 +841,28 @@ body.wide .toolbar {
 	background: var(--hover);
 }
 
+.entry-row.has-review-state,
+.file-row.has-review-state {
+	flex-wrap: wrap;
+}
+
+.review-state {
+	flex-basis: 100%;
+	min-width: 0;
+	padding: 2px 6px 6px;
+	font-size: var(--text);
+	line-height: 1.45;
+	overflow-wrap: anywhere;
+}
+
+.review-state p {
+	margin: 3px 0;
+}
+
+.review-parts {
+	font-size: var(--text);
+}
+
 .entry-main {
 	flex: 1;
 	justify-content: flex-start;
