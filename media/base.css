@@ -392,3 +392,41 @@ body.vscode-high-contrast-light .btn-primary {
 		animation: none !important;
 	}
 }
+
+/* ---- Barra de abas do painel (Conversas / Skills) ------------------------------- */
+
+.tabbar {
+	display: flex;
+	gap: var(--space-1);
+	margin: calc(var(--space-2) * -1) calc(var(--space-2) * -1) var(--space-3);
+	padding: 0 var(--space-2);
+	border-bottom: 1px solid var(--border-subtle);
+}
+
+.tabbar-tab {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 8px 8px 7px;
+	border: 0;
+	border-bottom: 2px solid transparent;
+	background: transparent;
+	color: var(--muted);
+	font: inherit;
+	font-weight: 600;
+	cursor: pointer;
+}
+
+.tabbar-tab:hover {
+	color: var(--vscode-foreground);
+}
+
+.tabbar-tab.active {
+	color: var(--vscode-foreground);
+	border-bottom-color: var(--accent);
+}
+
+.tabbar-tab:focus-visible {
+	outline: 1px solid var(--focus);
+	outline-offset: -2px;
+}

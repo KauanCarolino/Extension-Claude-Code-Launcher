@@ -7,18 +7,28 @@
 	const saved = readSaved();
 	let filter = saved.filter || '';
 	let lastState = null;
+	let skillsState = null;
+	let tab = saved.tab === 'skills' ? 'skills' : 'chats';
 
 	window.addEventListener('message', (event) => {
-		if (event.data && event.data.type === 'state') {
-			lastState = event.data;
-			render(event.data);
+		const data = event.data;
+		if (!data) { return; }
+		if (data.type === 'state') {
+			lastState = data;
+			if (tab === 'chats') { render(data); }
+		} else if (data.type === 'skills') {
+			skillsState = data;
+			if (tab === 'skills') { renderSkillsTab(); }
 		}
 	});
 	vscode.postMessage({ command: 'ready' });
+	// Alinha o painel de Mudanças (visível só na aba de conversas) com a aba restaurada.
+	send(tab === 'skills' ? 'showSkills' : 'showChats');
+	if (tab === 'skills') { send('skills.refresh'); }
 
 	// Tempos relativos andam sozinhos, sem esperar um novo estado.
 	setInterval(() => {
-		if (lastState) {
+		if (lastState && tab === 'chats') {
 			render(lastState);
 		}
 	}, 60 * 1000);
@@ -58,7 +68,7 @@
 	}
 
 	function save() {
-		vscode.setState({ filter });
+		vscode.setState({ filter, tab });
 	}
 
 	// ---- Helpers ---------------------------------------------------------------------
@@ -112,11 +122,32 @@
 
 	// ---- Render ----------------------------------------------------------------------
 
+	function setTab(next) {
+		if (tab === next) { return; }
+		tab = next;
+		save();
+		send(next === 'skills' ? 'showSkills' : 'showChats');
+		if (next === 'skills') {
+			renderSkillsTab();
+			send('skills.refresh');
+		} else if (lastState) {
+			render(lastState);
+		}
+	}
+
+	function renderSkillsTab() {
+		const focus = captureFocus();
+		root.replaceChildren(renderTabs());
+		window.renderSkills(root, skillsState, send);
+		restoreFocus(focus);
+	}
+
 	function render(state) {
 		const scroll = window.scrollY;
 		const focus = captureFocus();
 
 		root.replaceChildren();
+		root.append(renderTabs());
 		// Parte das conversas não pôde ser lida (transcript inacessível, por exemplo).
 		if (state.coverageMessage) {
 			root.append(renderHint('warning', state.coverageMessage, 'notice'));
@@ -152,6 +183,26 @@
 		if (typeof focus.start === 'number' && typeof target.setSelectionRange === 'function') {
 			target.setSelectionRange(focus.start, focus.end);
 		}
+	}
+
+	// Barra de abas: a ativa mostra o nome, as outras só o ícone.
+	function renderTabs() {
+		const bar = el('div', 'tabbar');
+		bar.setAttribute('role', 'tablist');
+		const tabs = [['comment', 'Conversas', tab === 'chats', 'chats'], ['sparkle', 'Skills', tab === 'skills', 'skills']];
+		for (const [name, label, active, target] of tabs) {
+			const item = el('button', 'tabbar-tab' + (active ? ' active' : ''));
+			item.type = 'button';
+			item.setAttribute('role', 'tab');
+			item.setAttribute('aria-selected', String(active));
+			item.title = label;
+			item.setAttribute('aria-label', label);
+			item.append(icon(name));
+			if (active) { item.append(el('span', null, label)); }
+			item.addEventListener('click', () => setTab(target));
+			bar.append(item);
+		}
+		return bar;
 	}
 
 	function renderNotInstalled() {

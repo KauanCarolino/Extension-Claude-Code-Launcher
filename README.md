@@ -1,20 +1,31 @@
 # Claude Code Launcher
 
-Extensão para Cursor e Visual Studio Code que abre o chat oficial do Claude Code e permite revisar as mudanças dele no painel e no editor.
+Extensão para Cursor e Visual Studio Code que abre o chat oficial do Claude Code e permite revisar, no painel e no editor, as alterações realizadas por ele.
 
-O chat, a autenticação, os modelos e as permissões pertencem à extensão oficial **Claude Code** (`anthropic.claude-code`). O launcher usa essa integração; não incorpora o Agent do Cursor.
+O chat, a autenticação, os modelos e as permissões são de responsabilidade da extensão oficial **Claude Code** (`anthropic.claude-code`). O launcher utiliza essa integração e não incorpora o Agent do Cursor.
 
-Esta é uma extensão independente. Não é um produto da Anthropic nem é mantida por ela; "Claude" e "Claude Code" são marcas da Anthropic.
+Esta é uma extensão independente, que não constitui produto da Anthropic nem é por ela mantida. "Claude" e "Claude Code" são marcas da Anthropic.
 
-Versão: **0.12.1**. Pacote local: `claude-code-launcher-0.12.1.vsix`.
+**Versão:** 0.13.0 · **Pacote local:** `claude-code-launcher-0.13.0.vsix`
+
+## Sumário
+
+1. [Requisitos e compatibilidade](#requisitos-e-compatibilidade)
+2. [Instalação](#instalação)
+3. [Conversas](#conversas)
+4. [Gerenciamento de skills](#gerenciamento-de-skills)
+5. [Revisão de mudanças](#revisão-de-mudanças)
+6. [Hooks e dados locais](#hooks-e-dados-locais)
+7. [Comandos operacionais](#comandos-operacionais)
+8. [Desenvolvimento e validação](#desenvolvimento-e-validação)
 
 ## Requisitos e compatibilidade
 
-- Visual Studio Code **1.94.0 ou superior**. No Cursor, a API do editor precisa ser compatível; os alvos de verificação estão na tabela abaixo.
-- Extensão oficial Claude Code para abrir conversas. A instalação só ocorre quando você escolhe **Instalar**.
-- Workspace confiável e arquivos locais para a revisão e a captura. O launcher fica desabilitado no Restricted Mode.
-- Node.js **22 ou superior** no `PATH` para o fluxo de desenvolvimento e para executar o hook local. O Node embutido no Extension Host é independente do Node do terminal. Quando o registro está configurado e o comando `node` não é encontrado no `PATH` da janela, o painel **Mudanças** avisa; o aviso some assim que um evento de captura é observado.
-- Em workspaces virtuais, a revisão e o registro ficam indisponíveis: exigem pastas no disco local. A abertura do chat depende do suporte da extensão oficial a esse tipo de workspace e não foi verificada.
+- Visual Studio Code **1.94.0 ou superior**. No Cursor, a API do editor deve ser compatível; os alvos verificados constam na tabela abaixo.
+- Extensão oficial Claude Code, necessária para abrir conversas. Sua instalação ocorre somente mediante a ação explícita **Instalar**.
+- Workspace confiável e arquivos locais, necessários para a revisão e a captura. O launcher permanece desabilitado no Restricted Mode.
+- Node.js **22 ou superior** no `PATH`, tanto para o fluxo de desenvolvimento quanto para a execução do hook local. O Node embutido no Extension Host é independente do Node do terminal. Quando o registro está configurado e o comando `node` não é localizado no `PATH` da janela, o painel **Mudanças** emite um aviso, que cessa assim que um evento de captura é observado.
+- Em workspaces virtuais, a revisão e o registro ficam indisponíveis, pois exigem pastas no disco local. A abertura do chat depende do suporte da extensão oficial a esse tipo de workspace, o que não foi verificado.
 
 | Editor | Alvos do teste de host |
 | --- | --- |
@@ -22,168 +33,242 @@ Versão: **0.12.1**. Pacote local: `claude-code-launcher-0.12.1.vsix`.
 | VS Code 1.146.0, Node do host 24.22.1 | macOS arm64 |
 | Cursor 3.19.13, API VS Code 1.128.0, Node do host 24.18.1 | macOS arm64 |
 
-As jornadas cobrem ativação, comandos, preservação das preferências com gestão desligada, CRLF, UTF-8 com BOM, recusa de criação, desfazer, revisão parcial e edição humana entre capturas. BOM, Unicode e final de linha são conferidos no documento e nos bytes salvos; alteração da presença do BOM, finais de linha mistos e UTF-8 inválido devem bloquear a reversão. No modo VSIX, uma jornada adicional executa o hook instalado em um arquivo sintético e verifica sua ingestão e revisão no editor. Os testes de adaptadores cobrem falhas de gravação, recuperação e concorrência. Abertura autenticada de conversas e hosts remotos não são comprovados por esses cenários. Notebooks sujos e providers virtuais recebem testes negativos reais, que comprovam preservação dos buffers e bloqueio de mutações; isso não habilita revisão desses recursos. A revisão de recursos não admitidos bloqueia alterações de conteúdo. Os relatórios identificam o editor, o sistema e o artefato de cada execução; uma matriz configurada não equivale a um resultado aprovado.
+### Escopo da verificação
 
-A compatibilidade de hooks é verificada separadamente: o modo automático exige que o schema da extensão oficial selecionada declare `command` com `args` separados. Não se presume uma versão mínima do Claude a partir dessa capacidade. Consulte o [contrato oficial dos hooks](https://code.claude.com/docs/en/hooks#command-hook-fields).
+As jornadas de teste cobrem ativação, comandos, preservação das preferências com a gestão desligada, CRLF, UTF-8 com BOM, recusa de criação, desfazer, revisão parcial e edição humana entre capturas. BOM, Unicode e final de linha são conferidos no documento e nos bytes salvos. Alteração da presença do BOM, finais de linha mistos e UTF-8 inválido devem bloquear a reversão.
+
+No modo VSIX, uma jornada adicional executa o hook instalado em um arquivo sintético e verifica sua ingestão e revisão no editor. Os testes de adaptadores abrangem falhas de gravação, recuperação e concorrência. Notebooks com alterações não salvas e providers virtuais recebem testes negativos reais, que comprovam a preservação dos buffers e o bloqueio de mutações; isso não habilita a revisão desses recursos, e a revisão de recursos não admitidos bloqueia alterações de conteúdo.
+
+Esses cenários não comprovam a abertura autenticada de conversas nem o funcionamento em hosts remotos. Os relatórios identificam o editor, o sistema e o artefato de cada execução. Uma matriz configurada não equivale a um resultado aprovado.
+
+### Compatibilidade de hooks
+
+A compatibilidade de hooks é verificada separadamente. O modo automático exige que o schema da extensão oficial selecionada declare `command` com `args` separados. Não se presume uma versão mínima do Claude a partir dessa capacidade. Consulte o [contrato oficial dos hooks](https://code.claude.com/docs/en/hooks#command-hook-fields).
 
 ## Instalação
 
-1. Em **Extensions**, abra o menu `…` e escolha **Install from VSIX**.
-2. Selecione `claude-code-launcher-0.12.1.vsix`.
-3. Abra a pasta do projeto e use um comando da categoria **Claude Code Launcher**.
-4. Para registrar novas mudanças, use **Ativar registro de mudanças** e inicie uma nova conversa do Claude.
+1. Em **Extensions**, abrir o menu `…` e selecionar **Install from VSIX**.
+2. Selecionar o arquivo `claude-code-launcher-0.13.0.vsix`.
+3. Abrir a pasta do projeto e executar um comando da categoria **Claude Code Launcher**.
+4. Para registrar novas mudanças, executar **Ativar registro de mudanças** e iniciar uma nova conversa do Claude.
 
-Atualizar o pacote não publica a extensão nem envia o histórico para um serviço externo. Os dados locais podem conter código e trechos de conversas; consulte a política de armazenamento abaixo.
+A atualização do pacote não publica a extensão nem envia o histórico a serviço externo. Os dados locais podem conter código e trechos de conversas; a política de armazenamento é descrita na seção [Hooks e dados locais](#hooks-e-dados-locais).
 
-## Abrir e organizar conversas
+## Conversas
 
-O ícone de balão no título do editor e o item **Claude** na barra de status abrem a barra lateral oficial. **Nova conversa em aba** e **Abrir chat em nova aba** usam o editor de conversas do Claude. A view **Conversas**, no contêiner **Claude Code Launcher** da barra de atividades, mostra:
+O ícone de balão no título do editor e o item **Claude** na barra de status abrem a barra lateral oficial. Os comandos **Nova conversa em aba** e **Abrir chat em nova aba** utilizam o editor de conversas do Claude.
+
+O contêiner **Claude Code Launcher**, na barra de atividades, contém a view homônima, que apresenta uma barra de abas no topo: **Conversas** e **Skills** (consulte [Gerenciamento de skills](#gerenciamento-de-skills)). A aba **Conversas** exibe:
 
 - **Nova conversa**, que abre uma conversa nova em aba;
-- uma lista só de conversas, uma linha cada, com o tempo à direita:
-  - **Abertas**: as conversas abertas em aba, com um ponto cheio na aba ativa e vazado nas outras. Clique para ir até a aba; **×**, ao passar o mouse, fecha essa aba.
-  - **Hoje**, **Ontem**, **Esta semana**, **Este mês** e **Mais antigas**: até 15 conversas recentes das pastas locais do workspace, sem repetir as que já estão abertas. Clique para retomar a conversa numa aba.
-- **Buscar conversas**, quando a lista passa de 6 conversas. A busca ignora acentos e maiúsculas; `Esc` limpa.
+- uma lista de conversas, com uma linha por item e o tempo à direita:
+  - **Abertas**: conversas abertas em aba, com ponto cheio na aba ativa e vazado nas demais. O clique move o foco para a aba; o botão **×**, exibido ao passar o ponteiro, fecha-a;
+  - **Hoje**, **Ontem**, **Esta semana**, **Este mês** e **Mais antigas**: até 15 conversas recentes das pastas locais do workspace, excluídas as já abertas. O clique retoma a conversa em uma aba;
+- **Buscar conversas**, disponível quando a lista excede 6 conversas. A busca desconsidera acentos e diferenças entre maiúsculas e minúsculas, e `Esc` limpa o campo.
 
-O título da view tem **Nova conversa** e **Atualizar conversas**. A lista funciona pelo teclado: `Tab` entra nela e as setas para cima e para baixo andam entre as linhas.
+O título da view oferece as ações **Nova conversa** e **Atualizar conversas**. A aba selecionada é preservada pela view, e os comandos **Mostrar skills** e **Mostrar conversas e mudanças** também alternam entre elas. A lista é operável por teclado: `Tab` move o foco para ela e as setas para cima e para baixo percorrem as linhas.
 
-Os títulos vêm de `~/.claude/projects/`, ou de `CLAUDE_CONFIG_DIR` quando definido. A leitura é assíncrona, usa cache limitado e mostra um aviso quando a lista está parcial. Resultados de uma view já fechada são descartados.
+Os títulos são obtidos de `~/.claude/projects/` ou de `CLAUDE_CONFIG_DIR`, quando definido. A leitura é assíncrona, utiliza cache limitado e sinaliza quando a lista é parcial. Resultados de uma view já fechada são descartados.
 
-O launcher informa quando a extensão oficial está ausente, a ativação demora, o comando não está disponível ou a abertura da aba não é confirmada. Um erro de autenticação informado pelo Claude orienta a fazer login. O launcher não possui uma API pública para consultar o estado de login; uma aba já aberta não comprova que uma nova conversa abriu. Quando necessário, o endereço de abertura usa o protocolo do editor atual, inclusive `cursor://`.
+O launcher informa quando a extensão oficial está ausente, quando a ativação excede o tempo esperado, quando o comando não está disponível e quando a abertura da aba não é confirmada. Erros de autenticação informados pelo Claude orientam o usuário a efetuar login. O launcher não dispõe de API pública para consultar o estado de login, e a existência de uma aba aberta não comprova que uma nova conversa foi iniciada. Quando necessário, o endereço de abertura utiliza o protocolo do editor em uso, inclusive `cursor://`.
 
-A organização automática dos grupos vem **desligada**. Ative `claudeCodeLauncher.manageEditorGroups` se quiser separar arquivos do grupo do chat e gerir as preferências de abertura. Ao desligar, somente valores ainda pertencentes à extensão são restaurados. Uma alteração manual posterior encerra a gestão daquele valor até desligar e ligar a opção novamente. Outro workspace com a opção desligada não restaura as preferências geridas pelo workspace atual.
+### Organização de grupos do editor
 
-## Revisar mudanças
+A organização automática dos grupos vem **desabilitada** por padrão. A opção `claudeCodeLauncher.manageEditorGroups` separa os arquivos do grupo do chat e gerencia as preferências de abertura. Ao ser desabilitada, somente os valores ainda pertencentes à extensão são restaurados. Uma alteração manual posterior encerra a gestão do respectivo valor até que a opção seja desabilitada e habilitada novamente. Um workspace distinto com a opção desabilitada não restaura as preferências geridas pelo workspace atual.
 
-A view **Mudanças** reúne edições capturadas pelas ferramentas Edit, Write, MultiEdit e NotebookEdit. Capturar um evento de notebook não significa que a reversão dele esteja habilitada.
+## Gerenciamento de skills
 
-O bloco **Para revisar** lista os arquivos pendentes, com `+`/`−` e a marca **novo** ou **apagado**. **✓** e **✕**, no fim de cada linha, aceitam ou recusam o arquivo; clique na linha para abrir a revisão no código. O painel mostra decisões parciais, fase da revisão e bloqueios por arquivo. Um arquivo bloqueado fica com as ações desativadas, com motivo e orientação para retomar a revisão.
+A aba **Skills** lista as skills do Claude Code, com busca e os seguintes filtros:
 
-Na barra lateral, o histórico é uma lista compacta, sem diff, agrupada por dia e pelo pedido que originou as edições. Cada linha mostra o status (ponto laranja para revisar, ✓ aceita, ↶ recusada, ✓ em laranja para revisão **mista**), o arquivo, `+`/`−` e quando. Clique para ver a mudança no código; o ícone de diff, ao passar o mouse, abre o antes e depois daquela edição. O tooltip traz o resumo e o que o Claude disse. **Desfazer pedido** aparece ao passar o mouse no pedido. **Ver os diffs na tela maior**, no fim da lista, abre o painel completo.
+| Filtro | Origem |
+| --- | --- |
+| **Projeto** | `.claude/skills/` da primeira pasta do workspace |
+| **Global** | `~/.claude/skills/` |
+| **claude.ai** | Skills sincronizadas; somente leitura |
 
-O estado aparece ao lado do título da view (**Registro configurado**, **Registro desligado** ou **Somente leitura**), e o número de arquivos para revisar aparece no ícone do Claude Code na barra de atividades. **Registro configurado** indica a presença dos handlers; a observação e a conclusão de capturas aparecem separadamente no diagnóstico. As ações ficam no título da view:
+Enquanto a aba **Skills** está ativa, a view **Mudanças** permanece oculta, sendo exibida novamente ao se selecionar **Conversas**.
 
-- **Recuperar revisão bloqueada**, quando esta janela está só para leitura, e **Desfazer recusa**, quando há recusa para desfazer;
+Para skills do projeto e globais, estão disponíveis as seguintes operações:
+
+- **Abrir** o `SKILL.md` ou **revelar** a pasta no sistema;
+- **Ativar ou desativar**: o arquivo `SKILL.md` é renomeado para `SKILL.md.disabled`, e a skill deixa de ser carregada pelo Claude;
+- **Criar**, informando nome (letras minúsculas, números e hífens) e descrição; o `SKILL.md` criado é aberto no editor;
+- **Excluir**, mediante confirmação; a pasta é enviada à lixeira do sistema.
+
+A lista é atualizada quando há alterações em disco. Sem pasta aberta, são exibidas apenas as skills globais e as do claude.ai.
+
+## Revisão de mudanças
+
+A view **Mudanças** reúne as edições capturadas pelas ferramentas Edit, Write, MultiEdit e NotebookEdit. A captura de um evento de notebook não implica que a reversão correspondente esteja habilitada.
+
+### Escopo por conversa
+
+O painel exibe somente os arquivos da conversa em foco e acompanha a troca de conversa. Um aviso no topo indica a conversa apresentada, e a ação **Ver todas** inclui também as alterações de outras conversas (a ação **Só esta conversa** restabelece o filtro). Quando nenhuma conversa é identificada, como no caso de uma conversa nova ainda sem mensagens, o painel exibe todas as alterações.
+
+### Painel lateral
+
+O bloco **Para revisar** lista os arquivos pendentes, com as contagens `+`/`−` e a indicação **novo** ou **apagado**. Os botões **✓** e **✕**, ao final de cada linha, aceitam ou recusam o arquivo; o clique na linha abre a revisão no código. O painel apresenta decisões parciais, a fase da revisão e os bloqueios por arquivo. Um arquivo bloqueado tem as ações desabilitadas, com indicação do motivo e orientação para retomar a revisão.
+
+O histórico é apresentado como lista compacta, sem diff, agrupada por dia e pelo pedido que originou as edições. Cada linha exibe o status, o arquivo, as contagens `+`/`−` e o momento da edição:
+
+| Indicador | Significado |
+| --- | --- |
+| Ponto laranja | Pendente de revisão |
+| ✓ | Aceita |
+| ↶ | Recusada |
+| ✓ em laranja | Revisão **mista** |
+
+O clique em uma linha exibe a mudança no código, e o ícone de diff, mostrado ao passar o ponteiro, abre a comparação antes/depois daquela edição. O tooltip apresenta o resumo e a explicação registrada pelo Claude. A ação **Desfazer pedido** é exibida ao passar o ponteiro sobre o pedido. O link **Ver os diffs na tela maior**, ao final da lista, abre o painel completo.
+
+O estado é exibido ao lado do título da view (**Registro configurado**, **Registro desligado** ou **Somente leitura**), e a quantidade de arquivos a revisar é indicada no ícone do Claude Code na barra de atividades. **Registro configurado** indica a presença dos handlers; a observação e a conclusão das capturas são apresentadas separadamente no diagnóstico.
+
+As ações disponíveis no título da view são:
+
+- **Recuperar revisão bloqueada**, quando a janela está em modo somente leitura, e **Desfazer recusa**, quando há recusa a desfazer;
 - **Atualizar** e **Tela maior**;
-- no menu `...`: aceitar ou recusar todas as pendentes, ligar/desligar as marcas no código, ativar ou desligar o registro, **Limpar histórico revisado**, **Apagar todos os dados locais de revisão** e **Liberar revisão para outra janela**.
+- no menu `...`: aceitar ou recusar todas as pendentes, ligar ou desligar as marcas no código, ativar ou desligar o registro, **Limpar histórico revisado**, **Apagar todos os dados locais de revisão** e **Liberar revisão para outra janela**.
 
-A **tela maior** abre o mesmo painel numa aba, com essas ações na barra do topo. Cada edição é um card com o resumo, o pedido e a explicação encontrados no transcript e os trechos de diff, com um alternador **Unificado / Lado a lado**. Trechos com mais de 60 linhas começam recolhidos. Os cards abertos, o bloco recolhido e a legenda continuam como você deixou ao reabrir o painel, e a rolagem não pula quando chega uma mudança nova. Quando a revisão está só para leitura, os botões que alteram a revisão ficam desativados e um aviso explica o motivo.
+### Tela maior
 
-- **Aceitar** mantém o conteúdo e registra a decisão. Aceitar um trecho incorpora somente aquele trecho à base da revisão.
-- **Recusar** restaura somente a parte ainda pendente. Uma parte aceita no editor continua aceita ao usar o painel ou recarregar a janela.
-- Uma revisão com partes aceitas e recusadas recebe estado **misto**. Edições contínuas abrangidas pela decisão têm todos os seus IDs representados.
-- Edições humanas, mudanças externas, identidade ambígua e snapshots insuficientes estabelecem barreiras. A ação pode ficar bloqueada ou atingir apenas o segmento contínuo comprovado; o launcher não volta através de uma edição humana para completar o lote.
-- Recusar um arquivo criado restaura sua **ausência**. Arquivo vazio e arquivo inexistente são situações diferentes. Exclusões usam a lixeira; uma falha não provoca tentativa de exclusão permanente.
-- A decisão que altera conteúdo só é concluída depois de aplicar, salvar e verificar o resultado. Uma falha de salvamento não aparece como recusa concluída. O resultado distingue alteração do conteúdo, salvamento e persistência da decisão; cancelamentos, conflitos e recuperação pendente trazem orientação específica por arquivo.
-- **Desfazer a última recusa** usa recuperação persistida por item. Itens conflitantes continuam recuperáveis e não são consumidos como se tivessem sido restaurados. Uma intenção interrompida pode exigir reconciliação antes de uma nova ação.
+A **tela maior** abre o mesmo painel em uma aba, com as ações na barra superior. Cada edição é apresentada como um cartão com o resumo, o pedido e a explicação localizados no transcript, além dos trechos de diff, com alternador **Unificado / Lado a lado**. Trechos com mais de 60 linhas iniciam recolhidos. Os cartões abertos, o bloco recolhido e a legenda são preservados ao reabrir o painel, e a rolagem não se desloca quando uma nova mudança é recebida. Quando a revisão está em modo somente leitura, os botões que a alteram permanecem desabilitados, e um aviso explicita o motivo.
 
-As lentes oferecem **Aceitar** e **Recusar** por trecho. Quando há vários trechos, também oferecem aceitar ou recusar tudo. O comando **Ocultar marcas** aceita as mudanças pendentes daquele arquivo; para ocultar somente a apresentação, desligue `claudeCodeLauncher.inlineChanges`.
+### Semântica das decisões
 
-**Lado a lado** nas lentes compara a base da revisão atual, incluindo decisões parciais, com o arquivo observado. A comparação de um card mostra o antes/depois histórico daquela edição. Essas comparações respondem a perguntas diferentes.
+- **Aceitar** mantém o conteúdo e registra a decisão. A aceitação de um trecho incorpora apenas esse trecho à base da revisão.
+- **Recusar** restaura somente a parte ainda pendente. Uma parte aceita no editor permanece aceita ao se utilizar o painel ou ao recarregar a janela.
+- Uma revisão com partes aceitas e recusadas recebe o estado **misto**. Edições contínuas abrangidas pela decisão têm todos os seus identificadores representados.
+- Edições humanas, mudanças externas, identidade ambígua e snapshots insuficientes estabelecem barreiras. A ação pode ficar bloqueada ou atingir apenas o segmento contínuo comprovado; o launcher não retrocede através de uma edição humana para completar o lote.
+- A recusa de um arquivo criado restaura sua **ausência**. Arquivo vazio e arquivo inexistente são situações distintas. As exclusões utilizam a lixeira, e uma falha não provoca tentativa de exclusão permanente.
+- Uma decisão que altera conteúdo só é concluída após aplicar, salvar e verificar o resultado. Uma falha de salvamento não é apresentada como recusa concluída. O resultado distingue a alteração do conteúdo, o salvamento e a persistência da decisão; cancelamentos, conflitos e recuperação pendente recebem orientação específica por arquivo.
+- **Desfazer a última recusa** utiliza recuperação persistida por item. Itens conflitantes permanecem recuperáveis e não são consumidos como se houvessem sido restaurados. Uma intenção interrompida pode exigir reconciliação antes de nova ação.
 
-Arquivos pendentes recebem a letra **C** no Explorer e uma contagem na barra de status. `Alt+]` e `Alt+[` percorrem os trechos; no macOS, onde essas teclas digitam caracteres, os atalhos são `Ctrl+Alt+]` e `Ctrl+Alt+[`. Cores podem ser ajustadas pelo tema, incluindo `claudeCodeLauncher.pendingChangeForeground`.
+### Revisão no editor
+
+As lentes oferecem **Aceitar** e **Recusar** por trecho e, quando há vários trechos, as opções de aceitar ou recusar todos. O comando **Ocultar marcas** aceita as mudanças pendentes do arquivo; para ocultar apenas a apresentação, desabilita-se `claudeCodeLauncher.inlineChanges`.
+
+O modo **Lado a lado** das lentes compara a base da revisão atual, inclusive com decisões parciais, ao arquivo observado. A comparação de um cartão exibe o antes/depois histórico da edição correspondente. As duas comparações respondem a perguntas distintas.
+
+Arquivos pendentes recebem a letra **C** no Explorer, e a barra de status exibe a respectiva contagem. Os atalhos `Alt+]` e `Alt+[` percorrem os trechos; no macOS, onde essas teclas produzem caracteres, os atalhos são `Ctrl+Alt+]` e `Ctrl+Alt+[`. As cores são ajustáveis pelo tema, inclusive `claudeCodeLauncher.pendingChangeForeground`.
 
 ## Hooks e dados locais
 
-Ativar o registro configura handlers próprios em `.claude/settings.local.json` e copia o script para `.claude/launcher-changes/`. O comando do hook usa executável e argumentos separados. Grupos mistos mantêm os handlers de terceiros; JSON inválido ou uma alteração concorrente bloqueiam a atualização da configuração.
+A ativação do registro configura handlers próprios em `.claude/settings.local.json` e copia o script para `.claude/launcher-changes/`. O comando do hook utiliza executável e argumentos separados. Grupos mistos preservam os handlers de terceiros; JSON inválido ou alteração concorrente bloqueiam a atualização da configuração.
 
-O modo `auto` exige capacidade comprovada no schema. `exec` é uma escolha explícita para um harness que você verificou suportar esse formato. `disabled` desliga os hooks geridos. Não existe fallback automático por shell. O hook observa a edição; uma falha de captura não autoriza nem impede a operação original do Claude.
+O modo `auto` exige capacidade comprovada no schema. O modo `exec` é uma escolha explícita, destinada a harness cuja compatibilidade com esse formato tenha sido verificada. O modo `disabled` desliga os hooks geridos. Não existe fallback automático por shell. O hook apenas observa a edição: uma falha de captura não autoriza nem impede a operação original do Claude.
 
-Ao atualizar a extensão, o script dos hooks já configurados é reparado automaticamente quando a capacidade, a política e a propriedade da escrita permitem. Uma captura pausada continua pausada. Bloqueios são informados; use **Ativar registro de mudanças** quando quiser reativar o registro e inicie uma nova conversa para o Claude carregar a configuração.
+Na atualização da extensão, o script dos hooks já configurados é reparado automaticamente, quando a capacidade, a política e a propriedade da escrita o permitem. Uma captura pausada permanece pausada. Os bloqueios são informados; para reativar o registro, utiliza-se **Ativar registro de mudanças** e inicia-se uma nova conversa, a fim de que o Claude carregue a configuração.
 
-O script do hook fica na pasta do projeto e roda a cada edição do Claude. A cada atualização do painel, a cópia é comparada com a distribuída pela extensão. A janela dona da revisão restaura uma cópia ausente ou diferente e, quando o conteúdo era diferente, avisa; uma janela só de leitura apenas informa a diferença. Essa conferência reduz o tempo em que um script trocado continua valendo, mas não impede que ele rode antes dela.
+O script do hook reside na pasta do projeto e é executado a cada edição do Claude. A cada atualização do painel, a cópia é comparada com a distribuída pela extensão. A janela proprietária da revisão restaura uma cópia ausente ou divergente e, quando o conteúdo divergia, emite aviso; uma janela em modo somente leitura apenas informa a divergência. Essa conferência reduz o intervalo de validade de um script substituído, mas não impede sua execução antes da verificação.
 
 ### Diagnóstico de captura
 
-A view **Mudanças** mostra o diagnóstico por pasta do workspace, distinguindo quatro informações:
+A view **Mudanças** apresenta o diagnóstico por pasta do workspace, distinguindo quatro informações:
 
-| Informação | O que ela comprova |
+| Informação | O que comprova |
 | --- | --- |
 | Configuração | Os handlers próprios foram encontrados na configuração local |
 | Capacidade de execução | O schema admite executável e argumentos separados, há escolha explícita de `exec` ou a capacidade permanece desconhecida |
-| Observação | O hook deixou um registro datado de uma tentativa e de sua etapa |
+| Observação | O hook registrou, com data, uma tentativa e a respectiva etapa |
 | Conclusão conhecida | Há evidência de um evento gravado no histórico; a disponibilidade de conteúdo é indicada separadamente |
 
-Configurar o hook não comprova que o Claude o executou. Um evento anterior à edição também não comprova sua conclusão. O painel apresenta orientação para situações como pausa, quota, permissão, espaço, preparação ou gravação indisponível. Se uma tentativa falhar depois de uma captura concluída, a evidência anterior continua datada; ela não representa atividade atual bem-sucedida.
+A configuração do hook não comprova que o Claude o executou, e um evento anterior à edição não comprova sua conclusão. O painel apresenta orientação para situações como pausa, quota, permissão, espaço, preparação ou gravação indisponível. Se uma tentativa falhar após uma captura concluída, a evidência anterior permanece datada e não representa atividade atual bem-sucedida.
 
-Os diagnósticos usam registros imutáveis com etapas e motivos admitidos, sem código, prompts, transcripts, caminhos absolutos ou exceções brutas. A leitura é limitada. Dados legados, incompatíveis, ilegíveis ou uma leitura incompleta aparecem como diagnóstico desconhecido ou parcial, preservando as informações encontradas. Mesmo sem uma entrada nova no histórico, mudanças nos diagnósticos podem atualizar o painel.
+Os diagnósticos utilizam registros imutáveis, com etapas e motivos admitidos, sem código, prompts, transcripts, caminhos absolutos ou exceções brutas. A leitura é limitada. Dados legados, incompatíveis ou ilegíveis, bem como leituras incompletas, aparecem como diagnóstico desconhecido ou parcial, preservadas as informações encontradas. Alterações nos diagnósticos podem atualizar o painel ainda que não haja nova entrada no histórico.
 
-**Cobertura não é universal:** os hooks abrangem Edit, Write, MultiEdit e NotebookEdit. Bash, PowerShell, MCP e alterações externas não são abrangidos por esse matcher. Conteúdo excluído, grande ou insuficiente não aparece como cópia integral. Ter snapshots disponíveis também não elimina as verificações de conflitos e recursos admitidos antes de uma reversão.
+**A cobertura não é universal.** Os hooks abrangem Edit, Write, MultiEdit e NotebookEdit. Bash, PowerShell, MCP e alterações externas não são abrangidos por esse matcher. Conteúdo excluído, grande ou insuficiente não é apresentado como cópia integral. A disponibilidade de snapshots tampouco dispensa as verificações de conflitos e de recursos admitidos anteriores a uma reversão.
 
 ### Política de conteúdo
 
-O histórico contém cópias locais em texto, sem criptografia própria. As exclusões padrão evitam novas cópias de `.env`, chaves privadas, certificados e alguns arquivos de credenciais. A política também impede novas cópias de pedidos e explicações para arquivos excluídos, inclusive em eventos antigos. Mudar uma exclusão não apaga cópias antigas nem garante que todo segredo possível seja reconhecido. Arquivos acima de **512 KiB** não têm o conteúdo integral capturado.
+O histórico contém cópias locais em texto, sem criptografia própria. As exclusões padrão evitam novas cópias de `.env`, chaves privadas, certificados e determinados arquivos de credenciais. A política também impede novas cópias de pedidos e explicações relativos a arquivos excluídos, inclusive em eventos antigos. A alteração de uma exclusão não apaga cópias anteriores nem garante que todo segredo possível seja reconhecido. Arquivos acima de **512 KiB** não têm o conteúdo integral capturado.
 
 | Configuração | Padrão | Efeito |
 | --- | --- | --- |
-| `claudeCodeLauncher.inlineChanges` | `true` | Mostra as marcas de revisão |
-| `claudeCodeLauncher.manageEditorGroups` | `false` | Permite gestão de grupos e preferências |
+| `claudeCodeLauncher.inlineChanges` | `true` | Exibe as marcas de revisão |
+| `claudeCodeLauncher.manageEditorGroups` | `false` | Habilita a gestão de grupos e preferências |
 | `claudeCodeLauncher.hookExecutionMode` | `auto` | `auto`, `exec` ou `disabled`. Opção da máquina: o `settings.json` de um projeto não a altera |
-| `claudeCodeLauncher.historyExcludedPatterns` | Padrões de arquivos sensíveis | Exclusões de novas cópias; aceita `*`, `**` e `?`. Os padrões do `settings.json` de um projeto somam-se aos do usuário; não os substituem |
-| `claudeCodeLauncher.historyRetentionDays` | `30` | Retenção de histórico revisado; `0` desliga limpeza por idade |
-| `claudeCodeLauncher.historyMaxStorageMB` | `128` | Orçamento local em MiB; atingir o limite suspende novas capturas |
+| `claudeCodeLauncher.historyExcludedPatterns` | Padrões de arquivos sensíveis | Exclusões de novas cópias; aceita `*`, `**` e `?`. Os padrões do `settings.json` de um projeto somam-se aos do usuário e não os substituem |
+| `claudeCodeLauncher.historyRetentionDays` | `30` | Retenção do histórico revisado; `0` desabilita a limpeza por idade |
+| `claudeCodeLauncher.historyMaxStorageMB` | `128` | Orçamento local, em MiB; ao atingir o limite, novas capturas são suspensas |
 
-Pendências, decisões parciais e referências necessárias à recuperação não são descartadas para caber no orçamento. Uma leitura parcial ou um registro inválido não permite declarar que todo o histórico foi processado. O diagnóstico de entradas inválidas evita copiar novamente seu conteúdo para relatórios.
+Pendências, decisões parciais e referências necessárias à recuperação não são descartadas para atender ao orçamento. Uma leitura parcial ou um registro inválido impede a declaração de que todo o histórico foi processado. O diagnóstico de entradas inválidas evita copiar novamente seu conteúdo para relatórios.
 
-**Limpar histórico revisado** remove entradas elegíveis do histórico, preservando revisões e recuperação. Por isso, não equivale a liberar todo o armazenamento.
+### Limpeza de dados
 
-A janela dona da revisão também recolhe, ao abrir e a cada seis horas, o que nenhum fluxo usa mais: marcadores de `completed/` e preparações de `pending/` com mais de 24 horas, e cópias de `review-blobs/v1/` que nem o estado canônico, nem a geração anterior, nem os backups mencionam. **Limpar histórico revisado** faz a mesma coleta na hora. Arquivos com nomes desconhecidos, capturas em andamento e cópias recentes são preservados.
+**Limpar histórico revisado** remove as entradas elegíveis do histórico, preservando revisões e recuperação. Por esse motivo, não equivale à liberação de todo o armazenamento.
 
-**Apagar todos os dados locais de revisão** pede confirmação, pausa a captura e exige que os produtores cooperantes estejam parados. Remove os dados próprios de revisão e recuperação; mantém os arquivos atuais do projeto e configurações de terceiros. A captura permanece pausada até você ativá-la novamente. Falhas e conflitos são informados como limpeza parcial ou bloqueada, com inventário do que permaneceu por categoria e orientação para a próxima tentativa. Um inventário incompleto não aparece como ausência de dados. Esse comando não apaga os transcripts originais do Claude, backups externos nem cópias no Git.
+A janela proprietária da revisão também recolhe, ao abrir e a cada seis horas, os itens que nenhum fluxo utiliza: marcadores de `completed/` e preparações de `pending/` com mais de 24 horas, e cópias de `review-blobs/v1/` não referenciadas pelo estado canônico, pela geração anterior ou pelos backups. **Limpar histórico revisado** executa a mesma coleta de imediato. Arquivos com nomes desconhecidos, capturas em andamento e cópias recentes são preservados.
 
-Uma limpeza interrompida mantém uma intenção mínima em `purge-state.v1.json`, sem conteúdo dos arquivos ou conversas. Enquanto ela existir, a versão 0.10 bloqueia revisão e reparo automático para impedir que os dados restantes sejam ingeridos novamente. Resolva a condição indicada e repita **Apagar todos os dados locais de revisão**; não remova esse marcador manualmente. Ele só é removido após a conclusão das etapas de disco e memória.
+**Apagar todos os dados locais de revisão** solicita confirmação, pausa a captura e exige que os produtores cooperantes estejam interrompidos. O comando remove os dados próprios de revisão e recuperação, mantendo os arquivos atuais do projeto e as configurações de terceiros. A captura permanece pausada até nova ativação pelo usuário. Falhas e conflitos são informados como limpeza parcial ou bloqueada, com inventário do que permaneceu por categoria e orientação para a nova tentativa. Um inventário incompleto não é apresentado como ausência de dados. O comando não apaga os transcripts originais do Claude, backups externos nem cópias no Git.
+
+Uma limpeza interrompida mantém uma intenção mínima em `purge-state.v1.json`, sem conteúdo de arquivos ou conversas. Enquanto esse marcador existir, a versão 0.10 bloqueia a revisão e o reparo automático, a fim de evitar que os dados remanescentes sejam novamente ingeridos. Deve-se resolver a condição indicada e repetir **Apagar todos os dados locais de revisão**; o marcador não deve ser removido manualmente, pois só é eliminado após a conclusão das etapas de disco e de memória.
 
 ### Arquivos e recuperação
 
-O diretório `.claude/launcher-changes/` é local e recebe regra de exclusão do Git. Não force sua inclusão: ele pode conter código e metadados privados.
+O diretório `.claude/launcher-changes/` é local e recebe regra de exclusão do Git. Não se deve forçar sua inclusão, pois pode conter código e metadados privados.
 
 | Caminho | Responsabilidade |
 | --- | --- |
 | `log.jsonl`, `blobs/` | Eventos capturados e versões de conteúdo |
 | `review-state.v1.json`, `.prev`, `review-blobs/v1/` | Estado canônico, geração anterior, decisões e recuperação |
-| `status.json` | Projeção de decisões completas para compatibilidade; estado misto não vira decisão homogênea |
+| `status.json` | Projeção de decisões completas, para compatibilidade; o estado misto não é convertido em decisão homogênea |
 | `review-writer.lock` | Propriedade cooperante da escrita de revisão |
-| `review-migration-backups/` | Backups da migração e recuperação |
-| `purge-state.v1.json` | Intenção de limpeza preparada ou parcial; bloqueia recriação automática até uma nova tentativa explícita concluir |
+| `review-migration-backups/` | Backups da migração e da recuperação |
+| `purge-state.v1.json` | Intenção de limpeza preparada ou parcial; bloqueia a recriação automática até que nova tentativa explícita seja concluída |
 | `meta.json` | Pedido e explicação associados aos eventos |
-| `capture-policy.json`, `capture-status.json` | Política de captura, pausa e diagnóstico legado; não comprovam sozinhos uma conclusão |
-| `capture-diagnostics/v2/observations/`, `capture-diagnostics/v2/completions/` | Evidências separadas de tentativas e conclusões; retenção conservadora de 32 registros válidos por categoria, preservando dados desconhecidos |
+| `capture-policy.json`, `capture-status.json` | Política de captura, pausa e diagnóstico legado; isoladamente, não comprovam conclusão |
+| `capture-diagnostics/v2/observations/`, `capture-diagnostics/v2/completions/` | Evidências separadas de tentativas e conclusões; retenção conservadora de 32 registros válidos por categoria, preservados os dados desconhecidos |
 | `active/`, `pending/`, `completed/` | Coordenação e idempotência do hook; marcadores antigos são recolhidos automaticamente |
 
-Somente uma janela nova escreve a revisão de cada projeto por vez. As demais ficam em leitura. Use **Liberar revisão para outra janela** na proprietária e **Recuperar revisão bloqueada** na janela que assumirá. Um proprietário ativo ou ambíguo não é removido por idade do lock.
+#### Propriedade da escrita
 
-Após uma queda, a janela seguinte abre só para leitura e, quando o processo registrado como dono não existe mais, oferece **Recuperar revisão** uma vez. A posse nunca é assumida sem essa confirmação, porque a pasta pode estar aberta em outra máquina ou contêiner. O comando de recuperação verifica o proprietário. Se houver um `review-recovery.lock` órfão, o procedimento é offline: encerre todas as janelas e conversas que usam o projeto, faça uma cópia de `.claude/launcher-changes/`, confira o PID registrado e só remova **esse guard** quando comprovar que o processo terminou. Não remova um lock de uma janela ativa nem edite o estado canônico para forçar uma decisão. Um guard de manutenção de captura também exige quiescência e inspeção antes de qualquer intervenção.
+Apenas uma janela escreve a revisão de cada projeto por vez; as demais permanecem em modo somente leitura. A janela proprietária utiliza **Liberar revisão para outra janela**, e a janela que assumirá utiliza **Recuperar revisão bloqueada**. Um proprietário ativo ou ambíguo não é removido por idade do lock.
 
-Um hook interrompido no meio da execução (tempo esgotado, queda do processo ou da máquina) deixa seu registro em `active/` e, às vezes, um marcador `.post` em `pending/`. A manutenção remove esses registros quando eles têm o formato criado pelo hook, mais de 30 segundos e pertencem a um processo que não existe mais; o marcador `.post` sai quando nenhum registro de `active/` permanece. Registros de processos ativos, recentes ou com nomes desconhecidos continuam bloqueando a manutenção.
+Após uma queda, a janela seguinte abre em modo somente leitura e, quando o processo registrado como proprietário não existe mais, oferece **Recuperar revisão** uma única vez. A posse nunca é assumida sem essa confirmação, pois a pasta pode estar aberta em outra máquina ou contêiner. O comando de recuperação verifica o proprietário.
 
-A versão 0.7.0 não participa desse protocolo. Não mantenha versões antigas e novas escrevendo no mesmo projeto. Para downgrade, encerre os escritores e preserve o diretório de revisão: o formato antigo não representa decisões parciais, estado misto nem toda a recuperação nova. Reinstalar o executável anterior não desfaz o conteúdo dos arquivos.
+Havendo um `review-recovery.lock` órfão, o procedimento é offline:
 
-As versões 0.8 e 0.9 também não reconhecem a intenção de limpeza introduzida na 0.10. Conclua uma limpeza interrompida com a versão 0.10 ou superior antes de considerar um downgrade. Uso simultâneo dessas versões durante a limpeza não é suportado.
+1. Encerrar todas as janelas e conversas que utilizam o projeto.
+2. Fazer uma cópia de `.claude/launcher-changes/`.
+3. Conferir o PID registrado.
+4. Remover **somente esse guard**, após comprovar que o processo foi encerrado.
+
+Não se deve remover o lock de uma janela ativa nem editar o estado canônico para forçar uma decisão. Um guard de manutenção de captura também exige quiescência e inspeção antes de qualquer intervenção.
+
+#### Hooks interrompidos
+
+Um hook interrompido durante a execução (tempo esgotado, queda do processo ou da máquina) deixa seu registro em `active/` e, por vezes, um marcador `.post` em `pending/`. A manutenção remove esses registros quando possuem o formato criado pelo hook, têm mais de 30 segundos e pertencem a processo que não existe mais; o marcador `.post` é removido quando não permanece nenhum registro em `active/`. Registros de processos ativos, recentes ou com nomes desconhecidos continuam bloqueando a manutenção.
+
+#### Versões anteriores e downgrade
+
+A versão 0.7.0 não participa desse protocolo. Não se deve manter versões antigas e novas escrevendo no mesmo projeto. Para realizar downgrade, devem-se encerrar os escritores e preservar o diretório de revisão, pois o formato antigo não representa decisões parciais, estado misto nem toda a recuperação atual. A reinstalação do executável anterior não desfaz o conteúdo dos arquivos.
+
+As versões 0.8 e 0.9 também não reconhecem a intenção de limpeza introduzida na 0.10. Uma limpeza interrompida deve ser concluída com a versão 0.10 ou superior antes de se considerar um downgrade. O uso simultâneo dessas versões durante a limpeza não é suportado.
 
 ## Comandos operacionais
 
-Todos aparecem na categoria **Claude Code Launcher** da paleta, além das ações nas views:
+Todos os comandos constam na categoria **Claude Code Launcher** da paleta, além das ações disponíveis nas views.
 
-| Comando | Uso |
+| Comando | Finalidade |
 | --- | --- |
 | Abrir chat na barra lateral / Abrir chat em nova aba | Abrir a integração oficial |
 | Nova conversa em aba | Solicitar nova conversa |
-| Instalar Claude Code | Instalar a extensão oficial por ação explícita |
+| Instalar Claude Code | Instalar a extensão oficial, por ação explícita |
+| Mostrar skills / Mostrar conversas e mudanças | Alternar as abas da view do launcher |
 | Mostrar mudanças do Claude | Abrir o painel maior |
 | Atualizar mudanças | Reler o histórico e o estado da revisão |
-| Ativar / Desligar registro de mudanças | Gerir hooks próprios |
-| Limpar histórico revisado | Limpar histórico elegível mantendo recuperação |
+| Ativar / Desligar registro de mudanças | Gerir os hooks próprios |
+| Limpar histórico revisado | Limpar o histórico elegível, mantendo a recuperação |
 | Apagar todos os dados locais de revisão | Limpeza completa coordenada, com confirmação |
 | Liberar revisão para outra janela | Encerrar a propriedade local da revisão |
 | Recuperar revisão bloqueada | Assumir uma revisão liberada ou recuperar proprietário comprovadamente encerrado |
 | Aceitar / Recusar todas as mudanças pendentes do Claude | Revisar o lote admitido |
-| Desfazer a última recusa | Recuperar o último lote, mantendo itens que não puderem ser restaurados |
+| Desfazer a última recusa | Recuperar o último lote, mantendo os itens que não puderem ser restaurados |
 | Ligar/desligar marcas das mudanças no código | Alterar a apresentação inline |
 | Próxima / Mudança anterior do Claude | Navegar pelos trechos |
 
 ## Desenvolvimento e validação
 
-Use Node.js 22+ e o lockfile do projeto:
+Requer-se Node.js 22 ou superior e o lockfile do projeto:
 
 ```sh
 npm ci --ignore-scripts --no-audit --fund=false
@@ -192,43 +277,57 @@ npm run lint
 npm test
 npm run test:package
 npm audit --audit-level=moderate
-npm run package -- --out claude-code-launcher-0.12.1.vsix
-npm run verify:package -- claude-code-launcher-0.12.1.vsix
+npm run package -- --out claude-code-launcher-0.13.0.vsix
+npm run verify:package -- claude-code-launcher-0.13.0.vsix
 ```
 
-`vscode:prepublish` chama o build. Ele remove a saída gerada antiga e compila com `noEmitOnError`. Os testes de pacote usam árvores temporárias, inclusive uma árvore sem `out/` e outra com saída obsoleta. O verificador inspeciona o VSIX real, compara bytes com o runtime atual, calcula SHA-256 e rejeita conteúdo inesperado. `docs/`, testes, scripts, configurações locais e dependências de desenvolvimento ficam fora do VSIX.
+O script `vscode:prepublish` executa o build, que remove a saída gerada anteriormente e compila com `noEmitOnError`. Os testes de pacote utilizam árvores temporárias, inclusive uma sem `out/` e outra com saída obsoleta. O verificador inspeciona o VSIX real, compara seus bytes com o runtime atual, calcula o SHA-256 e rejeita conteúdo inesperado. `docs/`, testes, scripts, configurações locais e dependências de desenvolvimento são excluídos do VSIX.
 
-Os testes de `test/*.test.js` usam regras reais e adaptadores explícitos onde o editor não está presente. Para testar o Extension Host, compile e execute:
+### Testes de host
+
+Os testes de `test/*.test.js` utilizam regras reais e adaptadores explícitos nos casos em que o editor não está presente. Para testar o Extension Host, compila-se o projeto e executa-se:
 
 ```sh
 npm run test:host -- --editor code
 npm run test:host -- --editor cursor
-npm run test:host -- --editor code --vsix claude-code-launcher-0.12.1.vsix --keep
-npm run test:host -- --editor cursor --vsix claude-code-launcher-0.12.1.vsix --report-dir docs/validacao/host-cursor
+npm run test:host -- --editor code --vsix claude-code-launcher-0.13.0.vsix --keep
+npm run test:host -- --editor cursor --vsix claude-code-launcher-0.13.0.vsix --report-dir docs/validacao/host-cursor
 ```
 
-O runner cria workspace, perfil, diretório de extensões e configuração Claude temporários. O modo `--vsix` instala e exercita o pacote nesse perfil isolado. Não altera o perfil normal nem envia mensagens ao Claude. `--keep` mantém o perfil temporário; falhas também preservam o diretório. `--report-dir` cria uma subpasta `run-*` exclusiva para cada execução, com os relatórios e logs correspondentes, preservando as execuções anteriores. O cenário é um workspace sintético confiável, não um teste do Restricted Mode.
+O runner cria workspace, perfil, diretório de extensões e configuração Claude temporários. O modo `--vsix` instala e exercita o pacote nesse perfil isolado, sem alterar o perfil normal e sem enviar mensagens ao Claude. A opção `--keep` mantém o perfil temporário, e as falhas também preservam o diretório. A opção `--report-dir` cria uma subpasta `run-*` exclusiva para cada execução, com os relatórios e logs correspondentes, preservando as execuções anteriores. O cenário é um workspace sintético confiável e não constitui teste do Restricted Mode.
 
-A jornada de captura do pacote confere o hash do hook instalado contra sua entrada no VSIX, executa os eventos anterior e posterior com Node externo 22+, aguarda a ingestão pelas lentes públicas do editor e verifica uma recusa no documento, no disco e no estado persistido. Esse arquivo sintético não recebe eventos semeados diretamente no log. Os relatórios separam o Node externo do Node do Extension Host e vinculam o resultado ao hash do VSIX. Isso exercita o hook diretamente; não equivale a uma conversa autenticada nem à execução dos hooks pelo harness oficial do Claude.
+A jornada de captura do pacote confere o hash do hook instalado com sua entrada no VSIX, executa os eventos anterior e posterior com Node externo 22 ou superior, aguarda a ingestão pelas lentes públicas do editor e verifica uma recusa no documento, no disco e no estado persistido. Esse arquivo sintético não recebe eventos semeados diretamente no log. Os relatórios separam o Node externo do Node do Extension Host e vinculam o resultado ao hash do VSIX. Esse procedimento exercita o hook diretamente e não equivale a uma conversa autenticada nem à execução dos hooks pelo harness oficial do Claude.
 
-No macOS, os caminhos padrão são os aplicativos em `/Applications`. Para outra instalação, use `--executable /caminho/do/editor`. O caminho do CLI é derivado dessa instalação; `--cli /caminho/Resources/app/out/cli.js` permite substituí-lo, mantendo **a mesma instalação**. Para baixar e exercitar uma versão exata do VS Code:
+No macOS, os caminhos padrão correspondem aos aplicativos em `/Applications`. Para outra instalação, utiliza-se `--executable /caminho/do/editor`. O caminho do CLI é derivado dessa instalação, e `--cli /caminho/Resources/app/out/cli.js` permite substituí-lo, desde que pertença à **mesma instalação**. Para baixar e exercitar uma versão exata do VS Code:
 
 ```sh
-npm run test:host -- --download-version 1.94.0 --vsix claude-code-launcher-0.12.1.vsix --report-dir docs/validacao/host-minimum
+npm run test:host -- --download-version 1.94.0 --vsix claude-code-launcher-0.13.0.vsix --report-dir docs/validacao/host-minimum
 ```
 
-`--download-version` aceita uma versão exata, somente para VS Code, e não pode ser combinado com `--executable` ou `--cli`. O download usa cache temporário fora do projeto. No Linux sem display, execute o comando com `xvfb-run -a`. A matriz CI inclui instalação do VSIX e a jornada do hook no VS Code 1.94.0 em Linux, Windows e macOS, além de tipagem, testes Node, testes de pacote e auditoria. Consulte os checks e as evidências da execução do commit que será distribuído.
+A opção `--download-version` aceita apenas uma versão exata, somente para VS Code, e não pode ser combinada com `--executable` ou `--cli`. O download utiliza cache temporário fora do projeto. Em Linux sem display, o comando deve ser executado com `xvfb-run -a`. A matriz de CI inclui a instalação do VSIX e a jornada do hook no VS Code 1.94.0 em Linux, Windows e macOS, além de tipagem, testes Node, testes de pacote e auditoria. Recomenda-se consultar os checks e as evidências da execução do commit a ser distribuído.
 
-Para medir a listagem de conversas com arquivos sintéticos, rode `node scripts/benchmark-sessions.cjs docs/validacao/sessoes.json`. Um segundo argumento aceita um módulo de baseline conhecido para comparação pareada. O relatório registra cinco amostras com 15, 1.000 e 5.000 arquivos por pasta, em duas pastas sintéticas, incluindo títulos ausentes e arquivos acima da janela de leitura. Cada combinação usa um processo novo com uma amostra fria e quatro aquecidas. Mede conclusão, disponibilidade do event loop, chamadas de IO, bytes lidos e variação de heap após GC explícito; registra os hashes dos módulos. Memória do processo e sonda de timer incluem ruído do runtime e não representam um SLA. O cache do sistema operacional não é limpo. A listagem usa até oito operações de stat simultâneas, 10.000 candidatos e 256 leituras de título por chamada; esses limites não constituem uma promessa de latência.
+### Avaliação de desempenho
 
-Os contratos adicionais também usam o VSIX instalado em perfis isolados:
+Para medir a listagem de conversas com arquivos sintéticos, executa-se `node scripts/benchmark-sessions.cjs docs/validacao/sessoes.json`. Um segundo argumento aceita um módulo de baseline conhecido, para comparação pareada.
+
+O relatório registra cinco amostras com 15, 1.000 e 5.000 arquivos por pasta, em duas pastas sintéticas, incluindo títulos ausentes e arquivos acima da janela de leitura. Cada combinação utiliza um processo novo, com uma amostra fria e quatro aquecidas. São medidos a conclusão, a disponibilidade do event loop, as chamadas de IO, os bytes lidos e a variação de heap após GC explícito, além do registro dos hashes dos módulos. A memória do processo e a sonda de timer incluem ruído do runtime e não representam um SLA. O cache do sistema operacional não é limpo. A listagem utiliza até oito operações de stat simultâneas, 10.000 candidatos e 256 leituras de título por chamada; esses limites não constituem promessa de latência.
+
+### Contratos adicionais
+
+Os contratos adicionais também utilizam o VSIX instalado em perfis isolados:
 
 ```sh
-npm run test:host:contracts -- multi-window --vsix claude-code-launcher-0.12.1.vsix --report-dir docs/validacao/janelas
-npm run test:host:contracts -- lifecycle --vsix claude-code-launcher-0.12.1.vsix --report-dir docs/validacao/lifecycle
-npm run test:host:contracts -- official --official-extension /caminho/da/extensao/anthropic.claude-code --vsix claude-code-launcher-0.12.1.vsix --report-dir docs/validacao/oficial
+npm run test:host:contracts -- multi-window --vsix claude-code-launcher-0.13.0.vsix --report-dir docs/validacao/janelas
+npm run test:host:contracts -- lifecycle --vsix claude-code-launcher-0.13.0.vsix --report-dir docs/validacao/lifecycle
+npm run test:host:contracts -- official --official-extension /caminho/da/extensao/anthropic.claude-code --vsix claude-code-launcher-0.13.0.vsix --report-dir docs/validacao/oficial
 ```
 
-`multi-window` exercita duas janelas reais, recarregamento, decisão parcial e transferência explícita da escrita. `lifecycle` mede a ativação pública e instancia os componentes empacotados de revisão e lista de conversas com um contexto real e um observador que encaminha chamadas às APIs reais; repete painéis, troca de pastas e descarte durante refresh. O provider privado da lista é exposto somente no carregador de teste, sem mudar o código distribuído; a view real recebe mil sessões sintéticas. Seus contadores pertencem à instância observada e não representam todos os recursos do editor. `official` copia somente os arquivos de programa da extensão oficial já instalada para o diretório temporário, consulta o estado do CLI isolado e verifica uma aba oficial aberta sem enviar mensagem. Também usa o modo público [`--init-only`](https://code.claude.com/docs/en/hooks#setup) para testar o descritor de executável e argumentos em um evento Setup sintético, incluindo erro e timeout. Setup não equivale aos eventos de captura PreToolUse/PostToolUse; esses continuam identificados separadamente. Nenhum desses cenários comprova uma conversa autenticada ou a execução do hook pelo modelo. A matriz CI inclui os contratos de janelas e lifecycle; a extensão oficial depende de uma instalação local compatível com o sistema.
+- **`multi-window`** exercita duas janelas reais, recarregamento, decisão parcial e transferência explícita da escrita.
+- **`lifecycle`** mede a ativação pública e instancia os componentes empacotados de revisão e de lista de conversas, com um contexto real e um observador que encaminha chamadas às APIs reais. Repete painéis, troca de pastas e descarte durante o refresh. O provider privado da lista é exposto somente no carregador de teste, sem alterar o código distribuído, e a view real recebe mil sessões sintéticas. Os contadores pertencem à instância observada e não representam todos os recursos do editor.
+- **`official`** copia somente os arquivos de programa da extensão oficial já instalada para o diretório temporário, consulta o estado do CLI isolado e verifica uma aba oficial aberta, sem enviar mensagem. Utiliza também o modo público [`--init-only`](https://code.claude.com/docs/en/hooks#setup) para testar o descritor de executável e argumentos em um evento Setup sintético, inclusive nos casos de erro e de timeout. O evento Setup não equivale aos eventos de captura PreToolUse/PostToolUse, que continuam identificados separadamente.
 
-Os PRDs, specs e registros de implementação em `docs/` são locais e estão ignorados pelo Git. Não use `git add -f docs/`. Gerar um VSIX não executa commit, push nem publicação em Marketplace/Open VSX.
+Nenhum desses cenários comprova uma conversa autenticada nem a execução do hook pelo modelo. A matriz de CI inclui os contratos de janelas e de lifecycle; o contrato `official` depende de uma instalação local compatível com o sistema.
+
+### Documentação interna e publicação
+
+Os PRDs, specs e registros de implementação em `docs/` são locais e estão ignorados pelo Git; não se deve utilizar `git add -f docs/`. A geração de um VSIX não executa commit, push nem publicação em Marketplace ou Open VSX.

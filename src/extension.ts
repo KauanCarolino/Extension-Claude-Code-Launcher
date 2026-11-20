@@ -66,6 +66,16 @@ class LauncherViewProvider implements vscode.WebviewViewProvider, vscode.Disposa
 					case 'install':
 						await installClaude();
 						break;
+					case 'showSkills':
+						await vscode.commands.executeCommand('claude-code-launcher.showSkills');
+						break;
+					case 'showChats':
+						await vscode.commands.executeCommand('claude-code-launcher.showChats');
+						break;
+					case 'skills.refresh': case 'skills.open': case 'skills.reveal':
+					case 'skills.toggle': case 'skills.delete': case 'skills.create':
+						await skills?.handle(message.command, message.id, message.key);
+						return;
 				}
 			} catch (error) { reportLaunchError(error); }
 			void this.postState();
@@ -84,6 +94,11 @@ class LauncherViewProvider implements vscode.WebviewViewProvider, vscode.Disposa
 	dispose(): void {
 		this.disposed = true; this.generation += 1; clearTimeout(this.refreshTimer); this.view = undefined;
 		this.viewSubscriptions.splice(0).forEach((item) => item.dispose());
+	}
+
+	/** Mensagem avulsa para a página (usada pela aba de skills). */
+	postRaw(message: unknown): Thenable<boolean> | undefined {
+		return this.disposed ? undefined : this.view?.webview.postMessage(message);
 	}
 
 	private async postState(): Promise<void> {
@@ -120,6 +135,8 @@ class LauncherViewProvider implements vscode.WebviewViewProvider, vscode.Disposa
 		const nonce = createNonce();
 		const script = webview.asWebviewUri(vscode.Uri.joinPath(media, 'home.js'));
 		const style = webview.asWebviewUri(vscode.Uri.joinPath(media, 'home.css'));
+		const skillsScript = webview.asWebviewUri(vscode.Uri.joinPath(media, 'skills.js'));
+		const skillsStyle = webview.asWebviewUri(vscode.Uri.joinPath(media, 'skills.css'));
 		const base = webview.asWebviewUri(vscode.Uri.joinPath(media, 'base.css'));
 		const codicons = webview.asWebviewUri(vscode.Uri.joinPath(media, 'codicons', 'codicon.css'));
 		return `<!DOCTYPE html>
@@ -131,10 +148,12 @@ class LauncherViewProvider implements vscode.WebviewViewProvider, vscode.Disposa
 	<link rel="stylesheet" href="${codicons}" />
 	<link rel="stylesheet" href="${base}" />
 	<link rel="stylesheet" href="${style}" />
+	<link rel="stylesheet" href="${skillsStyle}" />
 	<title>Claude Code</title>
 </head>
 <body>
 	<div id="root"><p class="loading muted"><span class="codicon codicon-loading codicon-modifier-spin"></span> Carregando…</p></div>
+	<script nonce="${nonce}" src="${skillsScript}"></script>
 	<script nonce="${nonce}" src="${script}"></script>
 </body>
 </html>`;
@@ -198,6 +217,7 @@ async function openClaudeTab(sessionId?: string): Promise<void> {
 }
 
 let provider: LauncherViewProvider | undefined;
+let skills: ReturnType<typeof registerSkills> | undefined;
 let changes: ChangesController | undefined;
 let preferenceManager: PreferenceManager | undefined;
 const PREFERENCE_KEY = 'claudeCodeLauncher.managedPreferences.v1';
@@ -217,7 +237,8 @@ export function activate(context: vscode.ExtensionContext): void {
 	provider = new LauncherViewProvider(context);
 	changes = registerChanges(context);
 	registerInline(context, changes);
-	registerSkills(context);
+	scheduleActiveChat(1000);
+	skills = registerSkills(context, (message) => { void provider?.postRaw(message); });
 	watchSessions(context);
 
 	context.subscriptions.push(
@@ -229,8 +250,8 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.extensions.onDidChange(() => provider?.refresh()),
 		vscode.commands.registerCommand('claude-code-launcher.newTab', () => openClaude('tab')),
 		vscode.commands.registerCommand('claude-code-launcher.refreshSessions', () => provider?.refresh(0)),
-		vscode.window.tabGroups.onDidChangeTabs(() => provider?.refresh()),
-		vscode.window.tabGroups.onDidChangeTabGroups(() => provider?.refresh()),
+		vscode.window.tabGroups.onDidChangeTabs(() => { provider?.refresh(); scheduleActiveChat(); }),
+		vscode.window.tabGroups.onDidChangeTabGroups(() => { provider?.refresh(); scheduleActiveChat(); }),
 		vscode.window.tabGroups.onDidChangeTabs((event) => {
 			if (isolatingClaudeGroup) {
 				return;
@@ -274,7 +295,7 @@ export function activate(context: vscode.ExtensionContext): void {
  * sem esta espera, a próxima janela poderia abrir a revisão só para leitura.
  */
 export function deactivate(): Promise<void> | undefined {
-	provider?.dispose(); provider = undefined;
+	clearTimeout(chatTimer); provider?.dispose(); provider = undefined; skills = undefined;
 	const controller = changes; changes = undefined;
 	if (!controller) { return undefined; }
 	controller.dispose();
@@ -626,6 +647,30 @@ function createNonce(): string {
 }
 
 /** Pastas do workspace no disco local (as conversas do Claude Code ficam indexadas por esse caminho). */
+/**
+ * Descobre qual conversa está em foco (pelo título da aba do chat) e avisa o painel Mudanças.
+ * Se o foco vai para um arquivo, mantém a última conversa; sem correspondência, mostra tudo.
+ */
+let chatTimer: NodeJS.Timeout | undefined;
+let chatGeneration = 0;
+function scheduleActiveChat(delay = 250): void {
+	clearTimeout(chatTimer);
+	chatTimer = setTimeout(() => { void updateActiveChat().catch(() => undefined); }, delay);
+}
+
+async function updateActiveChat(): Promise<void> {
+	const tab = vscode.window.tabGroups.activeTabGroup.activeTab;
+	if (!tab || !isClaudeTab(tab) || !changes) { return; }
+	const generation = ++chatGeneration;
+	const label = tab.label;
+	const results = await Promise.allSettled(localFolders().map((folder) => listSessionsAsync(folder, 100)));
+	if (generation !== chatGeneration) { return; }
+	const match = results.flatMap((result) => result.status === 'fulfilled' ? result.value.sessions : [])
+		.filter((session) => session.title === label)
+		.sort((a, b) => b.updated - a.updated)[0];
+	changes.setActiveChat(match ? { session: match.id, title: match.title } : null);
+}
+
 function localFolders(): string[] {
 	return (vscode.workspace.workspaceFolders ?? [])
 		.filter((folder) => folder.uri.scheme === 'file')

@@ -1,10 +1,20 @@
 # Changelog
 
-## 0.12.1 — 2026-11-20
+## 0.13.0 — 2026-11-20
 
 ### Adicionado
 
-- Lista de skills como uma seção do painel do launcher (ao lado de Conversas e Mudanças), com busca e filtros **Projeto**, **Global** e **claude.ai**. Permite abrir o `SKILL.md`, ativar ou desativar, criar e excluir (para a lixeira) skills do projeto e globais. As skills sincronizadas do claude.ai são somente leitura.
+- O painel **Mudanças** agora mostra só os arquivos da conversa em foco. Ao trocar de conversa, a lista acompanha. Um aviso no topo indica qual conversa está sendo mostrada, e **Ver todas** mostra também as de outras conversas. Sem conversa identificada (por exemplo, uma conversa nova ainda sem mensagens), o painel mostra tudo.
+
+## 0.12.5 — 2026-11-20
+
+### Adicionado
+
+- Lista de skills no painel do launcher, alternando com Conversas e Mudanças por uma barra de abas no topo do painel, com busca e filtros **Projeto**, **Global** e **claude.ai**. Permite abrir o `SKILL.md`, ativar ou desativar, criar e excluir (para a lixeira) skills do projeto e globais. As skills sincronizadas do claude.ai são somente leitura.
+
+### Alterado
+
+- A view do launcher passou a se chamar **Claude Code Launcher** e a view separada de skills deixou de existir. Os comandos **Mostrar skills** e **Mostrar conversas e mudanças** alternam as abas; **Mudanças** fica oculta na aba Skills. O comando **Abrir lista de skills** foi removido.
 
 ## 0.11.0 — 2026-11-19
 

@@ -486,11 +486,12 @@ export function validateSavedMeta(value: unknown): Record<string, { reason: stri
 
 export interface HistoryMessage { command: string; id?: string; key?: string; request?: string; revision?: number }
 const CHANGES_COMMANDS = new Set([
-	'ready', 'refresh', 'enable', 'disable', 'clear', 'purge', 'openPanel', 'compare', 'showInCode', 'openFile',
+	'ready', 'refresh', 'toggleChatFilter', 'enable', 'disable', 'clear', 'purge', 'openPanel', 'compare', 'showInCode', 'openFile',
 	'acceptAll', 'rejectAll', 'acceptFile', 'rejectFile', 'rejectRequest', 'undoReject',
 	'release', 'recover', 'releaseWriter', 'recoverWriter', 'clearAllReviewData',
 ]);
-const HOME_COMMANDS = new Set(['ready', 'install', 'newTab', 'openSidebar', 'refresh', 'openSession', 'focusTab', 'closeTab']);
+const HOME_COMMANDS = new Set(['ready', 'install', 'newTab', 'openSidebar', 'refresh', 'openSession', 'focusTab', 'closeTab', 'showSkills', 'showChats',
+	'skills.refresh', 'skills.open', 'skills.reveal', 'skills.toggle', 'skills.delete', 'skills.create']);
 export function validateMessage(value: unknown, surface: 'changes' | 'home' = 'changes'): HistoryMessage | undefined {
 	if (!object(value) || typeof value.command !== 'string'
 		|| !(surface === 'changes' ? CHANGES_COMMANDS : HOME_COMMANDS).has(value.command)) { return undefined; }

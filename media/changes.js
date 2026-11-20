@@ -265,9 +265,29 @@
 		return box;
 	}
 
+	// Mostra de qual conversa são as mudanças e deixa alternar para ver as de todas.
+	function renderChatScope(chat) {
+		const bar = el('div', 'chat-scope');
+		bar.append(icon('comment-discussion'));
+		const label = el('span', 'chat-scope-label', chat.scoped ? 'Conversa: ' + chat.title : 'Todas as conversas');
+		label.title = chat.title;
+		bar.append(label);
+		if (chat.others > 0 || !chat.scoped) {
+			const toggle = el('button', 'btn-ghost chat-scope-toggle', chat.scoped ? 'Ver todas (' + chat.others + ' de outras)' : 'Só esta conversa');
+			toggle.type = 'button';
+			toggle.dataset.focusKey = 'chat-scope';
+			toggle.addEventListener('click', () => send('toggleChatFilter'));
+			bar.append(toggle);
+		}
+		return bar;
+	}
+
 	function renderContent(state) {
 		if (!state.enabled) {
 			root.append(renderIntro());
+		}
+		if (state.chat) {
+			root.append(renderChatScope(state.chat));
 		}
 		if (state.files && state.files.length > 0) {
 			root.append(renderFiles(state));
@@ -280,7 +300,9 @@
 
 		if (state.entries.length === 0) {
 			if (state.enabled) {
-				root.append(emptyState('inbox', 'Nenhuma mudança ainda', 'Peça ao Claude para editar um arquivo e ela aparece aqui, com o motivo e o diff.'));
+				root.append(state.chat && state.chat.scoped
+					? emptyState('inbox', 'Esta conversa ainda não mudou arquivos', 'Quando o Claude editar um arquivo nesta conversa, ele aparece aqui. Use "Ver todas" para ver as de outras conversas.')
+					: emptyState('inbox', 'Nenhuma mudança ainda', 'Peça ao Claude para editar um arquivo e ela aparece aqui, com o motivo e o diff.'));
 			}
 			return;
 		}

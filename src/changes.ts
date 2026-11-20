@@ -117,6 +117,9 @@ export class ChangesController implements
 	private readonly panelSubscriptions: vscode.Disposable[] = [];
 	private refreshTimer: ReturnType<typeof setTimeout> | undefined;
 	private publishTimer: ReturnType<typeof setTimeout> | undefined;
+	/** Conversa em foco: com ela definida, o painel mostra só as edições dela (a menos que "Ver todos" esteja ligado). */
+	private activeChat: { session: string; title: string } | null = null;
+	private showAllChats = false;
 	private metaTimer: ReturnType<typeof setTimeout> | undefined;
 	private readonly disposables: vscode.Disposable[] = [];
 	private readonly reasonCache = new Map<string, string>();
@@ -262,6 +265,20 @@ export class ChangesController implements
 	}
 
 	// ---- Usado por inline.ts ----------------------------------------------------
+
+	/** Define a conversa cujas mudanças o painel mostra; `null` mostra tudo. */
+	setActiveChat(chat: { session: string; title: string } | null): void {
+		if (this.disposed || this.activeChat?.session === chat?.session) { return; }
+		this.activeChat = chat;
+		this.summaryCache.clear();
+		this.publish();
+	}
+
+	private toggleAllChats(): void {
+		this.showAllChats = !this.showAllChats;
+		this.summaryCache.clear();
+		this.publish();
+	}
 
 	getEntries(): readonly RawEntry[] {
 		return this.entries;
@@ -853,6 +870,9 @@ export class ChangesController implements
 			case 'refresh':
 				await this.refresh();
 				return;
+			case 'toggleChatFilter':
+				this.toggleAllChats();
+				return;
 			case 'enable':
 				await this.setEnabled(true);
 				return;
@@ -1035,7 +1055,10 @@ export class ChangesController implements
 			// earlier blocked segments rather than projecting only the latest review.
 			const states = new Map([...this.stores].map(([key, store]) => [key, store.get()]));
 			const projections = new Map<string, ReturnType<typeof projectReview>>();
-		const history: ViewEntry[] = this.entries.slice(0, MAX_HISTORY).map((entry) => {
+		const chat = this.activeChat;
+		const scoped = Boolean(chat) && !this.showAllChats;
+		const inChat = (entry: RawEntry): boolean => !scoped || entry.session === chat?.session;
+		const history: ViewEntry[] = this.entries.filter(inChat).slice(0, MAX_HISTORY).map((entry) => {
 			const request = this.requestCache.get(entry.id);
 				const context = this.entryFolder.get(entry.id), store = context ? this.stores.get(context) : undefined;
 				const segment = context ? states.get(context)?.reviews[entry.file]?.find((review) => review.ids.includes(entry.id)) : undefined;
@@ -1066,7 +1089,9 @@ export class ChangesController implements
 				return health ? [{ workspace: folder.index + 1, ...health }] : [];
 			}),
 			entries: history,
-				files: this.pendingGroups().map((list) => this.summaryOf(list, states.get(this.entryFolder.get(list[0].id) || ''))),
+				files: this.pendingGroups().map((list) => list.filter(inChat)).filter((list) => list.length > 0)
+					.map((list) => this.summaryOf(list, states.get(this.entryFolder.get(list[0].id) || ''))),
+			chat: chat ? { title: chat.title, scoped, others: this.entries.filter((entry) => entry.session !== chat.session).length } : null,
 			canUndo: this.canUndoReject(),
 			coverageMessage: [this.coverageMessage, ...this.hookWarnings.values(), ...this.runtimeWarnings.values(), ...this.captureWarnings.values()].filter(Boolean).join(' ') || null,
 			reviewWriter: [...this.stores.values()].every((store) => store.writable),
