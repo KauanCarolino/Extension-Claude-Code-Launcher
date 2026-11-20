@@ -338,10 +338,8 @@ function capture(phase, input, options = {}) {
 			let fd;
 			try {
 				store.checked(file);
-				// Renovar a data do blob reaproveitado exige um handle com escrita no Windows
-				// (FILE_WRITE_ATTRIBUTES); só leitura dá EPERM e bloquearia toda captura.
-				const access = process.platform === 'win32' ? fs.constants.O_RDWR : fs.constants.O_RDONLY;
-				fd = io.openSync(file, access | (fs.constants.O_NOFOLLOW || 0));
+				// Windows requires write access on the existing handle to update file times.
+				fd = io.openSync(file, fs.constants.O_RDWR | (fs.constants.O_NOFOLLOW || 0));
 				if (!io.fstatSync(fd).isFile()) { throw new Error('unsafeStorageType'); }
 				const now = new Date(); io.futimesSync(fd, now, now);
 			} finally { if (fd !== undefined) { io.closeSync(fd); } }
