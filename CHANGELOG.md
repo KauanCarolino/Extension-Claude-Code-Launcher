@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.12.1 — 2026-11-20
+
+### Adicionado
+
+- Lista de skills como uma seção do painel do launcher (ao lado de Conversas e Mudanças), com busca e filtros **Projeto**, **Global** e **claude.ai**. Permite abrir o `SKILL.md`, ativar ou desativar, criar e excluir (para a lixeira) skills do projeto e globais. As skills sincronizadas do claude.ai são somente leitura.
+
 ## 0.11.0 — 2026-11-19
 
 ### Corrigido

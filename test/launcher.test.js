@@ -88,6 +88,7 @@ function fixture(options = {}) {
       if (id === 'vscode') return vscode;
       if (id === './changes') return { registerChanges() { return options.changesController; } };
       if (id === './inline') return { registerInline() {} };
+      if (id === './skills-view') return { registerSkills() {} };
       if (id === './sessions') return { sessionsDir: () => '/fixture/sessions',
         listSessionsAsync: options.listSessions || (async () => ({ sessions: [], partial: false })) };
       return id.startsWith('.') ? require(path.resolve(path.dirname(source), id)) : require(id);

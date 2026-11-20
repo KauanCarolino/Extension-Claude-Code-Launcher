@@ -6,7 +6,7 @@ O chat, a autenticação, os modelos e as permissões pertencem à extensão ofi
 
 Esta é uma extensão independente. Não é um produto da Anthropic nem é mantida por ela; "Claude" e "Claude Code" são marcas da Anthropic.
 
-Versão: **0.11.0**. Pacote local: `claude-code-launcher-0.11.0.vsix`.
+Versão: **0.12.1**. Pacote local: `claude-code-launcher-0.12.1.vsix`.
 
 ## Requisitos e compatibilidade
 
@@ -29,7 +29,7 @@ A compatibilidade de hooks é verificada separadamente: o modo automático exige
 ## Instalação
 
 1. Em **Extensions**, abra o menu `…` e escolha **Install from VSIX**.
-2. Selecione `claude-code-launcher-0.11.0.vsix`.
+2. Selecione `claude-code-launcher-0.12.1.vsix`.
 3. Abra a pasta do projeto e use um comando da categoria **Claude Code Launcher**.
 4. Para registrar novas mudanças, use **Ativar registro de mudanças** e inicie uma nova conversa do Claude.
 
@@ -192,8 +192,8 @@ npm run lint
 npm test
 npm run test:package
 npm audit --audit-level=moderate
-npm run package -- --out claude-code-launcher-0.11.0.vsix
-npm run verify:package -- claude-code-launcher-0.11.0.vsix
+npm run package -- --out claude-code-launcher-0.12.1.vsix
+npm run verify:package -- claude-code-launcher-0.12.1.vsix
 ```
 
 `vscode:prepublish` chama o build. Ele remove a saída gerada antiga e compila com `noEmitOnError`. Os testes de pacote usam árvores temporárias, inclusive uma árvore sem `out/` e outra com saída obsoleta. O verificador inspeciona o VSIX real, compara bytes com o runtime atual, calcula SHA-256 e rejeita conteúdo inesperado. `docs/`, testes, scripts, configurações locais e dependências de desenvolvimento ficam fora do VSIX.
@@ -203,8 +203,8 @@ Os testes de `test/*.test.js` usam regras reais e adaptadores explícitos onde o
 ```sh
 npm run test:host -- --editor code
 npm run test:host -- --editor cursor
-npm run test:host -- --editor code --vsix claude-code-launcher-0.11.0.vsix --keep
-npm run test:host -- --editor cursor --vsix claude-code-launcher-0.11.0.vsix --report-dir docs/validacao/host-cursor
+npm run test:host -- --editor code --vsix claude-code-launcher-0.12.1.vsix --keep
+npm run test:host -- --editor cursor --vsix claude-code-launcher-0.12.1.vsix --report-dir docs/validacao/host-cursor
 ```
 
 O runner cria workspace, perfil, diretório de extensões e configuração Claude temporários. O modo `--vsix` instala e exercita o pacote nesse perfil isolado. Não altera o perfil normal nem envia mensagens ao Claude. `--keep` mantém o perfil temporário; falhas também preservam o diretório. `--report-dir` cria uma subpasta `run-*` exclusiva para cada execução, com os relatórios e logs correspondentes, preservando as execuções anteriores. O cenário é um workspace sintético confiável, não um teste do Restricted Mode.
@@ -214,7 +214,7 @@ A jornada de captura do pacote confere o hash do hook instalado contra sua entra
 No macOS, os caminhos padrão são os aplicativos em `/Applications`. Para outra instalação, use `--executable /caminho/do/editor`. O caminho do CLI é derivado dessa instalação; `--cli /caminho/Resources/app/out/cli.js` permite substituí-lo, mantendo **a mesma instalação**. Para baixar e exercitar uma versão exata do VS Code:
 
 ```sh
-npm run test:host -- --download-version 1.94.0 --vsix claude-code-launcher-0.11.0.vsix --report-dir docs/validacao/host-minimum
+npm run test:host -- --download-version 1.94.0 --vsix claude-code-launcher-0.12.1.vsix --report-dir docs/validacao/host-minimum
 ```
 
 `--download-version` aceita uma versão exata, somente para VS Code, e não pode ser combinado com `--executable` ou `--cli`. O download usa cache temporário fora do projeto. No Linux sem display, execute o comando com `xvfb-run -a`. A matriz CI inclui instalação do VSIX e a jornada do hook no VS Code 1.94.0 em Linux, Windows e macOS, além de tipagem, testes Node, testes de pacote e auditoria. Consulte os checks e as evidências da execução do commit que será distribuído.
@@ -224,9 +224,9 @@ Para medir a listagem de conversas com arquivos sintéticos, rode `node scripts/
 Os contratos adicionais também usam o VSIX instalado em perfis isolados:
 
 ```sh
-npm run test:host:contracts -- multi-window --vsix claude-code-launcher-0.11.0.vsix --report-dir docs/validacao/janelas
-npm run test:host:contracts -- lifecycle --vsix claude-code-launcher-0.11.0.vsix --report-dir docs/validacao/lifecycle
-npm run test:host:contracts -- official --official-extension /caminho/da/extensao/anthropic.claude-code --vsix claude-code-launcher-0.11.0.vsix --report-dir docs/validacao/oficial
+npm run test:host:contracts -- multi-window --vsix claude-code-launcher-0.12.1.vsix --report-dir docs/validacao/janelas
+npm run test:host:contracts -- lifecycle --vsix claude-code-launcher-0.12.1.vsix --report-dir docs/validacao/lifecycle
+npm run test:host:contracts -- official --official-extension /caminho/da/extensao/anthropic.claude-code --vsix claude-code-launcher-0.12.1.vsix --report-dir docs/validacao/oficial
 ```
 
 `multi-window` exercita duas janelas reais, recarregamento, decisão parcial e transferência explícita da escrita. `lifecycle` mede a ativação pública e instancia os componentes empacotados de revisão e lista de conversas com um contexto real e um observador que encaminha chamadas às APIs reais; repete painéis, troca de pastas e descarte durante refresh. O provider privado da lista é exposto somente no carregador de teste, sem mudar o código distribuído; a view real recebe mil sessões sintéticas. Seus contadores pertencem à instância observada e não representam todos os recursos do editor. `official` copia somente os arquivos de programa da extensão oficial já instalada para o diretório temporário, consulta o estado do CLI isolado e verifica uma aba oficial aberta sem enviar mensagem. Também usa o modo público [`--init-only`](https://code.claude.com/docs/en/hooks#setup) para testar o descritor de executável e argumentos em um evento Setup sintético, incluindo erro e timeout. Setup não equivale aos eventos de captura PreToolUse/PostToolUse; esses continuam identificados separadamente. Nenhum desses cenários comprova uma conversa autenticada ou a execução do hook pelo modelo. A matriz CI inclui os contratos de janelas e lifecycle; a extensão oficial depende de uma instalação local compatível com o sistema.

@@ -1,3 +1,4 @@
+import { registerSkills } from './skills-view';
 import * as vscode from 'vscode';
 import { ChangesController, registerChanges } from './changes';
 import { registerInline } from './inline';
@@ -216,6 +217,7 @@ export function activate(context: vscode.ExtensionContext): void {
 	provider = new LauncherViewProvider(context);
 	changes = registerChanges(context);
 	registerInline(context, changes);
+	registerSkills(context);
 	watchSessions(context);
 
 	context.subscriptions.push(

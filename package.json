@@ -2,7 +2,7 @@
   "name": "claude-code-launcher",
   "displayName": "Claude Code Launcher",
   "description": "Abre o chat oficial do Claude Code e mostra, de forma didática, o que ele mudou em cada arquivo. Extensão independente: não é um produto da Anthropic.",
-  "version": "0.11.0",
+  "version": "0.12.1",
   "publisher": "kauan",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -185,6 +185,17 @@
         "title": "Atualizar conversas",
         "category": "Claude Code Launcher",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "claude-code-launcher.skills.refresh",
+        "title": "Atualizar skills",
+        "category": "Claude Code Launcher",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "claude-code-launcher.skills.create",
+        "title": "Abrir lista de skills",
+        "category": "Claude Code Launcher"
       }
     ],
     "menus": {
@@ -335,6 +346,11 @@
           "type": "webview",
           "id": "claude-code-launcher.changes",
           "name": "Mudanças"
+        },
+        {
+          "type": "webview",
+          "id": "claude-code-launcher.skills",
+          "name": "Skills"
         }
       ]
     },
