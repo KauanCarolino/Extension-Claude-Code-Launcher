@@ -122,10 +122,10 @@ test('coordinated host cancellation terminates its child and distinguishes cance
 test('atomic completion supervises a surviving editor child without accepting failed reports or deadlines', async t => {
   const directory = await temporary(t);
   const validateReport = report => assert.equal(report.status, 'passed');
-  const launch = async (name, program, timeout = 1000) => {
+  const launch = async (name, program, timeout = 1000, exitGraceMs = 100) => {
     const reportFile = path.join(directory, name + '.json');
     return runUntilReport(process.execPath, ['-e', program, reportFile], process.env,
-      { reportFile, validateReport, timeout });
+      { reportFile, validateReport, timeout, exitGraceMs });
   };
   const write = 'const fs=require("node:fs");const p=process.argv[1];';
   const passed = 'fs.writeFileSync(p+".tmp",JSON.stringify({status:"passed"}));fs.renameSync(p+".tmp",p);';
@@ -134,6 +134,11 @@ test('atomic completion supervises a surviving editor child without accepting fa
   assert.equal(result.timedOut, false); assert.equal(result.report.status, 'passed');
   const normal = await launch('normal', write + passed);
   assert.equal(normal.report.status, 'passed'); assert.equal(normal.timedOut, false);
+  // Like Electron on macOS: the editor quits by itself after the report, and a
+  // SIGTERM in the middle of that shutdown aborts it. The runner must wait.
+  const quitting = await launch('slow-quit', write + passed
+    + 'process.on("SIGTERM",()=>process.kill(process.pid,"SIGABRT"));setTimeout(()=>process.exit(0),400);', 2000, 1500);
+  assert.equal(quitting.shutdown, 'normal-exit'); assert.equal(quitting.cancelled, false); assert.equal(quitting.code, 0);
   await assert.rejects(launch('failed', write + 'fs.writeFileSync(p,JSON.stringify({status:"failed"}));setInterval(()=>{},1000);'), /passed/);
   await assert.rejects(launch('malformed', write + 'fs.writeFileSync(p,"invalid");setInterval(()=>{},1000);'), SyntaxError);
   await assert.rejects(launch('missing', 'setInterval(()=>{},1000);', 80), { code: 'ENOENT' });

@@ -151,7 +151,13 @@ function run(executable, args, env, { timeout = 120000, cwd, input, signal: canc
 // boundary; terminate only the child this runner owns, never editor processes
 // discovered by name. Missing/invalid reports, deadlines and external aborts
 // remain failures even if an editor exits with code zero.
-async function runUntilReport(executable, args, env, { reportFile, validateReport, signal, ...options }) {
+//
+// After the report, the editor usually quits by itself (the multi-window
+// driver runs workbench.action.quit). Terminating it in the middle of that
+// shutdown makes Electron abort on macOS (SIGABRT), so the runner first waits
+// up to exitGraceMs for the editor's own exit and only then sends SIGTERM.
+const EXIT_GRACE_MS = 10000;
+async function runUntilReport(executable, args, env, { reportFile, validateReport, signal, exitGraceMs = EXIT_GRACE_MS, ...options }) {
   const cancellation = new AbortController();
   const abort = () => cancellation.abort();
   if (signal?.aborted) abort();
@@ -169,11 +175,12 @@ async function runUntilReport(executable, args, env, { reportFile, validateRepor
         completedReport = report;
         // Allow an editor's normal shutdown (including a nonzero exit) to be
         // observed before requesting termination. Without this grace, a report
-        // can win the polling race and hide an immediately following exit(7).
+        // can win the polling race and hide an immediately following exit(7),
+        // and a SIGTERM can land in the middle of the editor's own quit.
         let graceTimer;
         try {
           await Promise.race([execution.then(() => undefined, () => undefined),
-            new Promise(resolve => { graceTimer = setTimeout(resolve, 500); })]);
+            new Promise(resolve => { graceTimer = setTimeout(resolve, exitGraceMs); })]);
         } finally { clearTimeout(graceTimer); }
         if (!finished && !signal?.aborted) { shutdown = 'completed-report'; cancellation.abort(); }
         return;

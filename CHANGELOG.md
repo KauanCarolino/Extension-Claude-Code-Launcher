@@ -21,6 +21,7 @@ O projeto segue [Versionamento Semântico](https://semver.org/lang/pt-BR/) a par
 
 - O frontmatter passou para `src/frontmatter.ts`, compartilhado por skills, regras e agentes; `parseFrontmatter` continua exportado por `skills.ts` com o mesmo comportamento.
 - A troca de abas (contexto `claudeCodeLauncher.panel`) saiu de `skills-view.ts` para `catalog-view.ts`. A view **Mudanças** fica visível com o contexto ausente ou igual a `chats`.
+- Contrato `multi-window` no macOS: o relatório passava, mas o runner mandava SIGTERM 500 ms depois, quando o VS Code ainda fechava sozinho (o driver executa `workbench.action.quit`), e o Electron abortava com SIGABRT. O runner agora espera até 10 s pela saída do próprio editor antes de encerrá-lo. Saídas por SIGABRT continuam reprovando. Teste em `host-runner.test.js` reproduz a falha com a espera antiga.
 - 18 testes novos em `test/catalogs.test.js`, cobrindo leitura, escrita condicional, os formatos de `paths`, a ocultação de segredos e o controlador da view com o editor simulado.
 
 ## 1.0.0 — 2026-11-20
