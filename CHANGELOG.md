@@ -19,9 +19,10 @@ Mudanças incompatíveis nesses pontos só entram numa versão 2.0.0. A aparênc
 
 ### Mudança de identificador: leia antes de atualizar
 
-O publisher passou de `kauan` para `KauanDeveloper`, e o identificador da extensão passou a ser `KauanDeveloper.claude-code-launcher`. O editor trata a 1.0.0 como uma extensão **diferente** da 0.x:
+A extensão passou a se chamar **Launcher for Claude Code**, com o identificador `KauanDeveloper.launcher-for-claude-code`. O nome `claude-code-launcher` (e o nome de exibição "Claude Code Launcher") já pertence a outra extensão no Visual Studio Marketplace, sem relação com esta. O publisher também mudou, de `kauan` para `KauanDeveloper`. O editor trata a 1.0.0 como uma extensão **diferente** da 0.x:
 
-- Desinstale `kauan.claude-code-launcher` antes de instalar a 1.0.0. Duas versões escrevendo no mesmo projeto não são suportadas.
+- Desinstale a versão anterior antes de instalar a 1.0.0: `kauan.claude-code-launcher` (até a 0.13.0) ou `KauanDeveloper.claude-code-launcher` (pacote local da 0.13.1). Duas versões escrevendo no mesmo projeto não são suportadas.
+- Os comandos, as configurações, o contêiner e a view mantêm os IDs `claude-code-launcher.*` e `claudeCodeLauncher.*`; só o nome exibido muda para **Launcher for Claude Code**, inclusive a categoria dos comandos na paleta.
 - Os dados em `.claude/launcher-changes/`, os hooks e as configurações `claudeCodeLauncher.*` continuam valendo, porque não dependem do identificador. Um hook legado gravado no `globalStorage` do identificador antigo continua reconhecido como do launcher.
 - Não passam para a 1.0.0, porque o editor os guarda por identificador: a pilha de **Desfazer a última recusa** e o registro das preferências de abertura definidas pela gestão de grupos. Antes de atualizar, conclua os desfazer pendentes e, se `claudeCodeLauncher.manageEditorGroups` estiver ligado, desligue-o na versão antiga, para ela restaurar suas preferências originais.
 

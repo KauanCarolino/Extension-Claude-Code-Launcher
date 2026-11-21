@@ -1,4 +1,4 @@
-# Claude Code Launcher
+# Launcher for Claude Code
 
 Extensão para Cursor e Visual Studio Code que abre o chat oficial do Claude Code e permite revisar, no painel e no editor, as alterações realizadas por ele.
 
@@ -6,7 +6,7 @@ O chat, a autenticação, os modelos e as permissões são de responsabilidade d
 
 Esta é uma extensão independente, que não constitui produto da Anthropic nem é por ela mantida. "Claude" e "Claude Code" são marcas da Anthropic.
 
-**Versão:** 1.0.0 · **Pacote local:** `claude-code-launcher-1.0.0.vsix`
+**Versão:** 1.0.0 · **Pacote local:** `launcher-for-claude-code-1.0.0.vsix`
 
 ## Em resumo
 
@@ -54,8 +54,8 @@ A abrangência dos testes, o que eles não comprovam e a verificação de hooks 
 ## Instalação
 
 1. Em **Extensions**, abrir o menu `…` e selecionar **Install from VSIX**.
-2. Selecionar o arquivo `claude-code-launcher-1.0.0.vsix`.
-3. Abrir a pasta do projeto e executar um comando da categoria **Claude Code Launcher**.
+2. Selecionar o arquivo `launcher-for-claude-code-1.0.0.vsix`.
+3. Abrir a pasta do projeto e executar um comando da categoria **Launcher for Claude Code**.
 4. Para registrar novas mudanças, executar **Ativar registro de mudanças** e iniciar uma nova conversa do Claude.
 
 A atualização do pacote não publica a extensão nem envia o histórico a serviço externo. Os dados locais podem conter código e trechos de conversas; a política de armazenamento é descrita na seção [Hooks e dados locais](#hooks-e-dados-locais).
@@ -64,7 +64,7 @@ A atualização do pacote não publica a extensão nem envia o histórico a serv
 
 O ícone de balão no título do editor e o item **Claude** na barra de status abrem a barra lateral oficial. Os comandos **Nova conversa em aba** e **Abrir chat em nova aba** utilizam o editor de conversas do Claude.
 
-O contêiner **Claude Code Launcher**, na barra de atividades, contém a view homônima, que apresenta uma barra de abas no topo: **Conversas** e **Skills** (consulte [Gerenciamento de skills](#gerenciamento-de-skills)). A aba **Conversas** exibe:
+O contêiner **Launcher for Claude Code**, na barra de atividades, contém a view homônima, que apresenta uma barra de abas no topo: **Conversas** e **Skills** (consulte [Gerenciamento de skills](#gerenciamento-de-skills)). A aba **Conversas** exibe:
 
 - **Nova conversa**, que abre uma conversa nova em aba;
 - uma lista de conversas, com uma linha por item e o tempo à direita:
@@ -260,7 +260,7 @@ As versões 0.8 e 0.9 também não reconhecem a intenção de limpeza introduzid
 
 ## Comandos operacionais
 
-Todos os comandos constam na categoria **Claude Code Launcher** da paleta, além das ações disponíveis nas views.
+Todos os comandos constam na categoria **Launcher for Claude Code** da paleta, além das ações disponíveis nas views.
 
 | Comando | Finalidade |
 | --- | --- |
@@ -291,8 +291,8 @@ npm run lint
 npm test
 npm run test:package
 npm audit --audit-level=moderate
-npm run package -- --out claude-code-launcher-1.0.0.vsix
-npm run verify:package -- claude-code-launcher-1.0.0.vsix
+npm run package -- --out launcher-for-claude-code-1.0.0.vsix
+npm run verify:package -- launcher-for-claude-code-1.0.0.vsix
 ```
 
 O script `vscode:prepublish` executa o build, que remove a saída gerada anteriormente e compila com `noEmitOnError`. Os testes de pacote utilizam árvores temporárias, inclusive uma sem `out/` e outra com saída obsoleta. O verificador inspeciona o VSIX real, compara seus bytes com o runtime atual, calcula o SHA-256 e rejeita conteúdo inesperado. `docs/`, testes, scripts, configurações locais e dependências de desenvolvimento são excluídos do VSIX.
@@ -304,8 +304,8 @@ Os testes de `test/*.test.js` utilizam regras reais e adaptadores explícitos no
 ```sh
 npm run test:host -- --editor code
 npm run test:host -- --editor cursor
-npm run test:host -- --editor code --vsix claude-code-launcher-1.0.0.vsix --keep
-npm run test:host -- --editor cursor --vsix claude-code-launcher-1.0.0.vsix --report-dir docs/validacao/host-cursor
+npm run test:host -- --editor code --vsix launcher-for-claude-code-1.0.0.vsix --keep
+npm run test:host -- --editor cursor --vsix launcher-for-claude-code-1.0.0.vsix --report-dir docs/validacao/host-cursor
 ```
 
 O runner cria workspace, perfil, diretório de extensões e configuração Claude temporários. O modo `--vsix` instala e exercita o pacote nesse perfil isolado, sem alterar o perfil normal e sem enviar mensagens ao Claude. A opção `--keep` mantém o perfil temporário, e as falhas também preservam o diretório. A opção `--report-dir` cria uma subpasta `run-*` exclusiva para cada execução, com os relatórios e logs correspondentes, preservando as execuções anteriores. O cenário é um workspace sintético confiável e não constitui teste do Restricted Mode.
@@ -317,7 +317,7 @@ A jornada de recusa de criação exige lixeira no sistema de arquivos do workspa
 No macOS, os caminhos padrão correspondem aos aplicativos em `/Applications`; em Linux, informa-se `--executable` (por exemplo, `/usr/share/code/code` ou `/usr/share/cursor/cursor`). Para outra instalação, utiliza-se `--executable /caminho/do/editor`. O caminho do CLI é derivado dessa instalação, e `--cli /caminho/Resources/app/out/cli.js` permite substituí-lo, desde que pertença à **mesma instalação**. Para baixar e exercitar uma versão exata do VS Code:
 
 ```sh
-npm run test:host -- --download-version 1.94.0 --vsix claude-code-launcher-1.0.0.vsix --report-dir docs/validacao/host-minimum
+npm run test:host -- --download-version 1.94.0 --vsix launcher-for-claude-code-1.0.0.vsix --report-dir docs/validacao/host-minimum
 ```
 
 A opção `--download-version` aceita apenas uma versão exata, somente para VS Code, e não pode ser combinada com `--executable` ou `--cli`. O download utiliza cache temporário fora do projeto. Em Linux sem display, o comando deve ser executado com `xvfb-run -a`. A matriz de CI inclui a instalação do VSIX e a jornada do hook no VS Code 1.94.0 em Linux, Windows e macOS, além de tipagem, testes Node, testes de pacote e auditoria. Recomenda-se consultar os checks e as evidências da execução do commit a ser distribuído.
@@ -333,9 +333,9 @@ O relatório registra cinco amostras com 15, 1.000 e 5.000 arquivos por pasta, e
 Os contratos adicionais também utilizam o VSIX instalado em perfis isolados:
 
 ```sh
-npm run test:host:contracts -- multi-window --vsix claude-code-launcher-1.0.0.vsix --report-dir docs/validacao/janelas
-npm run test:host:contracts -- lifecycle --vsix claude-code-launcher-1.0.0.vsix --report-dir docs/validacao/lifecycle
-npm run test:host:contracts -- official --official-extension /caminho/da/extensao/anthropic.claude-code --vsix claude-code-launcher-1.0.0.vsix --report-dir docs/validacao/oficial
+npm run test:host:contracts -- multi-window --vsix launcher-for-claude-code-1.0.0.vsix --report-dir docs/validacao/janelas
+npm run test:host:contracts -- lifecycle --vsix launcher-for-claude-code-1.0.0.vsix --report-dir docs/validacao/lifecycle
+npm run test:host:contracts -- official --official-extension /caminho/da/extensao/anthropic.claude-code --vsix launcher-for-claude-code-1.0.0.vsix --report-dir docs/validacao/oficial
 ```
 
 - **`multi-window`** exercita duas janelas reais, recarregamento, decisão parcial e transferência explícita da escrita.

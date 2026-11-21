@@ -1,6 +1,6 @@
 # Verificação e compatibilidade
 
-Detalhes de verificação do Claude Code Launcher, separados do README para mantê-lo objetivo.
+Detalhes de verificação do Launcher for Claude Code, separados do README para mantê-lo objetivo.
 
 ## Escopo da verificação
 
@@ -17,7 +17,7 @@ A compatibilidade de hooks é verificada separadamente. O modo automático exige
 
 ## Registro da 1.0.0
 
-Execuções locais com o VSIX `claude-code-launcher-1.0.0.vsix` (SHA-256 `2801856e2ab1cec8565d8ebe7beb7d788a1b2dba2cbf7b70961be4cd8ae4bbc8`), em 2026-11-20, Linux x64, Node do runner 23.6.0:
+Execuções locais com o VSIX 1.0.0 (SHA-256 `2801856e2ab1cec8565d8ebe7beb7d788a1b2dba2cbf7b70961be4cd8ae4bbc8`), em 2026-11-20, Linux x64, Node do runner 23.6.0:
 
 | Cenário | Editor | Resultado |
 | --- | --- | --- |
@@ -27,4 +27,4 @@ Execuções locais com o VSIX `claude-code-launcher-1.0.0.vsix` (SHA-256 `280185
 | `test:host:contracts lifecycle` | VS Code 1.147.0 | aprovado |
 | `test:host:contracts official`, extensão oficial Claude Code 2.1.329 (linux-x64) | VS Code 1.147.0 | aprovado |
 
-O SHA-256 se refere ao pacote testado nessa data. O pacote final gerado depois (`5325c480205d89e9158004678845f872064d6e407096bbe727dd320a88bef62f`) difere dele só no `CHANGELOG.md`, que recebeu a correção da limpeza dos testes de host no Windows; o código empacotado é o mesmo. Um VSIX gerado de novo a partir de outro commit tem outro hash, e a evidência que vale para a distribuição é a da CI no commit publicado. Os limites da seção [Escopo da verificação](#escopo-da-verificação) continuam valendo: nenhum desses cenários comprova uma conversa autenticada.
+O SHA-256 se refere ao pacote testado nessa data, ainda com o nome `claude-code-launcher`. Depois dele, a extensão passou a se chamar `launcher-for-claude-code` (o nome anterior pertence a outro publisher no Marketplace), e o CHANGELOG e o manifesto mudaram. O código de runtime empacotado é o mesmo, mas o pacote distribuído tem outro hash; a evidência que vale para a distribuição é a da CI no commit publicado. Os limites da seção [Escopo da verificação](#escopo-da-verificação) continuam valendo: nenhum desses cenários comprova uma conversa autenticada.

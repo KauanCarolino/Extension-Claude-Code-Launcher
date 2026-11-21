@@ -40,7 +40,7 @@ jobs:
             echo "::error::O CHANGELOG.md não tem a seção ## ${version}."
             exit 1
           fi
-          echo "vsix=claude-code-launcher-${version}.vsix" >> "$GITHUB_OUTPUT"
+          echo "vsix=launcher-for-claude-code-${version}.vsix" >> "$GITHUB_OUTPUT"
       - run: npm ci --ignore-scripts --no-audit --fund=false
       - run: npm run typecheck
       - run: npm run lint

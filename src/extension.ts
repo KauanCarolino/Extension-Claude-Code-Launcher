@@ -282,7 +282,7 @@ export function activate(context: vscode.ExtensionContext): void {
 	}
 
 	const statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
-	statusItem.name = 'Claude Code Launcher';
+	statusItem.name = 'Launcher for Claude Code';
 	statusItem.text = '$(comment-discussion) Claude';
 	statusItem.tooltip = 'Abrir o chat do Claude Code';
 	statusItem.command = 'claude-code-launcher.openSidebar';

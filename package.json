@@ -1,6 +1,6 @@
 {
-  "name": "claude-code-launcher",
-  "displayName": "Claude Code Launcher",
+  "name": "launcher-for-claude-code",
+  "displayName": "Launcher for Claude Code",
   "description": "Abre o chat oficial do Claude Code e mostra, de forma didática, o que ele mudou em cada arquivo. Extensão independente: não é um produto da Anthropic.",
   "version": "1.0.0",
   "publisher": "KauanDeveloper",
@@ -53,164 +53,164 @@
       {
         "command": "claude-code-launcher.openSidebar",
         "title": "Abrir chat na barra lateral",
-        "category": "Claude Code Launcher",
+        "category": "Launcher for Claude Code",
         "icon": "$(layout-sidebar-right)"
       },
       {
         "command": "claude-code-launcher.openTab",
         "title": "Abrir chat em nova aba",
-        "category": "Claude Code Launcher",
+        "category": "Launcher for Claude Code",
         "icon": "$(open-preview)"
       },
       {
         "command": "claude-code-launcher.install",
         "title": "Instalar Claude Code",
-        "category": "Claude Code Launcher"
+        "category": "Launcher for Claude Code"
       },
       {
         "command": "claude-code-launcher.showChanges",
         "title": "Mostrar mudanças do Claude",
-        "category": "Claude Code Launcher",
+        "category": "Launcher for Claude Code",
         "icon": "$(screen-full)"
       },
       {
         "command": "claude-code-launcher.enableChangeLog",
         "title": "Ativar registro de mudanças",
-        "category": "Claude Code Launcher",
+        "category": "Launcher for Claude Code",
         "icon": "$(record)"
       },
       {
         "command": "claude-code-launcher.disableChangeLog",
         "title": "Desligar registro de mudanças",
-        "category": "Claude Code Launcher",
+        "category": "Launcher for Claude Code",
         "icon": "$(debug-pause)"
       },
       {
         "command": "claude-code-launcher.clearChanges",
         "title": "Limpar histórico revisado",
-        "category": "Claude Code Launcher",
+        "category": "Launcher for Claude Code",
         "icon": "$(trash)"
       },
       {
         "command": "claude-code-launcher.clearAllReviewData",
         "title": "Apagar todos os dados locais de revisão",
-        "category": "Claude Code Launcher",
+        "category": "Launcher for Claude Code",
         "icon": "$(clear-all)"
       },
       {
         "command": "claude-code-launcher.releaseReviewWriter",
         "title": "Liberar revisão para outra janela",
-        "category": "Claude Code Launcher",
+        "category": "Launcher for Claude Code",
         "icon": "$(unlock)"
       },
       {
         "command": "claude-code-launcher.recoverReviewWriter",
         "title": "Recuperar revisão bloqueada",
-        "category": "Claude Code Launcher",
+        "category": "Launcher for Claude Code",
         "icon": "$(lock)"
       },
       {
         "command": "claude-code-launcher.toggleInlineChanges",
         "title": "Ligar/desligar marcas das mudanças no código",
-        "category": "Claude Code Launcher"
+        "category": "Launcher for Claude Code"
       },
       {
         "command": "claude-code-launcher.hideInlineChanges",
         "title": "Ocultar marcas (aceita as mudanças do Claude neste arquivo)",
-        "category": "Claude Code Launcher"
+        "category": "Launcher for Claude Code"
       },
       {
         "command": "claude-code-launcher.showInlineChanges",
         "title": "Ver mudança no código",
-        "category": "Claude Code Launcher"
+        "category": "Launcher for Claude Code"
       },
       {
         "command": "claude-code-launcher.compareInline",
         "title": "Comparar lado a lado",
-        "category": "Claude Code Launcher"
+        "category": "Launcher for Claude Code"
       },
       {
         "command": "claude-code-launcher.newTab",
         "title": "Nova conversa em aba",
-        "category": "Claude Code Launcher",
+        "category": "Launcher for Claude Code",
         "icon": "$(add)"
       },
       {
         "command": "claude-code-launcher.acceptAllChanges",
         "title": "Aceitar todas as mudanças do Claude neste arquivo",
-        "category": "Claude Code Launcher"
+        "category": "Launcher for Claude Code"
       },
       {
         "command": "claude-code-launcher.rejectAllChanges",
         "title": "Recusar todas as mudanças do Claude neste arquivo",
-        "category": "Claude Code Launcher"
+        "category": "Launcher for Claude Code"
       },
       {
         "command": "claude-code-launcher.acceptEverything",
         "title": "Aceitar todas as mudanças pendentes do Claude",
-        "category": "Claude Code Launcher",
+        "category": "Launcher for Claude Code",
         "icon": "$(check-all)"
       },
       {
         "command": "claude-code-launcher.rejectEverything",
         "title": "Recusar todas as mudanças pendentes do Claude",
-        "category": "Claude Code Launcher",
+        "category": "Launcher for Claude Code",
         "icon": "$(close-all)"
       },
       {
         "command": "claude-code-launcher.undoReject",
         "title": "Desfazer a última recusa",
-        "category": "Claude Code Launcher",
+        "category": "Launcher for Claude Code",
         "icon": "$(discard)"
       },
       {
         "command": "claude-code-launcher.nextChange",
         "title": "Próxima mudança do Claude",
-        "category": "Claude Code Launcher"
+        "category": "Launcher for Claude Code"
       },
       {
         "command": "claude-code-launcher.previousChange",
         "title": "Mudança anterior do Claude",
-        "category": "Claude Code Launcher"
+        "category": "Launcher for Claude Code"
       },
       {
         "command": "claude-code-launcher.acceptChange",
         "title": "Aceitar trecho",
-        "category": "Claude Code Launcher"
+        "category": "Launcher for Claude Code"
       },
       {
         "command": "claude-code-launcher.rejectChange",
         "title": "Recusar trecho",
-        "category": "Claude Code Launcher"
+        "category": "Launcher for Claude Code"
       },
       {
         "command": "claude-code-launcher.refreshChanges",
         "title": "Atualizar mudanças",
-        "category": "Claude Code Launcher",
+        "category": "Launcher for Claude Code",
         "icon": "$(refresh)"
       },
       {
         "command": "claude-code-launcher.refreshSessions",
         "title": "Atualizar conversas",
-        "category": "Claude Code Launcher",
+        "category": "Launcher for Claude Code",
         "icon": "$(refresh)"
       },
       {
         "command": "claude-code-launcher.skills.refresh",
         "title": "Atualizar skills",
-        "category": "Claude Code Launcher",
+        "category": "Launcher for Claude Code",
         "icon": "$(refresh)"
       },
       {
         "command": "claude-code-launcher.showSkills",
         "title": "Mostrar skills",
-        "category": "Claude Code Launcher",
+        "category": "Launcher for Claude Code",
         "icon": "$(sparkle)"
       },
       {
         "command": "claude-code-launcher.showChats",
         "title": "Mostrar conversas e mudanças",
-        "category": "Claude Code Launcher",
+        "category": "Launcher for Claude Code",
         "icon": "$(comment-discussion)"
       }
     ],
@@ -346,7 +346,7 @@
       "activitybar": [
         {
           "id": "claude-code-launcher",
-          "title": "Claude Code Launcher",
+          "title": "Launcher for Claude Code",
           "icon": "media/icon.svg"
         }
       ]
@@ -356,7 +356,7 @@
         {
           "type": "webview",
           "id": "claude-code-launcher.home",
-          "name": "Claude Code Launcher"
+          "name": "Launcher for Claude Code"
         },
         {
           "type": "webview",
@@ -367,7 +367,7 @@
       ]
     },
     "configuration": {
-      "title": "Claude Code Launcher",
+      "title": "Launcher for Claude Code",
       "properties": {
         "claudeCodeLauncher.inlineChanges": {
           "type": "boolean",
