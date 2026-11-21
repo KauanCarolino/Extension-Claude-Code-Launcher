@@ -208,5 +208,23 @@ function validateContractReport(report, { scenario, role, sha256, version, vscod
   }
 }
 
+// runUntilReport terminates only the editor process this runner spawned. On
+// Windows its Electron helpers (extension host, renderer, crashpad) outlive it
+// for a few seconds and keep the downloaded editor and profile files locked, so
+// an immediate rm fails with EBUSY after a passing run. Retry with Node's linear
+// backoff; if the tree stays locked, report the leftover directory instead of
+// turning an already exported result into a failure. Other errors still throw.
+const LOCKED_CODES = new Set(['EBUSY', 'EPERM', 'ENOTEMPTY', 'EMFILE', 'ENFILE']);
+async function removeTemporary(directory, { platform = process.platform, rm = fs.rm, warn = console.warn } = {}) {
+  try {
+    await rm(directory, { recursive: true, force: true, maxRetries: platform === 'win32' ? 20 : 3, retryDelay: 250 });
+    return true;
+  } catch (error) {
+    if (!LOCKED_CODES.has(error?.code)) throw error;
+    warn('Temporary directory still locked after retries (' + error.code + '); left in place: ' + directory);
+    return false;
+  }
+}
+
 module.exports = { parseArguments, assertHookNode, hostEnvironment, provisionEditor, cliScript, editorFixtureArguments, run,
-  runUntilReport, validateContractReport, validDiagnosticEvent, createEvidenceDirectory, exportEvidence };
+  runUntilReport, validateContractReport, validDiagnosticEvent, createEvidenceDirectory, exportEvidence, removeTemporary };

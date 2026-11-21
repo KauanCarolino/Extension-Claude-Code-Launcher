@@ -4,7 +4,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
 const { parseArguments, hostEnvironment, provisionEditor, cliScript, editorFixtureArguments, run,
-  createEvidenceDirectory, exportEvidence } = require('./host-tooling.cjs');
+  createEvidenceDirectory, exportEvidence, removeTemporary } = require('./host-tooling.cjs');
 const { verifyPackage } = require('./verify-package.cjs');
 
 const root = path.resolve(__dirname, '..');
@@ -143,7 +143,7 @@ async function main() {
       console.log('Evidências desta execução: ' + JSON.stringify(summary));
     }
     if (options.keep) console.log('Evidências do perfil isolado: ' + temporary);
-    else await fs.rm(temporary, { recursive: true, force: true });
+    else await removeTemporary(temporary);
   }
 }
 

@@ -44,6 +44,7 @@ O publisher passou de `kauan` para `KauanDeveloper`, e o identificador da extens
 ### Interno
 
 - Testes de skills ampliados de 1 para 15, cobrindo o controlador da view com o editor simulado: ids que não vieram da listagem são ignorados, skills do claude.ai não são alternadas nem excluídas, excluir exige confirmação e usa a lixeira, criar respeita o escopo e nunca sobrescreve.
+- Os testes de host no Windows falhavam depois de aprovados: o runner encerra só o processo principal do editor, e os processos auxiliares do Electron mantinham o diretório temporário travado (`EBUSY`). A remoção agora tenta de novo com espera crescente e, se o diretório continuar travado, avisa qual pasta ficou sem alterar o resultado do teste.
 - Teste do controlador real para o hook legado no `globalStorage` do identificador antigo; sem a correção, **Ativar registro** ficava bloqueado com `ambiguousHookOwnership`.
 - A associação entre aba e conversa saiu de `extension.ts` para `matchChatSessions` em `logic.ts`, com testes próprios, e o aviso do painel ganhou teste de interface.
 

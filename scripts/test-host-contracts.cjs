@@ -6,7 +6,7 @@ const path = require('node:path');
 const os = require('node:os');
 const crypto = require('node:crypto');
 const { parseArguments, hostEnvironment, provisionEditor, cliScript, editorFixtureArguments, run, runUntilReport, validateContractReport,
-  createEvidenceDirectory, exportEvidence } = require('./host-tooling.cjs');
+  createEvidenceDirectory, exportEvidence, removeTemporary } = require('./host-tooling.cjs');
 const { verifyPackage } = require('./verify-package.cjs');
 const root = path.resolve(__dirname, '..');
 
@@ -150,7 +150,7 @@ async function main() {
     if (evidence) console.log(JSON.stringify(await exportEvidence(temporary, evidence, { status: passed ? 'passed' : 'failed', scenario,
       artifactSha256: verification?.sha256 ?? null, platform: process.platform, arch: process.arch, runnerNode: process.version })));
     if (options.keep) console.log('Isolated evidence: ' + temporary);
-    else await fs.rm(temporary, { recursive: true, force: true });
+    else await removeTemporary(temporary);
   }
 }
 main().catch(error => { console.error(error.message); process.exitCode = 1; });

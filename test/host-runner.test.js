@@ -7,7 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 const {
   parseArguments, assertHookNode, hostEnvironment, provisionEditor, cliScript, editorFixtureArguments, run, runUntilReport, validateContractReport,
-  validDiagnosticEvent, createEvidenceDirectory, exportEvidence,
+  validDiagnosticEvent, createEvidenceDirectory, exportEvidence, removeTemporary,
 } = require('../scripts/host-tooling.cjs');
 
 async function temporary(t) {
@@ -220,4 +220,26 @@ test('diagnostic export rejects extra private fields and invalid schema before r
   ]) assert.equal(validDiagnosticEvent(invalid, 'completion', filename), false);
   assert.equal(validDiagnosticEvent(event, 'observation', filename), false);
   assert.equal(validDiagnosticEvent(event, 'completion', 'unrelated.json'), false);
+});
+
+test('temporary cleanup retries locked trees, reports leftovers without failing a run and rethrows other errors', async (t) => {
+  const directory = await temporary(t);
+  const tree = path.join(directory, 'editor', 'vscode-win32-x64-archive-1.94.0');
+  await fs.mkdir(tree, { recursive: true }); await fs.writeFile(path.join(tree, 'Code.exe'), 'synthetic');
+  assert.equal(await removeTemporary(path.join(directory, 'editor')), true);
+  await assert.rejects(fs.access(path.join(directory, 'editor')), { code: 'ENOENT' });
+  assert.equal(await removeTemporary(path.join(directory, 'never-created')), true, 'force: absence is not an error');
+
+  const calls = [], warnings = [];
+  const locked = async (target, options) => { calls.push([target, options]); throw Object.assign(new Error('synthetic lock'), { code: 'EBUSY' }); };
+  assert.equal(await removeTemporary('C:\\Temp\\lc-x', { platform: 'win32', rm: locked, warn: (message) => warnings.push(message) }), false);
+  assert.deepEqual(calls, [['C:\\Temp\\lc-x', { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }]]);
+  assert.match(warnings[0], /EBUSY.*C:\\Temp\\lc-x/);
+
+  await removeTemporary('/tmp/x', { platform: 'linux', rm: async (target, options) => { calls.push([target, options]); }, warn: () => assert.fail('no warning') });
+  assert.equal(calls.at(-1)[1].maxRetries, 3);
+
+  const denied = async () => { throw Object.assign(new Error('synthetic'), { code: 'EACCES' }); };
+  await assert.rejects(removeTemporary('/tmp/x', { rm: denied, warn: () => assert.fail('no warning') }), { code: 'EACCES' });
+  await assert.rejects(removeTemporary('/tmp/x', { rm: async () => { throw new Error('no code'); }, warn: () => assert.fail('no warning') }), /no code/);
 });
