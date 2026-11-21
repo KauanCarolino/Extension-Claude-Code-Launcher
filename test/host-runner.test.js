@@ -168,6 +168,9 @@ test('contract report validation rejects length-shaped strings and stale identit
     assert.throws(() => validateContractReport({ ...valid, ...patch }, expected), /Invalid or failed contract report/);
   }
   assert.throws(() => validateContractReport(null, expected), /Invalid or failed contract report/);
+  assert.throws(() => validateContractReport(null, expected), /\(no report\)/);
+  assert.throws(() => validateContractReport({ ...valid, status: 'failed', checks: valid.checks.slice(0, 1), error: 'Error: Timeout: transferred writer lenses\n    at until (multi-window.cjs:15:9)\n    at more' }, expected),
+    /status=failed; checks=1 last=".+"; .*error=Error: Timeout: transferred writer lenses \| at until \(multi-window\.cjs:15:9\)\)$/);
 });
 
 test('reusing an evidence base keeps old results separate from an early failing runner execution', async t => {

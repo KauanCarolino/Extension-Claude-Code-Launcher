@@ -204,8 +204,22 @@ function validateContractReport(report, { scenario, role, sha256, version, vscod
     || !Array.isArray(report.checks) || !report.checks.every(check => typeof check === 'string' && check.length > 0)
     || scenario === 'multi-window' && (report.role !== role || report.scenario !== 'two-real-windows'
       || report.checks.length !== (role === 'writer' ? 2 : 3) || role === 'reader' && report.reloadedWindow !== true)) {
-    throw new Error('Invalid or failed contract report: ' + role);
+    throw new Error('Invalid or failed contract report: ' + role + ' (' + describeReport(report, { sha256, version, vscodeVersion }) + ')');
   }
+}
+
+// Synthetic-fixture summary for CI logs: which gate failed and the first lines
+// of the host's own error, so a failure is diagnosable without the artifact.
+function describeReport(report, { sha256, version, vscodeVersion }) {
+  if (!report || typeof report !== 'object') return 'no report';
+  const parts = ['status=' + String(report.status)];
+  if (report.artifactSha256 !== sha256) parts.push('artifact mismatch');
+  if (report.extensionVersion !== version) parts.push('extensionVersion=' + String(report.extensionVersion));
+  if (vscodeVersion && report.vscode !== vscodeVersion) parts.push('vscode=' + String(report.vscode));
+  if (Array.isArray(report.checks)) parts.push('checks=' + report.checks.length + (report.checks.length ? ' last="' + String(report.checks.at(-1)).slice(0, 120) + '"' : ''));
+  if ('reloadedWindow' in report) parts.push('reloadedWindow=' + String(report.reloadedWindow));
+  if (typeof report.error === 'string') parts.push('error=' + report.error.split('\n').slice(0, 2).map(line => line.trim()).join(' | ').slice(0, 400));
+  return parts.join('; ');
 }
 
 // runUntilReport terminates only the editor process this runner spawned. On
