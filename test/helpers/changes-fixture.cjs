@@ -109,17 +109,26 @@ function fixture(t, options = {}) {
 	const source = path.join(OUT, 'changes.js');
 	const sourceRequire = createRequire(source);
 	const sessionModule = sourceRequire('./sessions');
-	const module = { exports: {} };
 	const controllerHistory = { ...history, ...(options.history || {}) };
-	const run = vm.runInThisContext('(function(require,module,exports){' + fs.readFileSync(source, 'utf8') + '\n})', { filename: source });
-	run((id) => {
+	const shim = (id) => {
 		if (id === 'vscode') { return vscode; }
 		if (id === './history') { return controllerHistory; }
 		if (id === './sessions') { return { ...sessionModule, sessionsDir: () => path.join(root, 'sessions'), ...(options.sessions || {}) }; }
 		if (id === 'node:fs' && options.nodeFs) { return options.nodeFs; }
 		if (id === 'node:path' && options.nodePath) { return options.nodePath; }
+		if (id === './changes-support') { return load('changes-support.js'); }
 		return sourceRequire(id);
-	}, module, module.exports);
+	};
+	const loaded = new Map();
+	// Carrega o módulo no mesmo sandbox, para que os falsos de vscode, fs e path valham também para o código extraído do controlador.
+	function load(name) {
+		if (loaded.has(name)) { return loaded.get(name).exports; }
+		const file = path.join(OUT, name), mod = { exports: {} };
+		loaded.set(name, mod);
+		vm.runInThisContext('(function(require,module,exports){' + fs.readFileSync(file, 'utf8') + '\n})', { filename: file })(shim, mod, mod.exports);
+		return mod.exports;
+	}
+	const module = { exports: load('changes.js') };
 	class ControlledController extends module.exports.ChangesController {
 		scheduleRefresh() { if (options.autoRefresh) { super.scheduleRefresh(); } }
 		async refresh() { if (options.autoRefresh) { return super.refresh(); } }

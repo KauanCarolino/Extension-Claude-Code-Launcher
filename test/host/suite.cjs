@@ -5,6 +5,8 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const vscode = require('vscode');
+const launcherManifest = require('../../package.json');
+const LAUNCHER_ID = launcherManifest.publisher + '.' + launcherManifest.name;
 const { assertHookNode, run, validDiagnosticEvent } = require('../../scripts/host-tooling.cjs');
 const { collectReviewFailureDiagnostics } = require('../../scripts/host-state-diagnostics.cjs');
 
@@ -37,7 +39,7 @@ exports.run = async () => {
       assert.equal(vscode.version, process.env.LAUNCHER_HOST_EXPECTED_VERSION, 'O editor executado deve corresponder ao pin.');
     }
     const lockBefore = vscode.workspace.getConfiguration('workbench.editor').get('autoLockGroups');
-    const extension = vscode.extensions.getExtension('kauan.claude-code-launcher');
+    const extension = vscode.extensions.getExtension(LAUNCHER_ID);
     assert(extension, 'Extensão não encontrada no perfil de teste.');
     report.extensionVersion = extension.packageJSON.version;
     if (report.artifactSha256) assert.equal(report.extensionVersion, process.env.LAUNCHER_HOST_ARTIFACT_VERSION);

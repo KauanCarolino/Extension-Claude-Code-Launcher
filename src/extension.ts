@@ -3,6 +3,7 @@ import * as vscode from 'vscode';
 import { ChangesController, registerChanges } from './changes';
 import { registerInline } from './inline';
 import { listSessionsAsync, sessionsDir } from './sessions';
+import { matchChatSessions } from './logic';
 import { ManagedPreference, PreferenceManager } from './preferences';
 import { validateMessage } from './history';
 
@@ -650,6 +651,7 @@ function createNonce(): string {
 /**
  * Descobre qual conversa está em foco (pelo título da aba do chat) e avisa o painel Mudanças.
  * Se o foco vai para um arquivo, mantém a última conversa; sem correspondência, mostra tudo.
+ * Conversas com o mesmo título são mostradas juntas (ver `matchChatSessions`).
  */
 let chatTimer: NodeJS.Timeout | undefined;
 let chatGeneration = 0;
@@ -665,10 +667,7 @@ async function updateActiveChat(): Promise<void> {
 	const label = tab.label;
 	const results = await Promise.allSettled(localFolders().map((folder) => listSessionsAsync(folder, 100)));
 	if (generation !== chatGeneration) { return; }
-	const match = results.flatMap((result) => result.status === 'fulfilled' ? result.value.sessions : [])
-		.filter((session) => session.title === label)
-		.sort((a, b) => b.updated - a.updated)[0];
-	changes.setActiveChat(match ? { session: match.id, title: match.title } : null);
+	changes.setActiveChat(matchChatSessions(label, results.flatMap((result) => result.status === 'fulfilled' ? result.value.sessions : [])));
 }
 
 function localFolders(): string[] {

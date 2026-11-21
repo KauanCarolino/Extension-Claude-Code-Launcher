@@ -1,0 +1,30 @@
+# Verificação e compatibilidade
+
+Detalhes de verificação do Claude Code Launcher, separados do README para mantê-lo objetivo.
+
+## Escopo da verificação
+
+As jornadas de teste cobrem ativação, comandos, preservação das preferências com a gestão desligada, CRLF, UTF-8 com BOM, recusa de criação, desfazer, revisão parcial e edição humana entre capturas. BOM, Unicode e final de linha são conferidos no documento e nos bytes salvos. Alteração da presença do BOM, finais de linha mistos e UTF-8 inválido devem bloquear a reversão.
+
+No modo VSIX, uma jornada adicional executa o hook instalado em um arquivo sintético e verifica sua ingestão e revisão no editor. Os testes de adaptadores abrangem falhas de gravação, recuperação e concorrência. Notebooks com alterações não salvas e providers virtuais recebem testes negativos reais, que comprovam a preservação dos buffers e o bloqueio de mutações; isso não habilita a revisão desses recursos, e a revisão de recursos não admitidos bloqueia alterações de conteúdo.
+
+Esses cenários não comprovam a abertura autenticada de conversas nem o funcionamento em hosts remotos. Os relatórios identificam o editor, o sistema e o artefato de cada execução. Uma matriz configurada não equivale a um resultado aprovado.
+
+## Compatibilidade de hooks
+
+A compatibilidade de hooks é verificada separadamente. O modo automático exige que o schema da extensão oficial selecionada declare `command` com `args` separados. Não se presume uma versão mínima do Claude a partir dessa capacidade. Consulte o [contrato oficial dos hooks](https://code.claude.com/docs/en/hooks#command-hook-fields).
+
+
+## Registro da 1.0.0
+
+Execuções locais com o VSIX `claude-code-launcher-1.0.0.vsix` (SHA-256 `2801856e2ab1cec8565d8ebe7beb7d788a1b2dba2cbf7b70961be4cd8ae4bbc8`), em 2026-11-20, Linux x64, Node do runner 23.6.0:
+
+| Cenário | Editor | Resultado |
+| --- | --- | --- |
+| `test:host` (14 jornadas, inclusive hook instalado → Node externo → recusa) | VS Code 1.147.0, Node do host 24.22.1 | aprovado |
+| `test:host` (14 jornadas) | Cursor 3.30.14, API 1.128.0, Node do host 24.22.1 | aprovado |
+| `test:host:contracts multi-window` | VS Code 1.147.0 | aprovado |
+| `test:host:contracts lifecycle` | VS Code 1.147.0 | aprovado |
+| `test:host:contracts official`, extensão oficial Claude Code 2.1.329 (linux-x64) | VS Code 1.147.0 | aprovado |
+
+O SHA-256 se refere ao pacote gerado nessa data. Um VSIX gerado de novo a partir de outro commit tem outro hash, e a evidência que vale para a distribuição é a da CI no commit publicado. Os limites da seção [Escopo da verificação](#escopo-da-verificação) continuam valendo: nenhum desses cenários comprova uma conversa autenticada.

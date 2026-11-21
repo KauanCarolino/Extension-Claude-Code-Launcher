@@ -2,6 +2,8 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const vscode = require('vscode');
+const launcherManifest = require('../../package.json');
+const LAUNCHER_ID = launcherManifest.publisher + '.' + launcherManifest.name;
 
 exports.run = async () => {
   const report = { scenario: 'official-extension-no-message', editor: vscode.env.appName, vscode: vscode.version,
@@ -9,7 +11,7 @@ exports.run = async () => {
     artifactSha256: process.env.LAUNCHER_HOST_ARTIFACT_SHA256, checks: [],
     limits: 'No prompt, model request, login mutation, account credentials or paid conversation. CLI auth state is separate from webview UI state; an open tab does not prove authentication.' };
   try {
-    const launcher = vscode.extensions.getExtension('kauan.claude-code-launcher'); assert(launcher);
+    const launcher = vscode.extensions.getExtension(LAUNCHER_ID); assert(launcher);
     report.extensionVersion = launcher.packageJSON.version; assert.equal(report.extensionVersion, process.env.LAUNCHER_HOST_ARTIFACT_VERSION);
     const official = vscode.extensions.getExtension('anthropic.claude-code'); assert(official);
     report.officialVersion = official.packageJSON.version;

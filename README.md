@@ -6,7 +6,21 @@ O chat, a autenticação, os modelos e as permissões são de responsabilidade d
 
 Esta é uma extensão independente, que não constitui produto da Anthropic nem é por ela mantida. "Claude" e "Claude Code" são marcas da Anthropic.
 
-**Versão:** 0.13.0 · **Pacote local:** `claude-code-launcher-0.13.0.vsix`
+**Versão:** 1.0.0 · **Pacote local:** `claude-code-launcher-1.0.0.vsix`
+
+## Em resumo
+
+- **Abrir o chat** do Claude Code na barra lateral ou em abas, por um ícone no título do editor ou pelo item **Claude** na barra de status.
+- **Revisar mudanças:** ver, arquivo por arquivo, o que o Claude alterou, com diff, aceitar, recusar e desfazer.
+- **Gerenciar skills** em um painel próprio.
+
+### Começando em 3 passos
+
+1. Instale a extensão oficial **Claude Code** (o launcher oferece a ação **Instalar**).
+2. Abra a pasta do projeto e clique no item **Claude** na barra de status.
+3. Para acompanhar as mudanças, execute **Ativar registro de mudanças** e inicie uma nova conversa.
+
+Tudo fica local: nenhum dado é enviado a serviço externo.
 
 ## Sumário
 
@@ -32,23 +46,15 @@ Esta é uma extensão independente, que não constitui produto da Anthropic nem 
 | VS Code 1.94.0, Node do host 20.16.0 | macOS arm64 local; Linux, Windows e macOS na CI |
 | VS Code 1.146.0, Node do host 24.22.1 | macOS arm64 |
 | Cursor 3.19.13, API VS Code 1.128.0, Node do host 24.18.1 | macOS arm64 |
+| VS Code 1.147.0, Node do host 24.22.1 | Linux x64 (1.0.0: host, `multi-window`, `lifecycle` e `official` com Claude Code 2.1.329) |
+| Cursor 3.30.14, API VS Code 1.128.0, Node do host 24.22.1 | Linux x64 (1.0.0: host) |
 
-### Escopo da verificação
-
-As jornadas de teste cobrem ativação, comandos, preservação das preferências com a gestão desligada, CRLF, UTF-8 com BOM, recusa de criação, desfazer, revisão parcial e edição humana entre capturas. BOM, Unicode e final de linha são conferidos no documento e nos bytes salvos. Alteração da presença do BOM, finais de linha mistos e UTF-8 inválido devem bloquear a reversão.
-
-No modo VSIX, uma jornada adicional executa o hook instalado em um arquivo sintético e verifica sua ingestão e revisão no editor. Os testes de adaptadores abrangem falhas de gravação, recuperação e concorrência. Notebooks com alterações não salvas e providers virtuais recebem testes negativos reais, que comprovam a preservação dos buffers e o bloqueio de mutações; isso não habilita a revisão desses recursos, e a revisão de recursos não admitidos bloqueia alterações de conteúdo.
-
-Esses cenários não comprovam a abertura autenticada de conversas nem o funcionamento em hosts remotos. Os relatórios identificam o editor, o sistema e o artefato de cada execução. Uma matriz configurada não equivale a um resultado aprovado.
-
-### Compatibilidade de hooks
-
-A compatibilidade de hooks é verificada separadamente. O modo automático exige que o schema da extensão oficial selecionada declare `command` com `args` separados. Não se presume uma versão mínima do Claude a partir dessa capacidade. Consulte o [contrato oficial dos hooks](https://code.claude.com/docs/en/hooks#command-hook-fields).
+A abrangência dos testes, o que eles não comprovam e a verificação de hooks estão em [docs/VERIFICACAO.md](https://github.com/KauanCarolino/Extension-Claude-Code-Launcher/blob/main/docs/VERIFICACAO.md).
 
 ## Instalação
 
 1. Em **Extensions**, abrir o menu `…` e selecionar **Install from VSIX**.
-2. Selecionar o arquivo `claude-code-launcher-0.13.0.vsix`.
+2. Selecionar o arquivo `claude-code-launcher-1.0.0.vsix`.
 3. Abrir a pasta do projeto e executar um comando da categoria **Claude Code Launcher**.
 4. Para registrar novas mudanças, executar **Ativar registro de mudanças** e iniciar uma nova conversa do Claude.
 
@@ -83,7 +89,7 @@ A aba **Skills** lista as skills do Claude Code, com busca e os seguintes filtro
 | Filtro | Origem |
 | --- | --- |
 | **Projeto** | `.claude/skills/` da primeira pasta do workspace |
-| **Global** | `~/.claude/skills/` |
+| **Global** | `~/.claude/skills/`, ou `$CLAUDE_CONFIG_DIR/skills/` quando a variável está definida |
 | **claude.ai** | Skills sincronizadas; somente leitura |
 
 Enquanto a aba **Skills** está ativa, a view **Mudanças** permanece oculta, sendo exibida novamente ao se selecionar **Conversas**.
@@ -91,7 +97,7 @@ Enquanto a aba **Skills** está ativa, a view **Mudanças** permanece oculta, se
 Para skills do projeto e globais, estão disponíveis as seguintes operações:
 
 - **Abrir** o `SKILL.md` ou **revelar** a pasta no sistema;
-- **Ativar ou desativar**: o arquivo `SKILL.md` é renomeado para `SKILL.md.disabled`, e a skill deixa de ser carregada pelo Claude;
+- **Ativar ou desativar**: o arquivo `SKILL.md` é renomeado para `SKILL.md.disabled`, e a skill deixa de ser carregada pelo Claude. Essa é uma convenção do launcher, não um recurso do Claude Code: o Claude Code apenas deixa de encontrar o `SKILL.md`. Para reativar sem o launcher, basta renomear o arquivo de volta;
 - **Criar**, informando nome (letras minúsculas, números e hífens) e descrição; o `SKILL.md` criado é aberto no editor;
 - **Excluir**, mediante confirmação; a pasta é enviada à lixeira do sistema.
 
@@ -104,6 +110,12 @@ A view **Mudanças** reúne as edições capturadas pelas ferramentas Edit, Writ
 ### Escopo por conversa
 
 O painel exibe somente os arquivos da conversa em foco e acompanha a troca de conversa. Um aviso no topo indica a conversa apresentada, e a ação **Ver todas** inclui também as alterações de outras conversas (a ação **Só esta conversa** restabelece o filtro). Quando nenhuma conversa é identificada, como no caso de uma conversa nova ainda sem mensagens, o painel exibe todas as alterações.
+
+A aba do chat oficial expõe apenas o título, por isso a conversa é identificada comparando esse título com o das conversas gravadas. Daí decorrem três limites:
+
+- Conversas com o **mesmo título** não são distinguidas. O painel mostra as mudanças de todas elas juntas e o aviso informa quantas conversas têm aquele título.
+- Se o título da aba **não coincidir exatamente** com o gravado (por exemplo, abreviado pelo editor), nenhuma conversa é identificada e o painel mostra tudo.
+- O filtro só muda **o que aparece** no painel. Aceitar e recusar continuam valendo para o arquivo inteiro, inclusive para trechos de outras conversas no mesmo arquivo.
 
 ### Painel lateral
 
@@ -240,6 +252,8 @@ Um hook interrompido durante a execução (tempo esgotado, queda do processo ou 
 
 #### Versões anteriores e downgrade
 
+A partir da 1.0.0, os formatos versionados deste diretório são compatíveis dentro da série 1.x: uma versão 1.x lê o que qualquer 1.x anterior gravou. O compromisso completo está no [CHANGELOG](https://github.com/KauanCarolino/Extension-Claude-Code-Launcher/blob/main/CHANGELOG.md).
+
 A versão 0.7.0 não participa desse protocolo. Não se deve manter versões antigas e novas escrevendo no mesmo projeto. Para realizar downgrade, devem-se encerrar os escritores e preservar o diretório de revisão, pois o formato antigo não representa decisões parciais, estado misto nem toda a recuperação atual. A reinstalação do executável anterior não desfaz o conteúdo dos arquivos.
 
 As versões 0.8 e 0.9 também não reconhecem a intenção de limpeza introduzida na 0.10. Uma limpeza interrompida deve ser concluída com a versão 0.10 ou superior antes de se considerar um downgrade. O uso simultâneo dessas versões durante a limpeza não é suportado.
@@ -277,8 +291,8 @@ npm run lint
 npm test
 npm run test:package
 npm audit --audit-level=moderate
-npm run package -- --out claude-code-launcher-0.13.0.vsix
-npm run verify:package -- claude-code-launcher-0.13.0.vsix
+npm run package -- --out claude-code-launcher-1.0.0.vsix
+npm run verify:package -- claude-code-launcher-1.0.0.vsix
 ```
 
 O script `vscode:prepublish` executa o build, que remove a saída gerada anteriormente e compila com `noEmitOnError`. Os testes de pacote utilizam árvores temporárias, inclusive uma sem `out/` e outra com saída obsoleta. O verificador inspeciona o VSIX real, compara seus bytes com o runtime atual, calcula o SHA-256 e rejeita conteúdo inesperado. `docs/`, testes, scripts, configurações locais e dependências de desenvolvimento são excluídos do VSIX.
@@ -290,18 +304,20 @@ Os testes de `test/*.test.js` utilizam regras reais e adaptadores explícitos no
 ```sh
 npm run test:host -- --editor code
 npm run test:host -- --editor cursor
-npm run test:host -- --editor code --vsix claude-code-launcher-0.13.0.vsix --keep
-npm run test:host -- --editor cursor --vsix claude-code-launcher-0.13.0.vsix --report-dir docs/validacao/host-cursor
+npm run test:host -- --editor code --vsix claude-code-launcher-1.0.0.vsix --keep
+npm run test:host -- --editor cursor --vsix claude-code-launcher-1.0.0.vsix --report-dir docs/validacao/host-cursor
 ```
 
 O runner cria workspace, perfil, diretório de extensões e configuração Claude temporários. O modo `--vsix` instala e exercita o pacote nesse perfil isolado, sem alterar o perfil normal e sem enviar mensagens ao Claude. A opção `--keep` mantém o perfil temporário, e as falhas também preservam o diretório. A opção `--report-dir` cria uma subpasta `run-*` exclusiva para cada execução, com os relatórios e logs correspondentes, preservando as execuções anteriores. O cenário é um workspace sintético confiável e não constitui teste do Restricted Mode.
 
 A jornada de captura do pacote confere o hash do hook instalado com sua entrada no VSIX, executa os eventos anterior e posterior com Node externo 22 ou superior, aguarda a ingestão pelas lentes públicas do editor e verifica uma recusa no documento, no disco e no estado persistido. Esse arquivo sintético não recebe eventos semeados diretamente no log. Os relatórios separam o Node externo do Node do Extension Host e vinculam o resultado ao hash do VSIX. Esse procedimento exercita o hook diretamente e não equivale a uma conversa autenticada nem à execução dos hooks pelo harness oficial do Claude.
 
-No macOS, os caminhos padrão correspondem aos aplicativos em `/Applications`. Para outra instalação, utiliza-se `--executable /caminho/do/editor`. O caminho do CLI é derivado dessa instalação, e `--cli /caminho/Resources/app/out/cli.js` permite substituí-lo, desde que pertença à **mesma instalação**. Para baixar e exercitar uma versão exata do VS Code:
+A jornada de recusa de criação exige lixeira no sistema de arquivos do workspace, porque o launcher nunca exclui de forma permanente. Em Linux, quando o diretório temporário não tem lixeira (o `gio` informa "montagens internas do sistema"), aponta-se `TMPDIR` para uma pasta dentro da home, por exemplo `TMPDIR=$HOME/.cache/launcher-host npm run test:host -- ...`, removendo-a ao final.
+
+No macOS, os caminhos padrão correspondem aos aplicativos em `/Applications`; em Linux, informa-se `--executable` (por exemplo, `/usr/share/code/code` ou `/usr/share/cursor/cursor`). Para outra instalação, utiliza-se `--executable /caminho/do/editor`. O caminho do CLI é derivado dessa instalação, e `--cli /caminho/Resources/app/out/cli.js` permite substituí-lo, desde que pertença à **mesma instalação**. Para baixar e exercitar uma versão exata do VS Code:
 
 ```sh
-npm run test:host -- --download-version 1.94.0 --vsix claude-code-launcher-0.13.0.vsix --report-dir docs/validacao/host-minimum
+npm run test:host -- --download-version 1.94.0 --vsix claude-code-launcher-1.0.0.vsix --report-dir docs/validacao/host-minimum
 ```
 
 A opção `--download-version` aceita apenas uma versão exata, somente para VS Code, e não pode ser combinada com `--executable` ou `--cli`. O download utiliza cache temporário fora do projeto. Em Linux sem display, o comando deve ser executado com `xvfb-run -a`. A matriz de CI inclui a instalação do VSIX e a jornada do hook no VS Code 1.94.0 em Linux, Windows e macOS, além de tipagem, testes Node, testes de pacote e auditoria. Recomenda-se consultar os checks e as evidências da execução do commit a ser distribuído.
@@ -317,9 +333,9 @@ O relatório registra cinco amostras com 15, 1.000 e 5.000 arquivos por pasta, e
 Os contratos adicionais também utilizam o VSIX instalado em perfis isolados:
 
 ```sh
-npm run test:host:contracts -- multi-window --vsix claude-code-launcher-0.13.0.vsix --report-dir docs/validacao/janelas
-npm run test:host:contracts -- lifecycle --vsix claude-code-launcher-0.13.0.vsix --report-dir docs/validacao/lifecycle
-npm run test:host:contracts -- official --official-extension /caminho/da/extensao/anthropic.claude-code --vsix claude-code-launcher-0.13.0.vsix --report-dir docs/validacao/oficial
+npm run test:host:contracts -- multi-window --vsix claude-code-launcher-1.0.0.vsix --report-dir docs/validacao/janelas
+npm run test:host:contracts -- lifecycle --vsix claude-code-launcher-1.0.0.vsix --report-dir docs/validacao/lifecycle
+npm run test:host:contracts -- official --official-extension /caminho/da/extensao/anthropic.claude-code --vsix claude-code-launcher-1.0.0.vsix --report-dir docs/validacao/oficial
 ```
 
 - **`multi-window`** exercita duas janelas reais, recarregamento, decisão parcial e transferência explícita da escrita.
@@ -330,4 +346,12 @@ Nenhum desses cenários comprova uma conversa autenticada nem a execução do ho
 
 ### Documentação interna e publicação
 
-Os PRDs, specs e registros de implementação em `docs/` são locais e estão ignorados pelo Git; não se deve utilizar `git add -f docs/`. A geração de um VSIX não executa commit, push nem publicação em Marketplace ou Open VSX.
+Os PRDs, specs e registros de implementação em `docs/` são locais e estão ignorados pelo Git; não se deve utilizar `git add -f docs/`. A exceção é `docs/VERIFICACAO.md`, versionado porque o README aponta para ele. A geração de um VSIX não executa commit, push nem publicação em Marketplace ou Open VSX.
+
+A publicação é feita pelo workflow `.github/workflows/release.yml`, disparado por uma tag `vX.Y.Z`:
+
+1. Atualizar `version` no `package.json` e no `package-lock.json` e criar a seção `## X.Y.Z — data` no `CHANGELOG.md`.
+2. Conferir os checks de **Validate extension** do commit nos três sistemas.
+3. Criar e enviar a tag: `git tag vX.Y.Z && git push origin vX.Y.Z`.
+
+O workflow recusa uma tag que não coincida com o `package.json` ou sem seção no CHANGELOG. Ele repete as validações e o teste de host, gera e verifica o VSIX, e o publica no Visual Studio Marketplace (segredo `VSCE_PAT`) e no Open VSX (segredo `OVSX_PAT`, de onde o Cursor instala). Um registro sem segredo é pulado com aviso. O VSIX verificado é anexado a uma release do GitHub, com as notas tiradas do CHANGELOG. O job de publicação usa o ambiente `release`, que pode exigir aprovação manual nas configurações do repositório.

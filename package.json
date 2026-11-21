@@ -2,8 +2,8 @@
   "name": "claude-code-launcher",
   "displayName": "Claude Code Launcher",
   "description": "Abre o chat oficial do Claude Code e mostra, de forma didática, o que ele mudou em cada arquivo. Extensão independente: não é um produto da Anthropic.",
-  "version": "0.13.0",
-  "publisher": "kauan",
+  "version": "1.0.0",
+  "publisher": "KauanDeveloper",
   "license": "MIT",
   "icon": "media/icon.png",
   "keywords": [
@@ -18,11 +18,20 @@
     "type": "git",
     "url": "https://github.com/KauanCarolino/Extension-Claude-Code-Launcher.git"
   },
+  "homepage": "https://github.com/KauanCarolino/Extension-Claude-Code-Launcher#readme",
+  "bugs": {
+    "url": "https://github.com/KauanCarolino/Extension-Claude-Code-Launcher/issues"
+  },
+  "galleryBanner": {
+    "color": "#2b1d17",
+    "theme": "dark"
+  },
   "engines": {
     "vscode": "^1.94.0",
     "node": ">=22"
   },
   "categories": [
+    "AI",
     "Other"
   ],
   "activationEvents": [

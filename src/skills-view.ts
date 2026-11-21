@@ -1,9 +1,8 @@
-import * as os from 'node:os';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { createSkill, DISABLED_FILE, scanSkills, scanSynced, setSkillEnabled, SKILL_FILE, validSkillName, type SkillInfo, type SkillScope } from './skills';
+import { createSkill, DISABLED_FILE, globalSkillsRoot, scanSkills, scanSynced, setSkillEnabled, SKILL_FILE, validSkillName, type SkillInfo, type SkillScope } from './skills';
 
-const globalRoot = () => path.join(os.homedir(), '.claude', 'skills');
+const globalRoot = () => globalSkillsRoot();
 const projectRoot = () => {
 	const folder = vscode.workspace.workspaceFolders?.[0];
 	return folder ? path.join(folder.uri.fsPath, '.claude', 'skills') : undefined;

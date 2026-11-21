@@ -90,7 +90,7 @@ async function verifyPackage(filename, root = path.resolve(__dirname, '..')) {
   const expectedManifest = JSON.parse(sourceManifest.toString('utf8'));
   const packagedManifest = JSON.parse(files.get('extension/package.json').toString('utf8'));
   assert.deepEqual(packagedManifest, expectedManifest, 'Manifesto do pacote difere da fonte.');
-  assert.equal(packagedManifest.publisher + '.' + packagedManifest.name, 'kauan.claude-code-launcher');
+  assert.equal(packagedManifest.publisher + '.' + packagedManifest.name, 'KauanDeveloper.claude-code-launcher');
 
   const expected = new Map([
     ['extension/package.json', 'package.json'],

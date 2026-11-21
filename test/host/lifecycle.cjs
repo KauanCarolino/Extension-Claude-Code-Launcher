@@ -5,6 +5,8 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const { performance } = require('node:perf_hooks');
 const vscode = require('vscode');
+const launcherManifest = require('../../package.json');
+const LAUNCHER_ID = launcherManifest.publisher + '.' + launcherManifest.name;
 const { observeRuntime } = require('./observe-runtime.cjs');
 
 async function until(work, label) {
@@ -27,7 +29,7 @@ exports.run = async () => {
     artifactSha256: process.env.LAUNCHER_HOST_ARTIFACT_SHA256, checks: [], cycles: [], homeCycles: [],
     method: 'Verified installed component source, observational CommonJS loader, real ExtensionContext and forwarded real editor/fs APIs. The private home class is exposed by one appended test-only export in the VM; production bytes are unchanged. Counts cover these component instances, not all editor handles. Heap deltas are noisy process observations, not GC-retained size or proof of leak.' };
   try {
-    const extension = vscode.extensions.getExtension('kauan.claude-code-launcher'); assert(extension);
+    const extension = vscode.extensions.getExtension(LAUNCHER_ID); assert(extension);
     report.extensionVersion = extension.packageJSON.version;
     assert.equal(report.extensionVersion, process.env.LAUNCHER_HOST_ARTIFACT_VERSION);
     report.activeBeforeActivationMeasurement = extension.isActive;

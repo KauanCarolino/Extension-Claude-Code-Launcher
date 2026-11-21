@@ -633,3 +633,19 @@ test('project exclusion patterns add to the user patterns and cannot remove them
 	scoped.globalValue = ['only-mine/**']; scoped.workspaceValue = undefined; await f.controller.setEnabled(true);
 	assert.deepEqual(policy().excludedPatterns, ['only-mine/**']);
 });
+
+test('a hook left in the globalStorage of the pre-1.0 identifier is recognized as the launcher own and replaced', async (t) => {
+	const f = fixture(t);
+	// globalStorage/<id>: the fixture keeps the current one at <root>/global, so the legacy sibling is <root>/kauan.claude-code-launcher.
+	const legacy = path.join(f.root, 'kauan.claude-code-launcher', hooks.HOOK_NAME);
+	const plan = hooks.planHooks({ read: { kind: 'absent' }, scriptPath: legacy, enable: true, capability: { status: 'confirmed', harness: 'fixture-contract' } });
+	fs.mkdirSync(path.join(f.root, '.claude'), { recursive: true });
+	const settings = path.join(f.root, '.claude', 'settings.local.json');
+	fs.writeFileSync(settings, plan.nextText);
+	await f.controller.setEnabled(true);
+	const text = fs.readFileSync(settings, 'utf8');
+	assert.equal(text.includes(legacy), false, 'the legacy entry is replaced, not duplicated');
+	assert.equal(text.includes(f.controller.scriptPath(f.folder)), true);
+	assert.ok(f.warnings.every((message) => !message.includes(describeReason('ambiguousHookOwnership'))));
+	assert.equal(await f.controller.hooksEnabled(), true);
+});

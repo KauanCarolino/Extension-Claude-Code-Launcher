@@ -98,3 +98,18 @@ test('interrupted purge exposes only the specific confirmed cleanup recovery whi
 	ui.render({ ...fixture(), wide: true, readOnly: true, readOnlyReason: 'Somente leitura', readOnlyAction: 'acceptAll' });
 	assert.equal(ui.find('recover-purge'), undefined); assert.equal(ui.find('acceptAll').disabled, true);
 });
+
+test('chat scope banner names the conversation, warns about repeated titles and toggles the filter', () => {
+	const ui = webview({});
+	ui.render({ ...fixture(), chat: { title: 'Corrigir login', scoped: true, matches: 1, others: 2 } });
+	assert.match(ui.root.textContent, /Conversa: Corrigir login/);
+	assert.doesNotMatch(ui.root.textContent, /conversas com este título/);
+	assert.match(ui.root.textContent, /Ver todas \(2 de outras\)/);
+	ui.render({ ...fixture(), chat: { title: 'Corrigir login', scoped: true, matches: 3, others: 0 } });
+	assert.match(ui.root.textContent, /Conversa: Corrigir login \(3 conversas com este título\)/);
+	assert.equal(ui.find('chat-scope'), undefined, 'sem mudanças de outras conversas não há alternância');
+	ui.render({ ...fixture(), chat: { title: 'Corrigir login', scoped: false, matches: 3, others: 4 } });
+	assert.match(ui.root.textContent, /Todas as conversas/);
+	ui.click(ui.find('chat-scope'));
+	assert.equal(ui.messages.at(-1).command, 'toggleChatFilter');
+});

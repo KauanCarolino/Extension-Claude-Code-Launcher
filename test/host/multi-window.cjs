@@ -4,6 +4,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const vscode = require('vscode');
+const launcherManifest = require('../../package.json');
+const LAUNCHER_ID = launcherManifest.publisher + '.' + launcherManifest.name;
 
 async function until(fn, label, timeout = 30000) {
   const deadline = Date.now() + timeout;
@@ -30,7 +32,7 @@ exports.run = async () => {
   const state = async () => JSON.parse(await fs.readFile(path.join(workspace, '.claude/launcher-changes/review-state.v1.json'), 'utf8'));
   const reviewOf = value => Object.values(value.reviews).flat().find(review => review.ids.includes('contract-partial'));
   try {
-    const extension = vscode.extensions.getExtension('kauan.claude-code-launcher');
+    const extension = vscode.extensions.getExtension(LAUNCHER_ID);
     assert(extension); await extension.activate();
     assert.equal(extension.packageJSON.version, process.env.LAUNCHER_HOST_ARTIFACT_VERSION);
     if (process.env.LAUNCHER_HOST_EXPECTED_VERSION) assert.equal(vscode.version, process.env.LAUNCHER_HOST_EXPECTED_VERSION);

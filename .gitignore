@@ -20,5 +20,6 @@ npm-debug.log*
 Thumbs.db
 desktop.ini
 
-# Documentação local de planejamento (PRDs e specs)
-/docs/
+# Documentação local de planejamento (PRDs e specs); só a verificação é publicada
+/docs/*
+!/docs/VERIFICACAO.md

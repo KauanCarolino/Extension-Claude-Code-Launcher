@@ -231,3 +231,21 @@ export function referencedBlobs(lines: readonly string[]): Set<string> {
 	}
 	return hashes;
 }
+
+export interface ActiveChat {
+	/** Conversas cujo título coincide com o da aba. Mais de uma quando há títulos repetidos. */
+	sessions: string[];
+	title: string;
+}
+
+/**
+ * Associa a aba do chat às conversas gravadas pelo título, único dado que a aba expõe.
+ * Títulos repetidos não são desempatados: todas as conversas com aquele título entram,
+ * para o painel não esconder mudanças de uma delas. Sem correspondência, devolve null (mostra tudo).
+ */
+export function matchChatSessions(label: string, sessions: readonly { id: string; title: string; updated: number }[]): ActiveChat | null {
+	const title = label.trim();
+	if (!title) { return null; }
+	const matches = sessions.filter((session) => session.title.trim() === title).sort((a, b) => b.updated - a.updated);
+	return matches.length ? { sessions: [...new Set(matches.map((session) => session.id))], title } : null;
+}

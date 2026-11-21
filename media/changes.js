@@ -269,8 +269,11 @@
 	function renderChatScope(chat) {
 		const bar = el('div', 'chat-scope');
 		bar.append(icon('comment-discussion'));
-		const label = el('span', 'chat-scope-label', chat.scoped ? 'Conversa: ' + chat.title : 'Todas as conversas');
-		label.title = chat.title;
+		const repeated = chat.matches > 1 ? ' (' + chat.matches + ' conversas com este título)' : '';
+		const label = el('span', 'chat-scope-label', chat.scoped ? 'Conversa: ' + chat.title + repeated : 'Todas as conversas');
+		label.title = chat.scoped && repeated
+			? chat.title + '\nHá ' + chat.matches + ' conversas com este título. O painel mostra as mudanças de todas elas.'
+			: chat.title;
 		bar.append(label);
 		if (chat.others > 0 || !chat.scoped) {
 			const toggle = el('button', 'btn-ghost chat-scope-toggle', chat.scoped ? 'Ver todas (' + chat.others + ' de outras)' : 'Só esta conversa');

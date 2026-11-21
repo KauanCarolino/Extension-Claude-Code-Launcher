@@ -1,5 +1,61 @@
 # Changelog
 
+O projeto segue [Versionamento Semântico](https://semver.org/lang/pt-BR/) a partir da 1.0.0.
+
+## 1.0.0 — 2026-11-20
+
+Primeira versão estável. Não há funcionalidade nova em relação à 0.13.1: esta versão fecha o que já existia, corrige os problemas encontrados na revisão e define o que passa a ser compatível dentro da série 1.x.
+
+### Compromisso de compatibilidade (1.x)
+
+Dentro da série 1.x, uma versão nova não remove nem muda o significado de:
+
+- os IDs de comandos `claude-code-launcher.*` e os atalhos documentados;
+- as configurações `claudeCodeLauncher.*`, seus valores aceitos e padrões;
+- os formatos versionados em `.claude/launcher-changes/` (`review-state.v1.json`, `review-blobs/v1/`, `purge-state.v1.json`, `capture-diagnostics/v2/`, `log.jsonl`, `meta.json` e `status.json`). Uma versão 1.x lê os dados gravados por qualquer versão 1.x anterior. Quando um formato precisar mudar, a versão nova migra os dados e guarda backup em `review-migration-backups/`, e o CHANGELOG informa se o downgrade continua possível;
+- a convenção `SKILL.md.disabled` usada para desativar skills.
+
+Mudanças incompatíveis nesses pontos só entram numa versão 2.0.0. A aparência dos painéis, os textos das mensagens e os arquivos internos sem versão (`active/`, `pending/`, `completed/`, locks) não fazem parte do compromisso.
+
+### Mudança de identificador: leia antes de atualizar
+
+O publisher passou de `kauan` para `KauanDeveloper`, e o identificador da extensão passou a ser `KauanDeveloper.claude-code-launcher`. O editor trata a 1.0.0 como uma extensão **diferente** da 0.x:
+
+- Desinstale `kauan.claude-code-launcher` antes de instalar a 1.0.0. Duas versões escrevendo no mesmo projeto não são suportadas.
+- Os dados em `.claude/launcher-changes/`, os hooks e as configurações `claudeCodeLauncher.*` continuam valendo, porque não dependem do identificador. Um hook legado gravado no `globalStorage` do identificador antigo continua reconhecido como do launcher.
+- Não passam para a 1.0.0, porque o editor os guarda por identificador: a pilha de **Desfazer a última recusa** e o registro das preferências de abertura definidas pela gestão de grupos. Antes de atualizar, conclua os desfazer pendentes e, se `claudeCodeLauncher.manageEditorGroups` estiver ligado, desligue-o na versão antiga, para ela restaurar suas preferências originais.
+
+### Corrigido
+
+- Os testes de host procuravam a extensão pelo identificador antigo e falhavam em todos os sistemas depois da troca de publisher. Agora leem o identificador do `package.json`.
+- **Skills:** uma descrição com barra invertida gerava um `SKILL.md` com YAML inválido (por exemplo, `C:\temp` virava a sequência de escape `\t`). Barras invertidas, aspas e caracteres de controle agora são escapados ou substituídos.
+- **Skills:** um `SKILL.md` salvo com BOM tinha o nome e a descrição ignorados.
+- **Skills:** a pasta global ignorava `CLAUDE_CONFIG_DIR`, que a lista de conversas já respeitava. Com a variável definida, as skills globais passam a vir de `$CLAUDE_CONFIG_DIR/skills`.
+- **Skills:** ativar ou desativar uma skill alterada fora do launcher mostrava um erro de sistema genérico. Agora explica o motivo. As skills do claude.ai também são recusadas na camada de disco, não só na interface.
+- **Mudanças por conversa:** com duas ou mais conversas de mesmo título, o painel escolhia a mais recente e escondia as mudanças das outras. Agora mostra as de todas e avisa no topo quantas conversas têm aquele título.
+- O link do README para `docs/VERIFICACAO.md` apontava para um arquivo ignorado pelo Git, que não chegava ao repositório. O arquivo passa a ser versionado; o resto de `docs/` continua local.
+
+### Adicionado
+
+- Verificação em Linux registrada em `docs/VERIFICACAO.md`: teste de host no VS Code 1.147.0 e no Cursor 3.30.14, e contratos `multi-window`, `lifecycle` e `official` (Claude Code 2.1.329).
+- Workflow de release (`.github/workflows/release.yml`): ao enviar uma tag `vX.Y.Z`, confere se a tag bate com o `package.json` e o CHANGELOG, repete as validações e o teste de host, gera e verifica o VSIX e o publica no Visual Studio Marketplace e no Open VSX (quando os segredos `VSCE_PAT` e `OVSX_PAT` existem) e numa release do GitHub.
+- Manifesto com `homepage`, `bugs` e `galleryBanner` para a página do Marketplace.
+
+### Interno
+
+- Testes de skills ampliados de 1 para 15, cobrindo o controlador da view com o editor simulado: ids que não vieram da listagem são ignorados, skills do claude.ai não são alternadas nem excluídas, excluir exige confirmação e usa a lixeira, criar respeita o escopo e nunca sobrescreve.
+- Teste do controlador real para o hook legado no `globalStorage` do identificador antigo; sem a correção, **Ativar registro** ficava bloqueado com `ambiguousHookOwnership`.
+- A associação entre aba e conversa saiu de `extension.ts` para `matchChatSessions` em `logic.ts`, com testes próprios, e o aviso do painel ganhou teste de interface.
+
+## 0.13.1 — 2026-11-20
+
+### Alterado
+
+- Novo ícone: balão de chat na cor terracota com o prompt `>_` e uma faísca, em versão colorida (marketplace) e monocromática (barra lateral).
+- A categoria da extensão passou a incluir **AI**.
+- O README ganhou um resumo e um passo a passo no início. Os detalhes de verificação foram para `docs/VERIFICACAO.md`.
+- Constantes e utilitários independentes do controlador de mudanças foram movidos para `changes-support.ts`, sem alteração de comportamento.
+
 ## 0.13.0 — 2026-11-20
 
 ### Adicionado
@@ -7,6 +63,8 @@
 - O painel **Mudanças** agora mostra só os arquivos da conversa em foco. Ao trocar de conversa, a lista acompanha. Um aviso no topo indica qual conversa está sendo mostrada, e **Ver todas** mostra também as de outras conversas. Sem conversa identificada (por exemplo, uma conversa nova ainda sem mensagens), o painel mostra tudo.
 
 ## 0.12.5 — 2026-11-20
+
+As versões intermediárias 0.12.x, como a 0.12.1 do commit da view de skills, não foram distribuídas; o resultado está consolidado nesta entrada.
 
 ### Adicionado
 

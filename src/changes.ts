@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { computeDiff } from './diff';
-import { fileKey, isBlobHash, RawEntry, referencedBlobs, resolveSnapshot, Status } from './logic';
+import { type ActiveChat, fileKey, isBlobHash, RawEntry, referencedBlobs, resolveSnapshot, Status } from './logic';
 import { readTranscriptMeta, RequestInfo, sessionsDir, clearTranscriptMetadataForRoots, transcriptMetadataCacheCount } from './sessions';
 import { activeReview, copyReview, ingestEntries, ReviewContent, ReviewDecisionRequest, ReviewError, ReviewResolution, SharedReview, sameContent } from './review';
 import { ReviewStore } from './review-store';
@@ -15,6 +15,7 @@ import { inventoryPurge, planPurge, summarizePurge, PurgeInventory, PurgeEffect,
 import { describeReason } from './messages';
 import { BaseView, FileSummary, ViewEntry, basename, capitalize, countFiles, errorCode, excludedPatterns, explain, purgeFailureReason, purgeInventoryText, purgeReportText, toViewEntry, HOOK_SCRIPT_DIFFERS, HOOK_SCRIPT_RESTORED, NODE_MISSING } from './changes-view';
 import { findExecutable } from './node-runtime';
+import { STATUS_KEY, LEGACY_REVIEWED_KEY, UNDO_KEY, Undo, loadStatus, loadUndo, confirm, createNonce, existsLocal, canonicalResource } from './changes-support';
 import * as nodeFs from 'node:fs';
 import * as nodePath from 'node:path';
 import * as crypto from 'node:crypto';
@@ -24,6 +25,8 @@ import { TextDecoder as Utf8Decoder } from 'node:util';
 export type { RawEntry, Snapshot } from './logic';
 
 const HOOK_FILE = 'launcher-record-change.js';
+/** Identificador usado até a 0.13.x; o globalStorage de instalações antigas fica sob ele. */
+const LEGACY_EXTENSION_ID = 'kauan.claude-code-launcher';
 const LOG_DIR = ['.claude', 'launcher-changes'];
 const LOG_PATH = [...LOG_DIR, 'log.jsonl'];
 const BLOB_DIR = [...LOG_DIR, 'blobs'];
@@ -31,9 +34,6 @@ const BLOB_DIR = [...LOG_DIR, 'blobs'];
 const META_PATH = [...LOG_DIR, 'meta.json'];
 const SETTINGS_PATH = ['.claude', 'settings.local.json'];
 const SCHEME = 'claude-launcher-change';
-const STATUS_KEY = 'claudeCodeLauncher.entryStatus';
-const LEGACY_REVIEWED_KEY = 'claudeCodeLauncher.reviewedEntries';
-const UNDO_KEY = 'claudeCodeLauncher.undoStack';
 const PURGE_STATE_FILE = 'purge-state.v1.json';
 const PENDING_CONTEXT = 'claudeCodeLauncher.hasPendingChanges';
 /** Comando interno de inline.ts: esquece a revisão aberta de um arquivo, sem marcar nada. */
@@ -46,7 +46,6 @@ const MAX_LOG_ENTRIES = 400;
 const MAX_STATUS = 3000;
 const MAX_META_ATTEMPTS = 10;
 /** Recusas que dá para desfazer, da mais recente para trás. */
-const MAX_UNDO = 5;
 /** Blobs sem referência só saem depois disso: o hook pode estar no meio de uma edição. */
 const BLOB_GRACE_MS = 10 * 60 * 1000;
 /**
@@ -65,19 +64,6 @@ export function changeUri(entry: RawEntry, side: 'antes' | 'depois'): vscode.Uri
 	return vscode.Uri.from({ scheme: SCHEME, path: `/${entry.id}/${side}/${basename(entry.file)}` });
 }
 
-
-interface UndoItem {
-	file: string;
-	/** Conteúdo antes de recusar (undefined = o arquivo não existia). */
-	previous: string | undefined;
-	/** Conteúdo que a recusa deixou (undefined = a recusa apagou o arquivo). */
-	restored: string | undefined;
-}
-
-interface Undo {
-	items: UndoItem[];
-	ids: string[];
-}
 
 type Message = { command?: string; id?: string; key?: string; request?: string; revision?: number };
 
@@ -118,7 +104,7 @@ export class ChangesController implements
 	private refreshTimer: ReturnType<typeof setTimeout> | undefined;
 	private publishTimer: ReturnType<typeof setTimeout> | undefined;
 	/** Conversa em foco: com ela definida, o painel mostra só as edições dela (a menos que "Ver todos" esteja ligado). */
-	private activeChat: { session: string; title: string } | null = null;
+	private activeChat: ActiveChat | null = null;
 	private showAllChats = false;
 	private metaTimer: ReturnType<typeof setTimeout> | undefined;
 	private readonly disposables: vscode.Disposable[] = [];
@@ -267,8 +253,8 @@ export class ChangesController implements
 	// ---- Usado por inline.ts ----------------------------------------------------
 
 	/** Define a conversa cujas mudanças o painel mostra; `null` mostra tudo. */
-	setActiveChat(chat: { session: string; title: string } | null): void {
-		if (this.disposed || this.activeChat?.session === chat?.session) { return; }
+	setActiveChat(chat: ActiveChat | null): void {
+		if (this.disposed || this.activeChat?.sessions.join('\0') === chat?.sessions.join('\0')) { return; }
 		this.activeChat = chat;
 		this.summaryCache.clear();
 		this.publish();
@@ -1057,7 +1043,8 @@ export class ChangesController implements
 			const projections = new Map<string, ReturnType<typeof projectReview>>();
 		const chat = this.activeChat;
 		const scoped = Boolean(chat) && !this.showAllChats;
-		const inChat = (entry: RawEntry): boolean => !scoped || entry.session === chat?.session;
+		const chatSessions = new Set(chat?.sessions);
+		const inChat = (entry: RawEntry): boolean => !scoped || chatSessions.has(entry.session ?? '');
 		const history: ViewEntry[] = this.entries.filter(inChat).slice(0, MAX_HISTORY).map((entry) => {
 			const request = this.requestCache.get(entry.id);
 				const context = this.entryFolder.get(entry.id), store = context ? this.stores.get(context) : undefined;
@@ -1091,7 +1078,7 @@ export class ChangesController implements
 			entries: history,
 				files: this.pendingGroups().map((list) => list.filter(inChat)).filter((list) => list.length > 0)
 					.map((list) => this.summaryOf(list, states.get(this.entryFolder.get(list[0].id) || ''))),
-			chat: chat ? { title: chat.title, scoped, others: this.entries.filter((entry) => entry.session !== chat.session).length } : null,
+			chat: chat ? { title: chat.title, scoped, matches: chat.sessions.length, others: this.entries.filter((entry) => !chatSessions.has(entry.session ?? '')).length } : null,
 			canUndo: this.canUndoReject(),
 			coverageMessage: [this.coverageMessage, ...this.hookWarnings.values(), ...this.runtimeWarnings.values(), ...this.captureWarnings.values()].filter(Boolean).join(' ') || null,
 			reviewWriter: [...this.stores.values()].every((store) => store.writable),
@@ -1706,7 +1693,12 @@ export class ChangesController implements
 		} catch { return 'differs'; }
 	}
 	private async readSettings(folder: vscode.WorkspaceFolder): Promise<SettingsRead> { return safeReadText(nodePath.join(folder.uri.fsPath, ...SETTINGS_PATH), folder.uri.fsPath); }
-	private knownHookPaths(): string[] { return [vscode.Uri.joinPath(this.context.globalStorageUri, HOOK_FILE).fsPath]; }
+	/** Hooks legados no globalStorage: o desta extensão e o do identificador anterior à 1.0.0 (`kauan.claude-code-launcher`). */
+	private knownHookPaths(): string[] {
+		const current = vscode.Uri.joinPath(this.context.globalStorageUri, HOOK_FILE).fsPath;
+		const legacy = nodePath.join(nodePath.dirname(this.context.globalStorageUri.fsPath), LEGACY_EXTENSION_ID, HOOK_FILE);
+		return current === legacy ? [current] : [current, legacy];
+	}
 	private async hookCapability(): Promise<HookCapability> {
 		const config = vscode.workspace.getConfiguration('claudeCodeLauncher'); const mode = config.get<string>('hookExecutionMode', 'auto');
 		if (mode === 'disabled') { return { status: 'unsupported', harness: 'disabled' }; }
@@ -1832,48 +1824,4 @@ export class ChangesController implements
 </body>
 </html>`;
 	}
-}
-
-function loadStatus(memento: vscode.Memento): Map<string, Status> {
-	const saved = memento.get<Record<string, Status>>(STATUS_KEY);
-	if (saved && typeof saved === 'object') {
-		return new Map(Object.entries(saved).filter(([, value]) => value === 'accepted' || value === 'rejected'));
-	}
-	// Versões anteriores guardavam só a lista de edições revisadas.
-	const legacy = memento.get<string[]>(LEGACY_REVIEWED_KEY, []);
-	return new Map(legacy.map((id) => [id, 'accepted']));
-}
-
-async function confirm(message: string, detail: string, action: string): Promise<boolean> {
-	const answer = await vscode.window.showWarningMessage(message, { modal: true, detail }, action);
-	return answer === action;
-}
-
-
-function loadUndo(memento: vscode.Memento): Undo[] {
-	const saved = memento.get<Undo[]>(UNDO_KEY, []);
-	if (!Array.isArray(saved)) {
-		return [];
-	}
-	return saved.filter((undo) => undo && Array.isArray(undo.items) && Array.isArray(undo.ids)).slice(-MAX_UNDO);
-}
-
-
-function createNonce(): string {
-	return crypto.randomBytes(24).toString('hex');
-}
-
-async function existsLocal(file: string): Promise<boolean> { try { await nodeFs.promises.lstat(file); return true; } catch (error) { if ((error as { code?: string }).code === 'ENOENT') { return false; } throw error; } }
-
-async function canonicalResource(file: string, root: string): Promise<string | undefined> {
-	if (!nodePath.isAbsolute(file) || !nodePath.isAbsolute(root)) { return undefined; }
-	try {
-		const canonicalRoot = await nodeFs.promises.realpath(root); let current = nodePath.resolve(file); const missing: string[] = [];
-		while (true) {
-			try { current = await nodeFs.promises.realpath(current); break; }
-			catch (error) { if ((error as { code?: string }).code !== 'ENOENT' || current === nodePath.dirname(current)) { return undefined; } missing.unshift(nodePath.basename(current)); current = nodePath.dirname(current); }
-		}
-		const canonical = nodePath.join(current, ...missing), relative = nodePath.relative(canonicalRoot, canonical);
-		return relative !== '..' && !relative.startsWith('..' + nodePath.sep) && !nodePath.isAbsolute(relative) ? canonical : undefined;
-	} catch { return undefined; }
 }

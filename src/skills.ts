@@ -1,4 +1,5 @@
 import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
 import * as path from 'node:path';
 
 /** Leitura e alteração das skills do Claude em disco. Sem dependência do VS Code, para ser testável. */
@@ -17,8 +18,13 @@ export interface SkillInfo {
 export const SKILL_FILE = 'SKILL.md';
 export const DISABLED_FILE = 'SKILL.md.disabled';
 
+/** Pasta das skills globais: `$CLAUDE_CONFIG_DIR/skills` quando definido, como as conversas; senão `~/.claude/skills`. */
+export function globalSkillsRoot(env: NodeJS.ProcessEnv = process.env, home = os.homedir()): string {
+	return path.join(env.CLAUDE_CONFIG_DIR || path.join(home, '.claude'), 'skills');
+}
+
 export function parseFrontmatter(text: string): { name?: string; description?: string } {
-	const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text);
+	const match = /^\uFEFF?---\r?\n([\s\S]*?)\r?\n---/.exec(text);
 	if (!match) { return {}; }
 	const out: Record<string, string> = {};
 	let key: string | undefined;
@@ -72,10 +78,16 @@ export async function scanSkills(root: string, scope: SkillScope): Promise<Skill
 	return skills;
 }
 
+/**
+ * Ativa ou desativa renomeando `SKILL.md` para `SKILL.md.disabled` e vice-versa.
+ * É uma convenção do launcher, não do Claude Code: sem `SKILL.md`, o Claude Code não carrega a skill.
+ */
 export async function setSkillEnabled(skill: SkillInfo, enabled: boolean): Promise<void> {
 	if (skill.state === 'broken') { throw new Error('Skill sem SKILL.md.'); }
+	if (skill.scope === 'claudeai') { throw new Error('Skills do claude.ai são somente leitura.'); }
 	const from = path.join(skill.dir, enabled ? DISABLED_FILE : SKILL_FILE);
 	const to = path.join(skill.dir, enabled ? SKILL_FILE : DISABLED_FILE);
+	if (!(await exists(from))) { throw new Error(`A skill já está ${enabled ? 'ativa' : 'desativada'} ou foi alterada fora do launcher.`); }
 	if (await exists(to)) { throw new Error(`Já existe ${path.basename(to)} nesta pasta.`); }
 	await fs.rename(from, to);
 }
@@ -88,7 +100,8 @@ export async function createSkill(root: string, name: string, description: strin
 	await fs.mkdir(root, { recursive: true });
 	await fs.mkdir(dir); // falha se já existir: nunca sobrescreve
 	const file = path.join(dir, SKILL_FILE);
-	const safe = description.replace(/\r?\n/g, ' ').replace(/"/g, '\\"');
+	// Escalar YAML entre aspas duplas: barra invertida e aspas escapadas, quebras e controles viram espaço.
+	const safe = description.replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 	await fs.writeFile(file, `---\nname: ${name}\ndescription: "${safe}"\n---\n\n# ${name}\n\nDescreva aqui as instruções da skill.\n`, { flag: 'wx' });
 	return file;
 }

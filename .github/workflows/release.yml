@@ -1,0 +1,98 @@
+name: Release extension
+
+# Publica a versão quando uma tag vX.Y.Z é enviada. A tag precisa coincidir com a versão do package.json.
+# Segredos opcionais: VSCE_PAT (Visual Studio Marketplace) e OVSX_PAT (Open VSX, usado pelo Cursor).
+# Sem um segredo, o registro correspondente é pulado; o VSIX verificado sempre vai para a release do GitHub.
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    outputs:
+      vsix: ${{ steps.meta.outputs.vsix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Tag must match package.json version
+        id: meta
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::A tag ${GITHUB_REF_NAME} não coincide com a versão ${version} do package.json."
+            exit 1
+          fi
+          if ! grep -q "^## ${version} " CHANGELOG.md; then
+            echo "::error::O CHANGELOG.md não tem a seção ## ${version}."
+            exit 1
+          fi
+          echo "vsix=claude-code-launcher-${version}.vsix" >> "$GITHUB_OUTPUT"
+      - run: npm ci --ignore-scripts --no-audit --fund=false
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - run: npm run test:package
+      - run: npm audit --audit-level=moderate
+      - name: Build VSIX
+        run: npm run package -- --out "${{ steps.meta.outputs.vsix }}" --no-dependencies
+      - name: Verify VSIX bytes against source
+        run: npm run verify:package -- "${{ steps.meta.outputs.vsix }}"
+      - name: Run installed VSIX and real capture chain
+        run: xvfb-run -a npm run test:host -- --vsix "${{ steps.meta.outputs.vsix }}" --download-version 1.94.0 --report-dir "${{ runner.temp }}/release-host-evidence"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-vsix
+          path: ${{ steps.meta.outputs.vsix }}
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    needs: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    environment: release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --ignore-scripts --no-audit --fund=false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-vsix
+      - name: Publish to Visual Studio Marketplace
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          if [ -z "$VSCE_PAT" ]; then echo "::warning::VSCE_PAT ausente: Marketplace pulado."; exit 0; fi
+          npx vsce publish --packagePath "${{ needs.package.outputs.vsix }}"
+      - name: Publish to Open VSX
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: |
+          if [ -z "$OVSX_PAT" ]; then echo "::warning::OVSX_PAT ausente: Open VSX pulado."; exit 0; fi
+          npx --yes ovsx@0.10.1 publish "${{ needs.package.outputs.vsix }}" --pat "$OVSX_PAT"
+      - name: Create GitHub release with the verified VSIX
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '$0 ~ "^## " v " " {on=1; next} /^## / && on {exit} on' CHANGELOG.md > release-notes.md
+          gh release create "$GITHUB_REF_NAME" "${{ needs.package.outputs.vsix }}" --title "$GITHUB_REF_NAME" --notes-file release-notes.md

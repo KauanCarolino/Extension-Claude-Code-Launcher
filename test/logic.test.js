@@ -199,3 +199,19 @@ test('referencedBlobs junta os hashes citados no log', () => {
 	];
 	assert.deepEqual([...referencedBlobs(lines)].sort(), [HASH, other]);
 });
+
+test('matchChatSessions associa a aba às conversas pelo título, sem desempatar títulos repetidos', () => {
+	const { matchChatSessions } = require('../out/logic.js');
+	const sessions = [
+		{ id: 'velha', title: 'Corrigir login', updated: 1 },
+		{ id: 'nova', title: 'Corrigir login', updated: 3 },
+		{ id: 'outra', title: 'Outra coisa', updated: 2 },
+		{ id: 'nova', title: 'Corrigir login', updated: 3 },
+	];
+	assert.deepEqual(matchChatSessions('Corrigir login', sessions), { sessions: ['nova', 'velha'], title: 'Corrigir login' });
+	assert.deepEqual(matchChatSessions('  Outra coisa ', sessions), { sessions: ['outra'], title: 'Outra coisa' });
+	assert.equal(matchChatSessions('Corrigir', sessions), null, 'título parcial não conta');
+	assert.equal(matchChatSessions('', sessions), null);
+	assert.equal(matchChatSessions('   ', [{ id: 'x', title: '   ', updated: 1 }]), null, 'aba sem título mostra tudo');
+	assert.equal(matchChatSessions('Qualquer', []), null);
+});
