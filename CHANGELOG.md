@@ -2,6 +2,27 @@
 
 O projeto segue [Versionamento Semântico](https://semver.org/lang/pt-BR/) a partir da 1.0.0.
 
+## 1.1.0 — 2026-11-21
+
+### Adicionado
+
+- Abas **Regras**, **Agentes** e **MCP** na view do launcher, no formato da aba **Skills**: busca, filtros por origem, criação e ações em cada linha.
+  - **Regras:** `CLAUDE.md`, `.claude/CLAUDE.md`, `CLAUDE.local.md`, `.claude/rules/**/*.md` do projeto e os equivalentes globais, além do `CLAUDE.md` gerenciado pela organização (somente leitura). Mostra os globs de `paths`, ativa e desativa por `.md.disabled`, cria regras com `paths` opcional e exclui para a lixeira.
+  - **Agentes:** `.claude/agents/` do projeto e global, inclusive em subpastas. Mostra `name`, descrição e `model`, marca o agente global encoberto por um do projeto de mesmo nome, e ativa, desativa, cria e exclui como as regras.
+  - **MCP:** servidores locais, do projeto (`.mcp.json`), do usuário e da organização, com transporte, comando ou URL sem segredos aparentes, estado (ativo, pendente, recusado, desativado pelo `/mcp`, com erro) e prioridade entre escopos. Para servidores do projeto, aprova ou recusa no `.claude/settings.local.json`, cria e remove no `.mcp.json`. O `~/.claude.json` só é lido, nunca gravado.
+- Comandos **Mostrar regras**, **Mostrar agentes** e **Mostrar servidores MCP**.
+
+### Corrigido
+
+- Os comandos **Mostrar skills** e **Mostrar conversas e mudanças**, pela paleta, só escondiam ou mostravam a view **Mudanças**: a view do launcher continuava na aba anterior. Agora ela também troca de aba.
+- **Skills:** o nome da skill aparecia centralizado na linha e um nome longo não era cortado com reticências.
+
+### Interno
+
+- O frontmatter passou para `src/frontmatter.ts`, compartilhado por skills, regras e agentes; `parseFrontmatter` continua exportado por `skills.ts` com o mesmo comportamento.
+- A troca de abas (contexto `claudeCodeLauncher.panel`) saiu de `skills-view.ts` para `catalog-view.ts`. A view **Mudanças** fica visível com o contexto ausente ou igual a `chats`.
+- 18 testes novos em `test/catalogs.test.js`, cobrindo leitura, escrita condicional, os formatos de `paths`, a ocultação de segredos e o controlador da view com o editor simulado.
+
 ## 1.0.0 — 2026-11-20
 
 Primeira versão estável. Não há funcionalidade nova em relação à 0.13.1: esta versão fecha o que já existia, corrige os problemas encontrados na revisão e define o que passa a ser compatível dentro da série 1.x.

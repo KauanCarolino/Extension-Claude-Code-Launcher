@@ -2,7 +2,7 @@
   "name": "launcher-for-claude-code",
   "displayName": "Launcher for Claude Code",
   "description": "Abre o chat oficial do Claude Code e mostra, de forma didática, o que ele mudou em cada arquivo. Extensão independente: não é um produto da Anthropic.",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "publisher": "KauanDeveloper",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -212,6 +212,24 @@
         "title": "Mostrar conversas e mudanças",
         "category": "Launcher for Claude Code",
         "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "claude-code-launcher.showRules",
+        "title": "Mostrar regras (CLAUDE.md e .claude/rules)",
+        "category": "Launcher for Claude Code",
+        "icon": "$(law)"
+      },
+      {
+        "command": "claude-code-launcher.showAgents",
+        "title": "Mostrar agentes",
+        "category": "Launcher for Claude Code",
+        "icon": "$(hubot)"
+      },
+      {
+        "command": "claude-code-launcher.showMcp",
+        "title": "Mostrar servidores MCP",
+        "category": "Launcher for Claude Code",
+        "icon": "$(plug)"
       }
     ],
     "menus": {
@@ -362,7 +380,7 @@
           "type": "webview",
           "id": "claude-code-launcher.changes",
           "name": "Mudanças",
-          "when": "claudeCodeLauncher.panel != 'skills'"
+          "when": "!claudeCodeLauncher.panel || claudeCodeLauncher.panel == 'chats'"
         }
       ]
     },

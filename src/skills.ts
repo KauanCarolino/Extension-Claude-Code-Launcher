@@ -1,6 +1,9 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { parseFrontmatter, yamlQuoted } from './frontmatter';
+
+export { parseFrontmatter };
 
 /** Leitura e alteração das skills do Claude em disco. Sem dependência do VS Code, para ser testável. */
 export type SkillState = 'active' | 'disabled' | 'broken';
@@ -21,20 +24,6 @@ export const DISABLED_FILE = 'SKILL.md.disabled';
 /** Pasta das skills globais: `$CLAUDE_CONFIG_DIR/skills` quando definido, como as conversas; senão `~/.claude/skills`. */
 export function globalSkillsRoot(env: NodeJS.ProcessEnv = process.env, home = os.homedir()): string {
 	return path.join(env.CLAUDE_CONFIG_DIR || path.join(home, '.claude'), 'skills');
-}
-
-export function parseFrontmatter(text: string): { name?: string; description?: string } {
-	const match = /^\uFEFF?---\r?\n([\s\S]*?)\r?\n---/.exec(text);
-	if (!match) { return {}; }
-	const out: Record<string, string> = {};
-	let key: string | undefined;
-	for (const line of match[1].split(/\r?\n/)) {
-		const kv = /^([A-Za-z][\w-]*):\s*(.*)$/.exec(line);
-		if (kv) { key = kv[1]; out[key] = kv[2].replace(/^(>|\|)[-+]?$/, '').trim(); }
-		else if (key && /^\s+\S/.test(line)) { out[key] = `${out[key]} ${line.trim()}`.trim(); }
-	}
-	const clean = (v?: string) => v?.replace(/^(["'])(.*)\1$/, (_m, q: string, s: string) => q === '"' ? s.replace(/\\(["\\])/g, '$1') : s);
-	return { name: clean(out.name), description: clean(out.description) };
 }
 
 async function exists(file: string): Promise<boolean> {
@@ -100,8 +89,6 @@ export async function createSkill(root: string, name: string, description: strin
 	await fs.mkdir(root, { recursive: true });
 	await fs.mkdir(dir); // falha se já existir: nunca sobrescreve
 	const file = path.join(dir, SKILL_FILE);
-	// Escalar YAML entre aspas duplas: barra invertida e aspas escapadas, quebras e controles viram espaço.
-	const safe = description.replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-	await fs.writeFile(file, `---\nname: ${name}\ndescription: "${safe}"\n---\n\n# ${name}\n\nDescreva aqui as instruções da skill.\n`, { flag: 'wx' });
+	await fs.writeFile(file, `---\nname: ${name}\ndescription: ${yamlQuoted(description)}\n---\n\n# ${name}\n\nDescreva aqui as instruções da skill.\n`, { flag: 'wx' });
 	return file;
 }

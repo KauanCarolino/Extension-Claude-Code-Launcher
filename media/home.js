@@ -8,7 +8,16 @@
 	let filter = saved.filter || '';
 	let lastState = null;
 	let skillsState = null;
-	let tab = saved.tab === 'skills' ? 'skills' : 'chats';
+	// Abas além de Conversas: Skills tem desenho próprio (skills.js); as outras usam catalog.js.
+	const TABS = [
+		['chats', 'comment', 'Conversas'],
+		['skills', 'sparkle', 'Skills'],
+		['rules', 'law', 'Regras'],
+		['agents', 'hubot', 'Agentes'],
+		['mcp', 'plug', 'MCP'],
+	];
+	const catalogStates = {};
+	let tab = TABS.some(([id]) => id === saved.tab) ? saved.tab : 'chats';
 
 	window.addEventListener('message', (event) => {
 		const data = event.data;
@@ -18,13 +27,19 @@
 			if (tab === 'chats') { render(data); }
 		} else if (data.type === 'skills') {
 			skillsState = data;
-			if (tab === 'skills') { renderSkillsTab(); }
+			if (tab === 'skills') { renderPanelTab(); }
+		} else if (data.type === 'catalog') {
+			catalogStates[data.kind] = data;
+			if (tab === data.kind) { renderPanelTab(); }
+		} else if (data.type === 'tab') {
+			// Troca pedida pela paleta de comandos.
+			setTab(data.tab, true);
 		}
 	});
 	vscode.postMessage({ command: 'ready' });
 	// Alinha o painel de Mudanças (visível só na aba de conversas) com a aba restaurada.
-	send(tab === 'skills' ? 'showSkills' : 'showChats');
-	if (tab === 'skills') { send('skills.refresh'); }
+	send('showPanel', { key: tab });
+	if (tab !== 'chats') { send(tab + '.refresh'); }
 
 	// Tempos relativos andam sozinhos, sem esperar um novo estado.
 	setInterval(() => {
@@ -122,23 +137,28 @@
 
 	// ---- Render ----------------------------------------------------------------------
 
-	function setTab(next) {
-		if (tab === next) { return; }
+	/** `fromHost`: a extensão já trocou o contexto (paleta); só falta a página acompanhar. */
+	function setTab(next, fromHost) {
+		if (tab === next || !TABS.some(([id]) => id === next)) { return; }
 		tab = next;
 		save();
-		send(next === 'skills' ? 'showSkills' : 'showChats');
-		if (next === 'skills') {
-			renderSkillsTab();
-			send('skills.refresh');
+		if (!fromHost) { send('showPanel', { key: next }); }
+		if (next !== 'chats') {
+			renderPanelTab();
+			send(next + '.refresh');
 		} else if (lastState) {
 			render(lastState);
 		}
 	}
 
-	function renderSkillsTab() {
+	function renderPanelTab() {
 		const focus = captureFocus();
 		root.replaceChildren(renderTabs());
-		window.renderSkills(root, skillsState, send);
+		if (tab === 'skills') {
+			window.renderSkills(root, skillsState, send);
+		} else {
+			window.renderCatalog(root, tab, catalogStates[tab] || null, send);
+		}
 		restoreFocus(focus);
 	}
 
@@ -189,8 +209,8 @@
 	function renderTabs() {
 		const bar = el('div', 'tabbar');
 		bar.setAttribute('role', 'tablist');
-		const tabs = [['comment', 'Conversas', tab === 'chats', 'chats'], ['sparkle', 'Skills', tab === 'skills', 'skills']];
-		for (const [name, label, active, target] of tabs) {
+		for (const [target, name, label] of TABS) {
+			const active = tab === target;
 			const item = el('button', 'tabbar-tab' + (active ? ' active' : ''));
 			item.type = 'button';
 			item.setAttribute('role', 'tab');

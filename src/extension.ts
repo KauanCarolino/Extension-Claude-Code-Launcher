@@ -1,3 +1,4 @@
+import { registerCatalogs, type Catalogs } from './catalog-view';
 import { registerSkills } from './skills-view';
 import * as vscode from 'vscode';
 import { ChangesController, registerChanges } from './changes';
@@ -67,16 +68,18 @@ class LauncherViewProvider implements vscode.WebviewViewProvider, vscode.Disposa
 					case 'install':
 						await installClaude();
 						break;
-					case 'showSkills':
-						await vscode.commands.executeCommand('claude-code-launcher.showSkills');
-						break;
-					case 'showChats':
-						await vscode.commands.executeCommand('claude-code-launcher.showChats');
-						break;
+					case 'showPanel':
+						await catalogs?.showPanel(message.key);
+						return;
 					case 'skills.refresh': case 'skills.open': case 'skills.reveal':
 					case 'skills.toggle': case 'skills.delete': case 'skills.create':
 						await skills?.handle(message.command, message.id, message.key);
 						return;
+					default:
+						if (/^(rules|agents|mcp)\./.test(message.command)) {
+							await catalogs?.handle(message.command, message.id, message.key);
+							return;
+						}
 				}
 			} catch (error) { reportLaunchError(error); }
 			void this.postState();
@@ -97,7 +100,7 @@ class LauncherViewProvider implements vscode.WebviewViewProvider, vscode.Disposa
 		this.viewSubscriptions.splice(0).forEach((item) => item.dispose());
 	}
 
-	/** Mensagem avulsa para a página (usada pela aba de skills). */
+	/** Mensagem avulsa para a página (usada pelas abas de skills, regras, agentes e MCP). */
 	postRaw(message: unknown): Thenable<boolean> | undefined {
 		return this.disposed ? undefined : this.view?.webview.postMessage(message);
 	}
@@ -137,6 +140,7 @@ class LauncherViewProvider implements vscode.WebviewViewProvider, vscode.Disposa
 		const script = webview.asWebviewUri(vscode.Uri.joinPath(media, 'home.js'));
 		const style = webview.asWebviewUri(vscode.Uri.joinPath(media, 'home.css'));
 		const skillsScript = webview.asWebviewUri(vscode.Uri.joinPath(media, 'skills.js'));
+		const catalogScript = webview.asWebviewUri(vscode.Uri.joinPath(media, 'catalog.js'));
 		const skillsStyle = webview.asWebviewUri(vscode.Uri.joinPath(media, 'skills.css'));
 		const base = webview.asWebviewUri(vscode.Uri.joinPath(media, 'base.css'));
 		const codicons = webview.asWebviewUri(vscode.Uri.joinPath(media, 'codicons', 'codicon.css'));
@@ -155,6 +159,7 @@ class LauncherViewProvider implements vscode.WebviewViewProvider, vscode.Disposa
 <body>
 	<div id="root"><p class="loading muted"><span class="codicon codicon-loading codicon-modifier-spin"></span> Carregando…</p></div>
 	<script nonce="${nonce}" src="${skillsScript}"></script>
+	<script nonce="${nonce}" src="${catalogScript}"></script>
 	<script nonce="${nonce}" src="${script}"></script>
 </body>
 </html>`;
@@ -219,6 +224,7 @@ async function openClaudeTab(sessionId?: string): Promise<void> {
 
 let provider: LauncherViewProvider | undefined;
 let skills: ReturnType<typeof registerSkills> | undefined;
+let catalogs: Catalogs | undefined;
 let changes: ChangesController | undefined;
 let preferenceManager: PreferenceManager | undefined;
 const PREFERENCE_KEY = 'claudeCodeLauncher.managedPreferences.v1';
@@ -240,6 +246,7 @@ export function activate(context: vscode.ExtensionContext): void {
 	registerInline(context, changes);
 	scheduleActiveChat(1000);
 	skills = registerSkills(context, (message) => { void provider?.postRaw(message); });
+	catalogs = registerCatalogs(context, (message) => { void provider?.postRaw(message); });
 	watchSessions(context);
 
 	context.subscriptions.push(
@@ -296,7 +303,7 @@ export function activate(context: vscode.ExtensionContext): void {
  * sem esta espera, a próxima janela poderia abrir a revisão só para leitura.
  */
 export function deactivate(): Promise<void> | undefined {
-	clearTimeout(chatTimer); provider?.dispose(); provider = undefined; skills = undefined;
+	clearTimeout(chatTimer); provider?.dispose(); provider = undefined; skills = undefined; catalogs = undefined;
 	const controller = changes; changes = undefined;
 	if (!controller) { return undefined; }
 	controller.dispose();

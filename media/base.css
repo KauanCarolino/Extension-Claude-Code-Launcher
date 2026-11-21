@@ -393,7 +393,7 @@ body.vscode-high-contrast-light .btn-primary {
 	}
 }
 
-/* ---- Barra de abas do painel (Conversas / Skills) ------------------------------- */
+/* ---- Barra de abas do painel (Conversas, Skills, Regras, Agentes, MCP) ---------- */
 
 .tabbar {
 	display: flex;
@@ -401,6 +401,7 @@ body.vscode-high-contrast-light .btn-primary {
 	margin: calc(var(--space-2) * -1) calc(var(--space-2) * -1) var(--space-3);
 	padding: 0 var(--space-2);
 	border-bottom: 1px solid var(--border-subtle);
+	overflow: hidden;
 }
 
 .tabbar-tab {
@@ -415,6 +416,19 @@ body.vscode-high-contrast-light .btn-primary {
 	font: inherit;
 	font-weight: 600;
 	cursor: pointer;
+	flex: none;
+}
+
+/* Com cinco abas na lateral estreita, só o nome da aba ativa encolhe. */
+.tabbar-tab.active {
+	flex: 0 1 auto;
+	min-width: 0;
+}
+
+.tabbar-tab.active span:not(.codicon) {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 }
 
 .tabbar-tab:hover {

@@ -6,13 +6,13 @@ O chat, a autenticação, os modelos e as permissões são de responsabilidade d
 
 Esta é uma extensão independente, que não constitui produto da Anthropic nem é por ela mantida. "Claude" e "Claude Code" são marcas da Anthropic.
 
-**Versão:** 1.0.0 · **Pacote local:** `launcher-for-claude-code-1.0.0.vsix`
+**Versão:** 1.1.0 · **Pacote local:** `launcher-for-claude-code-1.1.0.vsix`
 
 ## Em resumo
 
 - **Abrir o chat** do Claude Code na barra lateral ou em abas, por um ícone no título do editor ou pelo item **Claude** na barra de status.
 - **Revisar mudanças:** ver, arquivo por arquivo, o que o Claude alterou, com diff, aceitar, recusar e desfazer.
-- **Gerenciar skills** em um painel próprio.
+- **Gerenciar skills, regras, agentes e servidores MCP** em abas próprias.
 
 ### Começando em 3 passos
 
@@ -28,10 +28,11 @@ Tudo fica local: nenhum dado é enviado a serviço externo.
 2. [Instalação](#instalação)
 3. [Conversas](#conversas)
 4. [Gerenciamento de skills](#gerenciamento-de-skills)
-5. [Revisão de mudanças](#revisão-de-mudanças)
-6. [Hooks e dados locais](#hooks-e-dados-locais)
-7. [Comandos operacionais](#comandos-operacionais)
-8. [Desenvolvimento e validação](#desenvolvimento-e-validação)
+5. [Regras, agentes e MCP](#regras-agentes-e-mcp)
+6. [Revisão de mudanças](#revisão-de-mudanças)
+7. [Hooks e dados locais](#hooks-e-dados-locais)
+8. [Comandos operacionais](#comandos-operacionais)
+9. [Desenvolvimento e validação](#desenvolvimento-e-validação)
 
 ## Requisitos e compatibilidade
 
@@ -54,7 +55,7 @@ A abrangência dos testes, o que eles não comprovam e a verificação de hooks 
 ## Instalação
 
 1. Em **Extensions**, abrir o menu `…` e selecionar **Install from VSIX**.
-2. Selecionar o arquivo `launcher-for-claude-code-1.0.0.vsix`.
+2. Selecionar o arquivo `launcher-for-claude-code-1.1.0.vsix`.
 3. Abrir a pasta do projeto e executar um comando da categoria **Launcher for Claude Code**.
 4. Para registrar novas mudanças, executar **Ativar registro de mudanças** e iniciar uma nova conversa do Claude.
 
@@ -64,7 +65,7 @@ A atualização do pacote não publica a extensão nem envia o histórico a serv
 
 O ícone de balão no título do editor e o item **Claude** na barra de status abrem a barra lateral oficial. Os comandos **Nova conversa em aba** e **Abrir chat em nova aba** utilizam o editor de conversas do Claude.
 
-O contêiner **Launcher for Claude Code**, na barra de atividades, contém a view homônima, que apresenta uma barra de abas no topo: **Conversas** e **Skills** (consulte [Gerenciamento de skills](#gerenciamento-de-skills)). A aba **Conversas** exibe:
+O contêiner **Launcher for Claude Code**, na barra de atividades, contém a view homônima, que apresenta uma barra de abas no topo: **Conversas**, **Skills** (consulte [Gerenciamento de skills](#gerenciamento-de-skills)), **Regras**, **Agentes** e **MCP** (consulte [Regras, agentes e MCP](#regras-agentes-e-mcp)). A aba ativa mostra o nome; as demais, só o ícone. A aba **Conversas** exibe:
 
 - **Nova conversa**, que abre uma conversa nova em aba;
 - uma lista de conversas, com uma linha por item e o tempo à direita:
@@ -72,7 +73,7 @@ O contêiner **Launcher for Claude Code**, na barra de atividades, contém a vie
   - **Hoje**, **Ontem**, **Esta semana**, **Este mês** e **Mais antigas**: até 15 conversas recentes das pastas locais do workspace, excluídas as já abertas. O clique retoma a conversa em uma aba;
 - **Buscar conversas**, disponível quando a lista excede 6 conversas. A busca desconsidera acentos e diferenças entre maiúsculas e minúsculas, e `Esc` limpa o campo.
 
-O título da view oferece as ações **Nova conversa** e **Atualizar conversas**. A aba selecionada é preservada pela view, e os comandos **Mostrar skills** e **Mostrar conversas e mudanças** também alternam entre elas. A lista é operável por teclado: `Tab` move o foco para ela e as setas para cima e para baixo percorrem as linhas.
+O título da view oferece as ações **Nova conversa** e **Atualizar conversas**. A aba selecionada é preservada pela view, e os comandos **Mostrar conversas e mudanças**, **Mostrar skills**, **Mostrar regras**, **Mostrar agentes** e **Mostrar servidores MCP** também alternam entre elas. A lista é operável por teclado: `Tab` move o foco para ela e as setas para cima e para baixo percorrem as linhas.
 
 Os títulos são obtidos de `~/.claude/projects/` ou de `CLAUDE_CONFIG_DIR`, quando definido. A leitura é assíncrona, utiliza cache limitado e sinaliza quando a lista é parcial. Resultados de uma view já fechada são descartados.
 
@@ -92,7 +93,7 @@ A aba **Skills** lista as skills do Claude Code, com busca e os seguintes filtro
 | **Global** | `~/.claude/skills/`, ou `$CLAUDE_CONFIG_DIR/skills/` quando a variável está definida |
 | **claude.ai** | Skills sincronizadas; somente leitura |
 
-Enquanto a aba **Skills** está ativa, a view **Mudanças** permanece oculta, sendo exibida novamente ao se selecionar **Conversas**.
+Enquanto qualquer aba diferente de **Conversas** está ativa, a view **Mudanças** permanece oculta, sendo exibida novamente ao se selecionar **Conversas**.
 
 Para skills do projeto e globais, estão disponíveis as seguintes operações:
 
@@ -102,6 +103,58 @@ Para skills do projeto e globais, estão disponíveis as seguintes operações:
 - **Excluir**, mediante confirmação; a pasta é enviada à lixeira do sistema.
 
 A lista é atualizada quando há alterações em disco. Sem pasta aberta, são exibidas apenas as skills globais e as do claude.ai.
+
+## Regras, agentes e MCP
+
+As abas **Regras**, **Agentes** e **MCP** seguem o formato da aba **Skills**: busca, filtros por origem, grupos com **+ Nova**/**+ Novo** e ações em cada linha. O clique no nome abre o arquivo no editor. Os filtros exibidos são **Todas/Todos** e as origens que têm itens ou permitem criação. Cada lista só é lida enquanto sua aba está ativa e é atualizada quando há alterações em disco. Sem pasta aberta, são exibidas apenas as origens globais.
+
+### Regras
+
+A aba lista as instruções que o Claude Code carrega nas conversas:
+
+| Filtro | Origem |
+| --- | --- |
+| **Projeto** | `CLAUDE.md`, `.claude/CLAUDE.md` e `CLAUDE.local.md` da primeira pasta do workspace, e `.claude/rules/**/*.md` |
+| **Global** | `~/.claude/CLAUDE.md` e `~/.claude/rules/**/*.md`, ou os mesmos caminhos em `$CLAUDE_CONFIG_DIR` |
+| **Organização** | `CLAUDE.md` gerenciado (`/etc/claude-code/`, `/Library/Application Support/ClaudeCode/` ou `C:\Program Files\ClaudeCode\`); somente leitura, exibido só quando existe |
+
+Cada linha mostra o primeiro título ou a primeira linha do arquivo. Uma regra com `paths` no frontmatter exibe os globs em **Aplica-se a**; sem `paths`, a regra vale sempre. Os `CLAUDE.md` de subpastas, carregados sob demanda pelo Claude Code, não são listados.
+
+- **Ativar ou desativar**: `x.md` é renomeado para `x.md.disabled` (inclusive `CLAUDE.md`), a mesma convenção do launcher usada nas skills. Para reativar sem o launcher, basta renomear o arquivo de volta;
+- **Criar**: informa-se o nome (letras minúsculas, números e hífens) e, opcionalmente, globs separados por vírgula, gravados em `paths`. O arquivo é criado em `.claude/rules/` ou na pasta global e aberto no editor;
+- **Excluir**, mediante confirmação; o arquivo é enviado à lixeira do sistema.
+
+### Agentes
+
+A aba lista os subagentes de `.claude/agents/` (**Projeto**) e de `~/.claude/agents/` ou `$CLAUDE_CONFIG_DIR/agents/` (**Global**), inclusive em subpastas. O nome exibido é o `name` do frontmatter, pelo qual o Claude Code identifica o agente, e o `model`, quando definido, aparece ao lado. Um agente global com o mesmo nome de um agente ativo do projeto é marcado como **sobreposto**, pois o do projeto tem prioridade.
+
+Ativar e desativar (`.md` ↔ `.md.disabled`), criar (nome e descrição) e excluir para a lixeira funcionam como nas regras. O agente criado não declara `tools`, e por isso herda as ferramentas da conversa.
+
+### MCP
+
+A aba lista os servidores MCP por escopo, na ordem de prioridade do Claude Code:
+
+| Filtro | Origem | O que o launcher altera |
+| --- | --- | --- |
+| **Local** | `~/.claude.json`, em `projects["<pasta>"].mcpServers` | Nada |
+| **Projeto** | `.mcp.json` da pasta | Aprovação, criação e remoção |
+| **Usuário** | `~/.claude.json`, em `mcpServers` | Nada |
+| **Organização** | `managed-mcp.json` na pasta gerenciada | Nada |
+
+Com `CLAUDE_CONFIG_DIR` definido, o arquivo lido é `$CLAUDE_CONFIG_DIR/.claude.json`. Cada linha mostra o transporte (`stdio`, `http` ou `sse`) e o comando ou a URL. Argumentos com aparência de segredo, credenciais e query strings de URLs são ocultados, e variáveis de ambiente e cabeçalhos não são exibidos. Um servidor de mesmo nome em escopo de prioridade maior torna o outro **sobreposto**, e entradas que não podem funcionar, como uma `url` sem `"type": "http"`, aparecem **com erro** e o motivo.
+
+O estado vem da configuração do Claude Code:
+
+- servidores desativados pelo `/mcp` no projeto (`disabledMcpServers` no `~/.claude.json`) aparecem como **desativado** e são reativados pelo próprio `/mcp`;
+- servidores do `.mcp.json` aparecem como **pendente** até serem aprovados, e como **desativado** quando recusados em `disabledMcpjsonServers` de qualquer `settings.json`.
+
+O launcher **nunca grava o `~/.claude.json`**, que o Claude Code reescreve continuamente. Servidores locais e do usuário podem ser abertos na entrada correspondente do arquivo e devem ser alterados pelo `/mcp` no chat ou pelo comando `claude mcp`. Para servidores do projeto:
+
+- **Aprovar** ou **recusar neste projeto**: o nome é movido entre `enabledMcpjsonServers` e `disabledMcpjsonServers` no `.claude/settings.local.json`, preservando as demais chaves. Uma recusa vinda de outro arquivo (`.claude/settings.json` ou do usuário) não pode ser desfeita pelo launcher, e o botão não aparece nesse caso;
+- **Criar**: informa-se o nome (letras, números, hífens e sublinhados) e um comando, gravado como servidor `stdio`, ou uma URL `http(s)://`, gravada como servidor `http`. O servidor entra no `.mcp.json` como pendente de aprovação;
+- **Remover do `.mcp.json`**, mediante confirmação. O arquivo costuma ser compartilhado pelo repositório.
+
+As duas escritas reformatam o JSON com indentação de 2 espaços, recusam arquivos com JSON inválido e só gravam se o arquivo não mudou desde a leitura.
 
 ## Revisão de mudanças
 
@@ -270,7 +323,7 @@ Todos os comandos constam na categoria **Launcher for Claude Code** da paleta, a
 | Abrir chat na barra lateral / Abrir chat em nova aba | Abrir a integração oficial |
 | Nova conversa em aba | Solicitar nova conversa |
 | Instalar Claude Code | Instalar a extensão oficial, por ação explícita |
-| Mostrar skills / Mostrar conversas e mudanças | Alternar as abas da view do launcher |
+| Mostrar conversas e mudanças / skills / regras / agentes / servidores MCP | Alternar as abas da view do launcher |
 | Mostrar mudanças do Claude | Abrir o painel maior |
 | Atualizar mudanças | Reler o histórico e o estado da revisão |
 | Ativar / Desligar registro de mudanças | Gerir os hooks próprios |
@@ -294,8 +347,8 @@ npm run lint
 npm test
 npm run test:package
 npm audit --audit-level=moderate
-npm run package -- --out launcher-for-claude-code-1.0.0.vsix
-npm run verify:package -- launcher-for-claude-code-1.0.0.vsix
+npm run package -- --out launcher-for-claude-code-1.1.0.vsix
+npm run verify:package -- launcher-for-claude-code-1.1.0.vsix
 ```
 
 O script `vscode:prepublish` executa o build, que remove a saída gerada anteriormente e compila com `noEmitOnError`. Os testes de pacote utilizam árvores temporárias, inclusive uma sem `out/` e outra com saída obsoleta. O verificador inspeciona o VSIX real, compara seus bytes com o runtime atual, calcula o SHA-256 e rejeita conteúdo inesperado. `docs/`, testes, scripts, configurações locais e dependências de desenvolvimento são excluídos do VSIX.
@@ -307,8 +360,8 @@ Os testes de `test/*.test.js` utilizam regras reais e adaptadores explícitos no
 ```sh
 npm run test:host -- --editor code
 npm run test:host -- --editor cursor
-npm run test:host -- --editor code --vsix launcher-for-claude-code-1.0.0.vsix --keep
-npm run test:host -- --editor cursor --vsix launcher-for-claude-code-1.0.0.vsix --report-dir docs/validacao/host-cursor
+npm run test:host -- --editor code --vsix launcher-for-claude-code-1.1.0.vsix --keep
+npm run test:host -- --editor cursor --vsix launcher-for-claude-code-1.1.0.vsix --report-dir docs/validacao/host-cursor
 ```
 
 O runner cria workspace, perfil, diretório de extensões e configuração Claude temporários. O modo `--vsix` instala e exercita o pacote nesse perfil isolado, sem alterar o perfil normal e sem enviar mensagens ao Claude. A opção `--keep` mantém o perfil temporário, e as falhas também preservam o diretório. A opção `--report-dir` cria uma subpasta `run-*` exclusiva para cada execução, com os relatórios e logs correspondentes, preservando as execuções anteriores. O cenário é um workspace sintético confiável e não constitui teste do Restricted Mode.
@@ -320,7 +373,7 @@ A jornada de recusa de criação exige lixeira no sistema de arquivos do workspa
 No macOS, os caminhos padrão correspondem aos aplicativos em `/Applications`; em Linux, informa-se `--executable` (por exemplo, `/usr/share/code/code` ou `/usr/share/cursor/cursor`). Para outra instalação, utiliza-se `--executable /caminho/do/editor`. O caminho do CLI é derivado dessa instalação, e `--cli /caminho/Resources/app/out/cli.js` permite substituí-lo, desde que pertença à **mesma instalação**. Para baixar e exercitar uma versão exata do VS Code:
 
 ```sh
-npm run test:host -- --download-version 1.94.0 --vsix launcher-for-claude-code-1.0.0.vsix --report-dir docs/validacao/host-minimum
+npm run test:host -- --download-version 1.94.0 --vsix launcher-for-claude-code-1.1.0.vsix --report-dir docs/validacao/host-minimum
 ```
 
 A opção `--download-version` aceita apenas uma versão exata, somente para VS Code, e não pode ser combinada com `--executable` ou `--cli`. O download utiliza cache temporário fora do projeto. Em Linux sem display, o comando deve ser executado com `xvfb-run -a`. A matriz de CI inclui a instalação do VSIX e a jornada do hook no VS Code 1.94.0 em Linux, Windows e macOS, além de tipagem, testes Node, testes de pacote e auditoria. Recomenda-se consultar os checks e as evidências da execução do commit a ser distribuído.

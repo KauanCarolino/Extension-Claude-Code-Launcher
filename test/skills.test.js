@@ -161,7 +161,8 @@ function controller(t, { project, config, answers = {} } = {}) {
 function loadSkillsWithEnv(env) {
   const filename = path.join(OUT, 'skills.js'), module = { exports: {} };
   vm.runInNewContext(fs.readFileSync(filename, 'utf8'), {
-    module, exports: module.exports, process: { ...process, env }, require,
+    module, exports: module.exports, process: { ...process, env },
+    require: (id) => id.startsWith('.') ? require(path.join(OUT, id)) : require(id),
   }, { filename });
   return module.exports;
 }

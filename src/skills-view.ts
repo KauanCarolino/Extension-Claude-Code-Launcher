@@ -82,9 +82,7 @@ export class SkillsController implements vscode.Disposable {
 
 export function registerSkills(context: vscode.ExtensionContext, postToView: (message: unknown) => void): SkillsController {
 	const controller = new SkillsController(postToView);
-	// Só o painel de Mudanças depende deste contexto: aparece na aba de conversas e some na de skills.
-	const setPanel = (panel: 'chats' | 'skills') => vscode.commands.executeCommand('setContext', 'claudeCodeLauncher.panel', panel);
-	void setPanel('chats');
+	// A troca de abas (e o contexto que esconde o painel de Mudanças) fica em catalog-view.ts.
 	const watchers = [globalRoot(), projectRoot()].filter((r): r is string => Boolean(r)).map((root) => {
 		const w = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(vscode.Uri.file(root), '**'));
 		w.onDidCreate(() => controller.refresh()); w.onDidDelete(() => controller.refresh()); w.onDidChange(() => controller.refresh());
@@ -92,8 +90,6 @@ export function registerSkills(context: vscode.ExtensionContext, postToView: (me
 	});
 	context.subscriptions.push(controller, ...watchers,
 		vscode.workspace.onDidChangeWorkspaceFolders(() => controller.refresh(0)),
-		vscode.commands.registerCommand('claude-code-launcher.showSkills', () => setPanel('skills')),
-		vscode.commands.registerCommand('claude-code-launcher.showChats', () => setPanel('chats')),
 		vscode.commands.registerCommand('claude-code-launcher.skills.refresh', () => controller.refresh(0)),
 	);
 	return controller;
