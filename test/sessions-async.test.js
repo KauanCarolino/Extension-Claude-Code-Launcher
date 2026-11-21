@@ -100,3 +100,25 @@ test('transient read failures do not poison the title cache for an unchanged fil
   const recovered = await f.api.listSessionsAsync(workspace, 15);
   assert.equal(recovered.sessions[0]?.title, 'recovered title'); assert.equal(recovered.partial, false);
 });
+
+test('aliases list every title the official tab may show, newest first, bounded and identical in both listings', async t => {
+  const f = fixture(t), workspace = '/synthetic/aliases';
+  const file = f.write(workspace, 1, 'pode ajustar o painel?\n');
+  const line = value => fs.appendFileSync(file, JSON.stringify(value) + '\n');
+  line({ type: 'ai-title', aiTitle: 'Ajuste inicial' });
+  line({ type: 'ai-title', aiTitle: 'Ajustar o painel de mudanças por conversa' });
+  line({ type: 'ai-title', aiTitle: 'Ajuste inicial' });
+  line({ type: 'summary', summary: 'x'.repeat(300) });
+  fs.utimesSync(file, 1001, 1001);
+  let [session] = (await f.api.listSessionsAsync(workspace, 15)).sessions;
+  assert.equal(session.title, 'Ajuste inicial');
+  assert.deepEqual(Array.from(session.aliases), ['x'.repeat(200), 'Ajuste inicial', 'Ajustar o painel de mudanças por conversa', 'pode ajustar o painel?']);
+  assert.equal(JSON.stringify(f.api.listSessions(workspace, 15)), JSON.stringify((await f.api.listSessionsAsync(workspace, 15)).sessions));
+  line({ type: 'custom-title', customTitle: 'Meu título' });
+  for (let index = 0; index < 12; index++) line({ type: 'ai-title', aiTitle: 'gerado ' + index });
+  fs.utimesSync(file, 1002, 1002);
+  [session] = (await f.api.listSessionsAsync(workspace, 15)).sessions;
+  assert.equal(session.title, 'Meu título');
+  assert.equal(session.aliases.length, 8);
+  assert.equal(session.aliases[0], 'gerado 11');
+});

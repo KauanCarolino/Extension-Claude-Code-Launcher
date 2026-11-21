@@ -275,6 +275,11 @@
 			? chat.title + '\nHá ' + chat.matches + ' conversas com este título. O painel mostra as mudanças de todas elas.'
 			: chat.title;
 		bar.append(label);
+		if (chat.scoped && chat.unclaimed > 0) {
+			const note = el('span', 'chat-scope-note muted', '+ ' + chat.unclaimed + (chat.unclaimed === 1 ? ' pendente de conversa sem aba' : ' pendentes de conversas sem aba'));
+			note.title = 'Mudanças ainda não revisadas de conversas que não estão abertas em outra aba, como o chat da barra lateral. Elas continuam aqui para não sumirem da revisão.';
+			bar.append(note);
+		}
 		if (chat.others > 0 || !chat.scoped) {
 			const toggle = el('button', 'btn-ghost chat-scope-toggle', chat.scoped ? 'Ver todas (' + chat.others + ' de outras)' : 'Só esta conversa');
 			toggle.type = 'button';

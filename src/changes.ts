@@ -1043,8 +1043,14 @@ export class ChangesController implements
 			const projections = new Map<string, ReturnType<typeof projectReview>>();
 		const chat = this.activeChat;
 		const scoped = Boolean(chat) && !this.showAllChats;
-		const chatSessions = new Set(chat?.sessions);
-		const inChat = (entry: RawEntry): boolean => !scoped || chatSessions.has(entry.session ?? '');
+		const chatSessions = new Set(chat?.sessions), elsewhere = new Set(chat?.elsewhere);
+		const inFocus = (entry: RawEntry): boolean => chatSessions.has(entry.session ?? '');
+		// A conversa em foco é deduzida do título da aba e pode falhar (título gerado que o transcript ainda
+		// não tem, chat na barra lateral). Só se escondem mudanças que outra aba aberta identificou como suas;
+		// pendentes sem dono conhecido continuam visíveis para não sumirem da revisão.
+		const unclaimedPending = (entry: RawEntry): boolean => !inFocus(entry) && !this.status.has(entry.id) && !elsewhere.has(entry.session ?? '');
+		const visibleWhenScoped = (entry: RawEntry): boolean => inFocus(entry) || unclaimedPending(entry);
+		const inChat = (entry: RawEntry): boolean => !scoped || visibleWhenScoped(entry);
 		const history: ViewEntry[] = this.entries.filter(inChat).slice(0, MAX_HISTORY).map((entry) => {
 			const request = this.requestCache.get(entry.id);
 				const context = this.entryFolder.get(entry.id), store = context ? this.stores.get(context) : undefined;
@@ -1078,7 +1084,9 @@ export class ChangesController implements
 			entries: history,
 				files: this.pendingGroups().map((list) => list.filter(inChat)).filter((list) => list.length > 0)
 					.map((list) => this.summaryOf(list, states.get(this.entryFolder.get(list[0].id) || ''))),
-			chat: chat ? { title: chat.title, scoped, matches: chat.sessions.length, others: this.entries.filter((entry) => !chatSessions.has(entry.session ?? '')).length } : null,
+			chat: chat ? { title: chat.title, scoped, matches: chat.sessions.length,
+				others: this.entries.filter((entry) => !visibleWhenScoped(entry)).length,
+				unclaimed: this.entries.filter(unclaimedPending).length } : null,
 			canUndo: this.canUndoReject(),
 			coverageMessage: [this.coverageMessage, ...this.hookWarnings.values(), ...this.runtimeWarnings.values(), ...this.captureWarnings.values()].filter(Boolean).join(' ') || null,
 			reviewWriter: [...this.stores.values()].every((store) => store.writable),

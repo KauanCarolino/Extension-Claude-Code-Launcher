@@ -999,6 +999,11 @@ body.wide .toolbar {
 	white-space: nowrap;
 }
 
+.chat-scope-note {
+	flex: none;
+	white-space: nowrap;
+}
+
 .chat-scope-toggle {
 	flex: none;
 	color: var(--accent);

@@ -233,19 +233,44 @@ export function referencedBlobs(lines: readonly string[]): Set<string> {
 }
 
 export interface ActiveChat {
-	/** Conversas cujo título coincide com o da aba. Mais de uma quando há títulos repetidos. */
+	/** Conversas cujo título coincide com o da aba em foco. Mais de uma quando há títulos repetidos. */
 	sessions: string[];
 	title: string;
+	/** Conversas identificadas por outras abas de chat abertas; só as mudanças delas podem ficar ocultas. */
+	elsewhere: string[];
+}
+
+export interface ChatSessionCandidate { id: string; title: string; updated: number; aliases?: readonly string[] }
+
+/** A aba oficial mostra no máximo 25 caracteres: os 24 primeiros seguidos de "…" (webview da extensão oficial). */
+const OFFICIAL_TAB_TITLE_MAX = 25;
+const ELLIPSIS = '…';
+/** Rótulo da aba oficial antes da primeira mensagem: não identifica conversa nenhuma. */
+const OFFICIAL_EMPTY_TAB_LABEL = 'Claude Code';
+const normalize = (text: string): string => text.replace(/\s+/g, ' ').trim();
+
+/** Conversas que podem estar por trás de um rótulo de aba, da mais recente para a mais antiga. */
+export function sessionsForTabLabel(label: string, sessions: readonly ChatSessionCandidate[]): string[] {
+	const exact = normalize(label);
+	if (!exact || exact === OFFICIAL_EMPTY_TAB_LABEL) { return []; }
+	const cut = label.length <= OFFICIAL_TAB_TITLE_MAX && label.endsWith(ELLIPSIS) ? label.slice(0, -ELLIPSIS.length) : undefined;
+	const fits = (candidate: string): boolean => normalize(candidate) === exact
+		|| cut !== undefined && cut.length > 0 && candidate.length > cut.length && (candidate.startsWith(cut) || normalize(candidate).startsWith(normalize(cut)));
+	const matches = sessions.filter((session) => [session.title, ...(session.aliases ?? [])].some(fits))
+		.sort((a, b) => b.updated - a.updated);
+	return [...new Set(matches.map((session) => session.id))];
 }
 
 /**
- * Associa a aba do chat às conversas gravadas pelo título, único dado que a aba expõe.
- * Títulos repetidos não são desempatados: todas as conversas com aquele título entram,
- * para o painel não esconder mudanças de uma delas. Sem correspondência, devolve null (mostra tudo).
+ * Associa a aba em foco às conversas gravadas pelo título, único dado que a aba expõe.
+ * Títulos repetidos não são desempatados: todas as conversas com aquele título entram.
+ * `otherLabels` são os rótulos das demais abas de chat abertas; as conversas delas formam `elsewhere`.
+ * Sem correspondência, devolve null e o painel mostra tudo.
  */
-export function matchChatSessions(label: string, sessions: readonly { id: string; title: string; updated: number }[]): ActiveChat | null {
-	const title = label.trim();
-	if (!title) { return null; }
-	const matches = sessions.filter((session) => session.title.trim() === title).sort((a, b) => b.updated - a.updated);
-	return matches.length ? { sessions: [...new Set(matches.map((session) => session.id))], title } : null;
+export function matchChatSessions(label: string, sessions: readonly ChatSessionCandidate[], otherLabels: readonly string[] = []): ActiveChat | null {
+	const focused = sessionsForTabLabel(label, sessions);
+	if (!focused.length) { return null; }
+	const elsewhere = new Set(otherLabels.flatMap((other) => sessionsForTabLabel(other, sessions)));
+	for (const id of focused) { elsewhere.delete(id); }
+	return { sessions: focused, title: normalize(label), elsewhere: [...elsewhere] };
 }

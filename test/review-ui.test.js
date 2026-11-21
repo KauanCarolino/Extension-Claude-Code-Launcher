@@ -113,3 +113,15 @@ test('chat scope banner names the conversation, warns about repeated titles and 
 	ui.click(ui.find('chat-scope'));
 	assert.equal(ui.messages.at(-1).command, 'toggleChatFilter');
 });
+
+test('chat scope banner says when pending changes of conversations without a tab are kept visible', () => {
+	const ui = webview({});
+	ui.render({ ...fixture(), chat: { title: 'Conversa A', scoped: true, matches: 1, others: 1, unclaimed: 1 } });
+	assert.match(ui.root.textContent, /\+ 1 pendente de conversa sem aba/);
+	ui.render({ ...fixture(), chat: { title: 'Conversa A', scoped: true, matches: 1, others: 0, unclaimed: 3 } });
+	assert.match(ui.root.textContent, /\+ 3 pendentes de conversas sem aba/);
+	ui.render({ ...fixture(), chat: { title: 'Conversa A', scoped: false, matches: 1, others: 2, unclaimed: 3 } });
+	assert.doesNotMatch(ui.root.textContent, /sem aba/, 'only while the filter is on');
+	ui.render({ ...fixture(), chat: { title: 'Conversa A', scoped: true, matches: 1, others: 0, unclaimed: 0 } });
+	assert.doesNotMatch(ui.root.textContent, /sem aba/);
+});

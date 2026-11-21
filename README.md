@@ -111,10 +111,13 @@ A view **Mudanças** reúne as edições capturadas pelas ferramentas Edit, Writ
 
 O painel exibe somente os arquivos da conversa em foco e acompanha a troca de conversa. Um aviso no topo indica a conversa apresentada, e a ação **Ver todas** inclui também as alterações de outras conversas (a ação **Só esta conversa** restabelece o filtro). Quando nenhuma conversa é identificada, como no caso de uma conversa nova ainda sem mensagens, o painel exibe todas as alterações.
 
-A aba do chat oficial expõe apenas o título, por isso a conversa é identificada comparando esse título com o das conversas gravadas. Daí decorrem três limites:
+A aba do chat oficial expõe apenas o título, por isso a conversa é identificada comparando o rótulo da aba com os títulos que cada conversa gravada já teve: o personalizado, os gerados pelo Claude e a primeira mensagem. A aba oficial corta títulos longos em 24 caracteres seguidos de "…", e esse corte é levado em conta. A identificação é refeita quando a aba muda e quando o transcript da conversa é atualizado, porque o título gerado aparece na aba antes de ser gravado.
 
+Como essa identificação pode falhar, o filtro só esconde mudanças que **outra aba de chat aberta** identificou como suas:
+
+- Mudanças **pendentes** de conversas sem aba aberta, como o chat da barra lateral ou uma conversa ainda não identificada, continuam visíveis. O aviso informa quantas são (**+ N pendentes de conversas sem aba**). O histórico já revisado dessas conversas fica fora da visão filtrada.
+- Sem nenhuma aba de chat aberta, o painel mostra tudo. Com o foco num arquivo, vale a última conversa focada.
 - Conversas com o **mesmo título** não são distinguidas. O painel mostra as mudanças de todas elas juntas e o aviso informa quantas conversas têm aquele título.
-- Se o título da aba **não coincidir exatamente** com o gravado (por exemplo, abreviado pelo editor), nenhuma conversa é identificada e o painel mostra tudo.
 - O filtro só muda **o que aparece** no painel. Aceitar e recusar continuam valendo para o arquivo inteiro, inclusive para trechos de outras conversas no mesmo arquivo.
 
 ### Painel lateral

@@ -649,3 +649,27 @@ test('a hook left in the globalStorage of the pre-1.0 identifier is recognized a
 	assert.ok(f.warnings.every((message) => !message.includes(describeReason('ambiguousHookOwnership'))));
 	assert.equal(await f.controller.hooksEnabled(), true);
 });
+
+test('chat scope hides only changes claimed by another open tab and keeps unclaimed pending work visible', async (t) => {
+	const f = fixture(t);
+	const make = (id, session) => ({ ...entry(f.root, id), session });
+	writeLog(f, [make('focus', 'A'), make('other-tab', 'B'), make('sidebar', 'S'), make('unknown', null), make('old-reviewed', 'Z')]);
+	f.controller.entries = await f.controller.loadEntries();
+	f.controller.status.set('old-reviewed', 'accepted');
+	const publish = () => { let state; f.controller.post({ postMessage: async (value) => { state = value; } }, false); return state; };
+	f.controller.setActiveChat({ sessions: ['A'], title: 'Conversa A', elsewhere: ['B'] });
+	let state = publish();
+	assert.deepEqual(state.entries.map((item) => item.id).sort(), ['focus', 'sidebar', 'unknown']);
+	assert.deepEqual({ ...state.chat }, { title: 'Conversa A', scoped: true, matches: 1, others: 2, unclaimed: 2 });
+	f.controller.toggleAllChats();
+	state = publish();
+	assert.equal(state.entries.length, 5);
+	assert.equal(state.chat.scoped, false);
+	assert.equal(state.chat.others, 2, 'the toggle still says how many would be hidden');
+	f.controller.toggleAllChats();
+	f.controller.status.set('sidebar', 'accepted');
+	assert.deepEqual(publish().entries.map((item) => item.id).sort(), ['focus', 'unknown'], 'reviewed history of other conversations stays out of the scoped view');
+	f.controller.setActiveChat(null);
+	assert.equal(publish().chat, null);
+	assert.equal(publish().entries.length, 5);
+});

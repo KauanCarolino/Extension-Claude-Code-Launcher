@@ -3,7 +3,7 @@ import * as vscode from 'vscode';
 import { ChangesController, registerChanges } from './changes';
 import { registerInline } from './inline';
 import { listSessionsAsync, sessionsDir } from './sessions';
-import { matchChatSessions } from './logic';
+import { matchChatSessions, sessionsForTabLabel } from './logic';
 import { ManagedPreference, PreferenceManager } from './preferences';
 import { validateMessage } from './history';
 
@@ -108,7 +108,6 @@ class LauncherViewProvider implements vscode.WebviewViewProvider, vscode.Disposa
 		}
 		const folders = localFolders();
 		const openTabs = claudeTabs().map(({ tab, key }) => ({ key, label: tab.label, active: tab.isActive }));
-		const openLabels = new Set(openTabs.map((tab) => tab.label));
 		// Com várias pastas abertas, junta as conversas de todas.
 		const generation = ++this.generation;
 		const view = this.view;
@@ -116,10 +115,11 @@ class LauncherViewProvider implements vscode.WebviewViewProvider, vscode.Disposa
 		const results = await Promise.allSettled(folders.map((folder) => listSessionsAsync(folder, RECENT_SESSIONS, cancelled)));
 		const listings = results.flatMap((result) => result.status === 'fulfilled' ? [result.value] : []);
 		if (cancelled() || !view) { return; }
-		const sessions = listings.flatMap((listing) => listing.sessions)
+		const recent = listings.flatMap((listing) => listing.sessions)
 			.sort((a, b) => b.updated - a.updated)
-			.slice(0, RECENT_SESSIONS)
-			.map((session) => ({ ...session, open: openLabels.has(session.title) }));
+			.slice(0, RECENT_SESSIONS);
+		const openIds = new Set(openTabs.flatMap((tab) => sessionsForTabLabel(tab.label, recent)));
+		const sessions = recent.map(({ aliases: _aliases, ...session }) => ({ ...session, open: openIds.has(session.id) }));
 		void view.webview.postMessage({
 			coverageMessage: results.some((result) => result.status === 'rejected')
 				? 'Lista parcial: não foi possível ler as conversas de uma das pastas.'
@@ -651,7 +651,8 @@ function createNonce(): string {
 /**
  * Descobre qual conversa está em foco (pelo título da aba do chat) e avisa o painel Mudanças.
  * Se o foco vai para um arquivo, mantém a última conversa; sem correspondência, mostra tudo.
- * Conversas com o mesmo título são mostradas juntas (ver `matchChatSessions`).
+ * Conversas com o mesmo título são mostradas juntas (ver `matchChatSessions`), e mudanças pendentes
+ * de conversas que nenhuma outra aba identifica continuam visíveis (ver ChangesController.post).
  */
 let chatTimer: NodeJS.Timeout | undefined;
 let chatGeneration = 0;
@@ -661,13 +662,18 @@ function scheduleActiveChat(delay = 250): void {
 }
 
 async function updateActiveChat(): Promise<void> {
+	if (!changes) { return; }
+	const open = claudeTabs().map(({ tab }) => tab);
+	// Sem nenhuma aba de chat (por exemplo, só o chat da barra lateral), não há conversa para escolher: mostra tudo.
+	if (!open.length) { ++chatGeneration; changes.setActiveChat(null); return; }
 	const tab = vscode.window.tabGroups.activeTabGroup.activeTab;
-	if (!tab || !isClaudeTab(tab) || !changes) { return; }
+	if (!tab || !isClaudeTab(tab)) { return; }
 	const generation = ++chatGeneration;
 	const label = tab.label;
+	const others = open.filter((other) => other !== tab).map((other) => other.label);
 	const results = await Promise.allSettled(localFolders().map((folder) => listSessionsAsync(folder, 100)));
 	if (generation !== chatGeneration) { return; }
-	changes.setActiveChat(matchChatSessions(label, results.flatMap((result) => result.status === 'fulfilled' ? result.value.sessions : [])));
+	changes.setActiveChat(matchChatSessions(label, results.flatMap((result) => result.status === 'fulfilled' ? result.value.sessions : []), others));
 }
 
 function localFolders(): string[] {
@@ -679,7 +685,8 @@ function localFolders(): string[] {
 /** Observa as conversas de cada pasta aberta e refaz os observadores quando as pastas mudam. */
 function watchSessions(context: vscode.ExtensionContext): void {
 	let watchers: vscode.Disposable[] = [];
-	const refresh = () => provider?.refresh(1500);
+	// O título gerado chega ao transcript depois de aparecer na aba: refaz também a conversa em foco.
+	const refresh = () => { provider?.refresh(1500); scheduleActiveChat(1500); };
 	const setup = () => {
 		watchers.forEach((watcher) => watcher.dispose());
 		watchers = [];

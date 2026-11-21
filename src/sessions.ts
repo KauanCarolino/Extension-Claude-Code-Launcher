@@ -16,14 +16,25 @@ export interface SessionInfo {
 	id: string;
 	title: string;
 	updated: number;
+	/**
+	 * Todos os títulos que a aba oficial pode estar mostrando: o personalizado, cada título gerado
+	 * encontrado, o resumo e a primeira mensagem, sem o corte de MAX_TITLE. A aba usa o título
+	 * gerado assim que ele chega, antes de o transcript gravá-lo, e a primeira mensagem antes disso.
+	 */
+	aliases: string[];
 }
 
-const titleCache = new Map<string, { mtime: number; size: number; title: string | null }>();
+interface SessionTitles { title: string; aliases: string[] }
+const MAX_ALIASES = 8;
+/** Mesmo limite que a extensão oficial aplica ao título da aba. */
+const MAX_ALIAS = 200;
+
+const titleCache = new Map<string, { mtime: number; size: number; title: SessionTitles | null }>();
 const MAX_TITLE_CACHE = 1000;
 const MAX_SESSION_FILES = 10000;
 const MAX_TITLE_CANDIDATES = 256;
 
-function cacheTitle(file: string, mtime: number, size: number, title: string | null): void {
+function cacheTitle(file: string, mtime: number, size: number, title: SessionTitles | null): void {
 	titleCache.delete(file);
 	titleCache.set(file, { mtime, size, title });
 	while (titleCache.size > MAX_TITLE_CACHE) { titleCache.delete(titleCache.keys().next().value as string); }
@@ -69,7 +80,7 @@ export function listSessions(workspaceFolder: string, limit: number): SessionInf
 		const title = cached && cached.mtime === item.mtime && cached.size === item.size ? cached.title : readTitle(item.file, item.size);
 		cacheTitle(item.file, item.mtime, item.size, title);
 		if (title) {
-			sessions.push({ id: item.id, title, updated: item.mtime });
+			sessions.push({ id: item.id, title: title.title, aliases: title.aliases, updated: item.mtime });
 		}
 	}
 	return sessions;
@@ -118,7 +129,7 @@ export async function listSessionsAsync(workspaceFolder: string, limit: number, 
 		if (result.scanned >= MAX_TITLE_CANDIDATES) { result.partial = true; break; }
 		result.scanned += 1;
 		const cached = titleCache.get(item.file);
-		let title: string | null;
+		let title: SessionTitles | null;
 		if (cached && cached.mtime === item.mtime && cached.size === item.size) { title = cached.title; }
 		else {
 			const tail = await readRangeAsync(item.file, Math.max(0, item.size - TAIL_BYTES), item.size);
@@ -130,7 +141,7 @@ export async function listSessionsAsync(workspaceFolder: string, limit: number, 
 			title = titleFromRanges(tail, head);
 			cacheTitle(item.file, item.mtime, item.size, title);
 		}
-		if (title) { result.sessions.push({ id: item.id, title, updated: item.mtime }); }
+		if (title) { result.sessions.push({ id: item.id, title: title.title, aliases: title.aliases, updated: item.mtime }); }
 	}
 	return result;
 }
@@ -148,22 +159,23 @@ async function readRangeAsync(file: string, start: number, end: number): Promise
 
 // Título escolhido pelo usuário > título gerado pelo Claude Code > primeira mensagem.
 // Sem nenhuma mensagem do usuário, a conversa está vazia e não entra na lista.
-function readTitle(file: string, size: number): string | null {
+function readTitle(file: string, size: number): SessionTitles | null {
 	const tail = readRange(file, Math.max(0, size - TAIL_BYTES), size);
 	const head = size <= TAIL_BYTES ? tail : readRange(file, 0, Math.min(size, HEAD_BYTES));
 	return titleFromRanges(tail, head);
 }
 
-function titleFromRanges(tail: string, head: string): string | null {
+function titleFromRanges(tail: string, head: string): SessionTitles | null {
 	let custom: string | null = null;
 	let generated: string | null = null;
+	const seen: string[] = [];
 	for (const entry of parseLines(tail)) {
 		if (entry.type === 'custom-title' && typeof entry.customTitle === 'string') {
-			custom = entry.customTitle;
+			custom = entry.customTitle; seen.push(entry.customTitle);
 		} else if (entry.type === 'ai-title' && typeof entry.aiTitle === 'string') {
-			generated = entry.aiTitle;
+			generated = entry.aiTitle; seen.push(entry.aiTitle);
 		} else if (entry.type === 'summary' && typeof entry.summary === 'string') {
-			generated = generated ?? entry.summary;
+			generated = generated ?? entry.summary; seen.push(entry.summary);
 		}
 	}
 
@@ -171,7 +183,14 @@ function titleFromRanges(tail: string, head: string): string | null {
 	if (!firstPrompt && !custom && !generated) {
 		return null;
 	}
-	return clip(custom || generated || firstPrompt || 'Conversa sem título');
+	// O mais recente primeiro; sem repetição e com limite, para a comparação com a aba continuar barata.
+	const aliases: string[] = [];
+	for (const candidate of [...seen.reverse(), ...(firstPrompt ? [firstPrompt] : [])]) {
+		const alias = candidate.trim().slice(0, MAX_ALIAS);
+		if (alias && !aliases.includes(alias)) { aliases.push(alias); }
+		if (aliases.length >= MAX_ALIASES) { break; }
+	}
+	return { title: clip(custom || generated || firstPrompt || 'Conversa sem título'), aliases };
 }
 
 function firstUserText(text: string): string | null {

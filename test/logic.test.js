@@ -200,6 +200,9 @@ test('referencedBlobs junta os hashes citados no log', () => {
 	assert.deepEqual([...referencedBlobs(lines)].sort(), [HASH, other]);
 });
 
+// Rótulo que o webview oficial (2.1.329) põe na aba: no máximo 25 caracteres, 24 + "…" acima disso.
+const officialTabLabel = (summary) => !summary ? 'Claude Code' : summary.length > 25 ? summary.substring(0, 24) + '…' : summary;
+
 test('matchChatSessions associa a aba às conversas pelo título, sem desempatar títulos repetidos', () => {
 	const { matchChatSessions } = require('../out/logic.js');
 	const sessions = [
@@ -208,10 +211,36 @@ test('matchChatSessions associa a aba às conversas pelo título, sem desempatar
 		{ id: 'outra', title: 'Outra coisa', updated: 2 },
 		{ id: 'nova', title: 'Corrigir login', updated: 3 },
 	];
-	assert.deepEqual(matchChatSessions('Corrigir login', sessions), { sessions: ['nova', 'velha'], title: 'Corrigir login' });
-	assert.deepEqual(matchChatSessions('  Outra coisa ', sessions), { sessions: ['outra'], title: 'Outra coisa' });
-	assert.equal(matchChatSessions('Corrigir', sessions), null, 'título parcial não conta');
+	assert.deepEqual(matchChatSessions('Corrigir login', sessions), { sessions: ['nova', 'velha'], title: 'Corrigir login', elsewhere: [] });
+	assert.deepEqual(matchChatSessions('  Outra coisa ', sessions), { sessions: ['outra'], title: 'Outra coisa', elsewhere: [] });
+	assert.equal(matchChatSessions('Corrigir', sessions), null, 'título parcial sem o "…" da aba não conta');
 	assert.equal(matchChatSessions('', sessions), null);
 	assert.equal(matchChatSessions('   ', [{ id: 'x', title: '   ', updated: 1 }]), null, 'aba sem título mostra tudo');
 	assert.equal(matchChatSessions('Qualquer', []), null);
+});
+
+test('o rótulo cortado pela aba oficial ainda identifica a conversa, por qualquer título que ela já teve', () => {
+	const { matchChatSessions, sessionsForTabLabel } = require('../out/logic.js');
+	const long = 'Ajustar o painel de mudanças por conversa';
+	assert.equal(officialTabLabel(long), 'Ajustar o painel de muda…');
+	const sessions = [
+		{ id: 'longa', title: long, updated: 2, aliases: [long, 'pode mexer no painel?'] },
+		{ id: 'parecida', title: 'Ajustar o painel', updated: 3, aliases: ['Ajustar o painel'] },
+		// Transcript ainda sem ai-title: o launcher a conhece pela 1ª mensagem; a aba já mostra o título gerado.
+		{ id: 'cedo', title: 'oi', updated: 4, aliases: ['oi'] },
+	];
+	assert.deepEqual(sessionsForTabLabel(officialTabLabel(long), sessions), ['longa'], 'prefixo de 24 caracteres, só em títulos mais longos');
+	assert.deepEqual(sessionsForTabLabel('pode mexer no painel?', sessions), ['longa'], 'a aba mostra a 1ª mensagem antes do título gerado');
+	assert.deepEqual(sessionsForTabLabel('oi', sessions), ['cedo']);
+	assert.deepEqual(sessionsForTabLabel('Claude Code', [{ id: 'x', title: 'Claude Code', updated: 1 }]), [], 'aba ainda vazia não identifica conversa');
+	assert.deepEqual(sessionsForTabLabel('linha  com\nquebra', [{ id: 'q', title: 'x', updated: 1, aliases: ['linha com quebra'] }]), ['q']);
+	assert.equal(matchChatSessions(officialTabLabel('Ajustar o painel'), sessions).sessions[0], 'parecida', 'título curto cabe inteiro e é comparado exatamente');
+});
+
+test('conversas de outras abas abertas formam elsewhere, sem incluir as da aba em foco', () => {
+	const { matchChatSessions } = require('../out/logic.js');
+	const sessions = [{ id: 'A', title: 'Conversa A', updated: 1 }, { id: 'B', title: 'Conversa B', updated: 2 }, { id: 'A2', title: 'Conversa A', updated: 3 }];
+	assert.deepEqual(matchChatSessions('Conversa A', sessions, ['Conversa B', 'Conversa A', 'Claude Code', 'Desconhecida']),
+		{ sessions: ['A2', 'A'], title: 'Conversa A', elsewhere: ['B'] });
+	assert.equal(matchChatSessions('Desconhecida', sessions, ['Conversa B']), null);
 });

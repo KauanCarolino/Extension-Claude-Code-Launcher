@@ -33,7 +33,14 @@ A extensão passou a se chamar **Launcher for Claude Code**, com o identificador
 - **Skills:** um `SKILL.md` salvo com BOM tinha o nome e a descrição ignorados.
 - **Skills:** a pasta global ignorava `CLAUDE_CONFIG_DIR`, que a lista de conversas já respeitava. Com a variável definida, as skills globais passam a vir de `$CLAUDE_CONFIG_DIR/skills`.
 - **Skills:** ativar ou desativar uma skill alterada fora do launcher mostrava um erro de sistema genérico. Agora explica o motivo. As skills do claude.ai também são recusadas na camada de disco, não só na interface.
+- **Mudanças por conversa:** o painel podia esconder as mudanças da conversa em uso. Três casos foram reproduzidos com o código real:
+  - A aba oficial mostra o título gerado antes de o transcript gravá-lo. Quando esse título curto coincidia com o de uma conversa antiga, o painel filtrava pela antiga e escondia a atual.
+  - No chat da barra lateral, que não é aba, o foco ficava preso na última aba usada e as mudanças da lateral sumiam.
+  - Títulos com mais de 25 caracteres, que a aba corta em 24 + "…", nunca eram reconhecidos, e o filtro ficava desligado sem aviso.
+
+  Agora a conversa é comparada com todos os títulos que já teve, inclusive a primeira mensagem, levando em conta o corte da aba, e é reidentificada quando o transcript muda. Com o filtro ligado, só ficam ocultas as mudanças de conversas que outra aba aberta identificou. As pendentes sem dono continuam visíveis, com aviso, e sem nenhuma aba de chat o painel mostra tudo.
 - **Mudanças por conversa:** com duas ou mais conversas de mesmo título, o painel escolhia a mais recente e escondia as mudanças das outras. Agora mostra as de todas e avisa no topo quantas conversas têm aquele título.
+- **Conversas:** a marca de conversa aberta usava a mesma comparação exata de título e falhava em títulos cortados pela aba.
 - O link do README para `docs/VERIFICACAO.md` apontava para um arquivo ignorado pelo Git, que não chegava ao repositório. O arquivo passa a ser versionado; o resto de `docs/` continua local.
 
 ### Adicionado
@@ -47,6 +54,7 @@ A extensão passou a se chamar **Launcher for Claude Code**, com o identificador
 - Testes de skills ampliados de 1 para 15, cobrindo o controlador da view com o editor simulado: ids que não vieram da listagem são ignorados, skills do claude.ai não são alternadas nem excluídas, excluir exige confirmação e usa a lixeira, criar respeita o escopo e nunca sobrescreve.
 - Os testes de host no Windows falhavam depois de aprovados: o runner encerra só o processo principal do editor, e os processos auxiliares do Electron mantinham o diretório temporário travado (`EBUSY`). A remoção agora tenta de novo com espera crescente e, se o diretório continuar travado, avisa qual pasta ficou sem alterar o resultado do teste.
 - Teste do controlador real para o hook legado no `globalStorage` do identificador antigo; sem a correção, **Ativar registro** ficava bloqueado com `ambiguousHookOwnership`.
+- Teste de ponta a ponta do filtro por conversa (`test/chat-scope.test.js`): `extension.js` e `ChangesController` reais, com abas e transcripts simulados conforme o comportamento da extensão oficial 2.1.329.
 - A associação entre aba e conversa saiu de `extension.ts` para `matchChatSessions` em `logic.ts`, com testes próprios, e o aviso do painel ganhou teste de interface.
 
 ## 0.13.1 — 2026-11-20
