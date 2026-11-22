@@ -488,7 +488,7 @@ export interface HistoryMessage { command: string; id?: string; key?: string; re
 const CHANGES_COMMANDS = new Set([
 	'ready', 'refresh', 'toggleChatFilter', 'enable', 'disable', 'clear', 'purge', 'openPanel', 'compare', 'showInCode', 'openFile',
 	'acceptAll', 'rejectAll', 'acceptFile', 'rejectFile', 'rejectRequest', 'undoReject',
-	'release', 'recover', 'releaseWriter', 'recoverWriter', 'clearAllReviewData',
+	'release', 'recover', 'releaseWriter', 'recoverWriter', 'clearAllReviewData', 'openScm', 'newChat', 'openWalkthrough',
 ]);
 const CATALOG_ACTIONS = ['refresh', 'open', 'reveal', 'toggle', 'delete', 'create'];
 const HOME_COMMANDS = new Set(['ready', 'install', 'newTab', 'openSidebar', 'refresh', 'openSession', 'focusTab', 'closeTab', 'showPanel',

@@ -5,6 +5,7 @@ import * as runtimeProcess from 'node:process';
 import { Buffer as BufferImpl } from 'node:buffer';
 
 import { copyReview, ReviewError, ReviewState, ReviewResolution } from './review';
+import { t } from './i18n';
 
 /** Structural equality. Snapshot strings are shared by copyReview, so equal drafts compare by reference. */
 function sameValue(a: unknown, b: unknown): boolean {
@@ -165,7 +166,7 @@ export class ReviewStore {
 			try { runtimeProcess.kill(existing.pid, 0); throw new ReviewError('recoveryInProgress'); }
 			catch (probe) {
 				if ((probe as { code?: string }).code !== 'ESRCH') { throw probe; }
-				throw new ReviewError('orphanedRecoveryGuard', 'Uma recuperação anterior foi interrompida. Feche todas as janelas e sessões deste projeto, faça backup de .claude/launcher-changes, confirme que o PID do guard não está ativo e remova somente review-recovery.lock. Reabra e use Recuperar escritor. Não remova o lock de um processo ativo.');
+				throw new ReviewError('orphanedRecoveryGuard', t('Uma recuperação anterior foi interrompida. Feche todas as janelas e sessões deste projeto, faça backup de .claude/launcher-changes, confirme que o PID do guard não está ativo e remova somente review-recovery.lock. Reabra e use Recuperar escritor. Não remova o lock de um processo ativo.'));
 			}
 		}
 		try {

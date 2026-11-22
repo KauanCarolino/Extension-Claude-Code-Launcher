@@ -1,6 +1,7 @@
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { readText, type TextRead } from './catalog';
+import { m, t } from './i18n';
 
 /**
  * Servidores MCP configurados para o Claude Code, por escopo:
@@ -61,7 +62,7 @@ const MAX_GLOBAL_CONFIG = 64 * 1024 * 1024;
 const MAX_SMALL = 2 * 1024 * 1024;
 /** Ordem de prioridade documentada quando o mesmo nome aparece em mais de um escopo. */
 const PRECEDENCE: McpScope[] = ['local', 'project', 'user'];
-const SCOPE_LABEL: Record<McpScope, string> = { local: 'local', project: 'projeto', user: 'usuário', managed: 'organização' };
+const SCOPE_LABEL: Record<McpScope, string> = { local: m('local'), project: m('projeto'), user: m('usuário'), managed: m('organização') };
 
 /** `$CLAUDE_CONFIG_DIR/.claude.json` quando definido, senão `~/.claude.json`. */
 export function globalConfigFile(env: NodeJS.ProcessEnv = process.env, home = os.homedir()): string {
@@ -78,7 +79,7 @@ function parseRead(read: TextRead, label: string, problems: string[]): Json | un
 		const value: unknown = JSON.parse(read.text.replace(/^﻿/, ''));
 		if (isObject(value)) { return value; }
 	} catch { /* relatado abaixo */ }
-	problems.push(`${label} não é um JSON válido.`);
+	problems.push(t('{0} não é um JSON válido.', label));
 	return undefined;
 }
 
@@ -129,19 +130,19 @@ function clip(text: string, max = 200): string { return text.length > max ? `${t
 
 /** Transporte e alvo de uma entrada, ou o motivo de ela não poder funcionar. */
 export function describeEntry(value: unknown): { transport: string; target: string; problem?: string } {
-	if (!isObject(value)) { return { transport: '?', target: '', problem: 'A entrada não é um objeto JSON.' }; }
+	if (!isObject(value)) { return { transport: '?', target: '', problem: t('A entrada não é um objeto JSON.') }; }
 	const type = value.type;
 	const url = typeof value.url === 'string' ? value.url : undefined;
 	if (type === 'http' || type === 'streamable-http' || type === 'sse') {
 		const transport = type === 'sse' ? 'sse' : 'http';
-		return url ? { transport, target: redactUrl(url) } : { transport, target: '', problem: 'Falta "url".' };
+		return url ? { transport, target: redactUrl(url) } : { transport, target: '', problem: t('Falta "url".') };
 	}
 	if (type === undefined || type === 'stdio') {
 		if (typeof value.command === 'string' && value.command) {
 			return { transport: 'stdio', target: clip([value.command, ...redactArgs(strings(value.args))].join(' ')) };
 		}
-		if (type === undefined && url) { return { transport: '?', target: redactUrl(url), problem: 'Tem "url" mas falta "type": "http". Sem type, o Claude Code trata a entrada como stdio.' }; }
-		return { transport: 'stdio', target: '', problem: 'Falta "command".' };
+		if (type === undefined && url) { return { transport: '?', target: redactUrl(url), problem: t('Tem "url" mas falta "type": "http". Sem type, o Claude Code trata a entrada como stdio.') }; }
+		return { transport: 'stdio', target: '', problem: t('Falta "command".') };
 	}
 	return { transport: clip(String(type), 16), target: url ? redactUrl(url) : '' };
 }
@@ -166,7 +167,7 @@ export async function loadMcp(loc: McpLocations): Promise<McpListing> {
 	const platform = loc.platform ?? process.platform;
 	const [global, userSettings, managed] = await Promise.all([
 		readJson(loc.globalConfig, path.basename(loc.globalConfig), problems, MAX_GLOBAL_CONFIG),
-		readJson(loc.userSettings, 'settings.json do usuário', problems),
+		readJson(loc.userSettings, t('settings.json do usuário'), problems),
 		readJson(loc.managed, 'managed-mcp.json', problems),
 	]);
 	const projectFile = loc.project ? path.join(loc.project, PROJECT_MCP_FILE) : undefined;
@@ -182,7 +183,7 @@ export async function loadMcp(loc: McpLocations): Promise<McpListing> {
 	// Desligados pelo `/mcp` neste projeto: vale para servidores de qualquer escopo.
 	const toggledOff = new Set(strings(projectConfig?.disabledMcpServers));
 	const approval = collectApproval([
-		['.claude/settings.local.json', local], ['.claude/settings.json', shared], ['settings.json do usuário', userSettings],
+		['.claude/settings.local.json', local], ['.claude/settings.json', shared], [t('settings.json do usuário'), userSettings],
 		[path.basename(loc.globalConfig), projectConfig],
 	]);
 
@@ -193,15 +194,15 @@ export async function loadMcp(loc: McpLocations): Promise<McpListing> {
 			const { transport, target, problem } = describeEntry(entries[name]);
 			let state: McpState = 'active', note = '', canToggle = false;
 			if (problem) { state = 'broken'; note = problem; }
-			else if (scope !== 'managed' && toggledOff.has(name)) { state = 'disabled'; note = 'Desativado pelo /mcp neste projeto. Reative pelo /mcp no chat.'; }
+			else if (scope !== 'managed' && toggledOff.has(name)) { state = 'disabled'; note = t('Desativado pelo /mcp neste projeto. Reative pelo /mcp no chat.'); }
 			else if (scope === 'project') {
 				const by = approval.disabled.get(name);
 				if (by) {
-					state = 'disabled'; note = `Recusado em ${by}.`;
+					state = 'disabled'; note = t('Recusado em {0}.', by);
 					// Só desfaz o que o próprio launcher pode editar: a recusa no settings.local.json.
 					canToggle = by === '.claude/settings.local.json' && [shared, userSettings, projectConfig].every((s) => !strings(s?.disabledMcpjsonServers).includes(name));
-				} else if (approval.all || approval.enabled.has(name)) { note = 'Aprovado para este projeto.'; canToggle = true; }
-				else { state = 'pending'; note = 'Aguardando aprovação: o Claude Code pergunta ao abrir o projeto.'; canToggle = true; }
+				} else if (approval.all || approval.enabled.has(name)) { note = t('Aprovado para este projeto.'); canToggle = true; }
+				else { state = 'pending'; note = t('Aguardando aprovação: o Claude Code pergunta ao abrir o projeto.'); canToggle = true; }
 			}
 			servers.push({ id: `${scope}:${name}`, name, scope, transport, target, state, note, canToggle, file, keyPath: [...keyPath, name] });
 		}
@@ -217,7 +218,7 @@ export async function loadMcp(loc: McpLocations): Promise<McpListing> {
 		const winner = servers.find((s) => s.name === server.name && s.state !== 'broken' && PRECEDENCE.indexOf(s.scope) >= 0 && PRECEDENCE.indexOf(s.scope) < rank);
 		if (winner) {
 			server.shadowedBy = winner.scope;
-			server.note = `Substituído pelo servidor de mesmo nome do escopo ${SCOPE_LABEL[winner.scope]}.${server.note ? ` ${server.note}` : ''}`;
+			server.note = t('Substituído pelo servidor de mesmo nome do escopo {0}.', t(SCOPE_LABEL[winner.scope])) + (server.note ? ` ${server.note}` : '');
 		}
 	}
 	return { servers, problems, managedPolicy: managed !== undefined };
@@ -231,8 +232,8 @@ export const validServerName = (name: string): boolean => /^[A-Za-z0-9_-]{1,64}$
 function parseForEdit(text: string | undefined, label: string): Json {
 	if (text === undefined) { return {}; }
 	let value: unknown;
-	try { value = JSON.parse(text.replace(/^﻿/, '')); } catch { throw new Error(`${label} não é um JSON válido. Corrija o arquivo antes.`); }
-	if (!isObject(value)) { throw new Error(`${label} não contém um objeto JSON.`); }
+	try { value = JSON.parse(text.replace(/^﻿/, '')); } catch { throw new Error(t('{0} não é um JSON válido. Corrija o arquivo antes.', label)); }
+	if (!isObject(value)) { throw new Error(t('{0} não contém um objeto JSON.', label)); }
 	return value;
 }
 
@@ -244,7 +245,7 @@ export function planApproval(text: string | undefined, name: string, enable: boo
 	const update = (key: 'enabledMcpjsonServers' | 'disabledMcpjsonServers', include: boolean) => {
 		const current = settings[key];
 		if (current !== undefined && (!Array.isArray(current) || current.some((n) => typeof n !== 'string'))) {
-			throw new Error(`"${key}" no settings.local.json não é uma lista de nomes.`);
+			throw new Error(t('"{0}" no settings.local.json não é uma lista de nomes.', key));
 		}
 		const next = ((current as string[] | undefined) ?? []).filter((n) => n !== name);
 		if (include) { next.push(name); }
@@ -257,21 +258,21 @@ export function planApproval(text: string | undefined, name: string, enable: boo
 
 function servers(config: Json): Json {
 	if (config.mcpServers === undefined) { config.mcpServers = {}; }
-	if (!isObject(config.mcpServers)) { throw new Error('"mcpServers" no .mcp.json não é um objeto.'); }
+	if (!isObject(config.mcpServers)) { throw new Error(t('"mcpServers" no .mcp.json não é um objeto.')); }
 	return config.mcpServers;
 }
 
 export function planAddServer(text: string | undefined, name: string, entry: Json): string {
-	if (!validServerName(name)) { throw new Error('Use letras, números, hífens e sublinhados (ex.: github).'); }
+	if (!validServerName(name)) { throw new Error(t('Use letras, números, hífens e sublinhados (ex.: github).')); }
 	const config = parseForEdit(text, PROJECT_MCP_FILE), list = servers(config);
-	if (Object.prototype.hasOwnProperty.call(list, name)) { throw new Error(`Já existe um servidor "${name}" no .mcp.json.`); }
+	if (Object.prototype.hasOwnProperty.call(list, name)) { throw new Error(t('Já existe um servidor "{0}" no .mcp.json.', name)); }
 	list[name] = entry;
 	return serialize(config);
 }
 
 export function planRemoveServer(text: string | undefined, name: string): string {
 	const config = parseForEdit(text, PROJECT_MCP_FILE), list = servers(config);
-	if (!Object.prototype.hasOwnProperty.call(list, name)) { throw new Error(`O servidor "${name}" não está mais no .mcp.json.`); }
+	if (!Object.prototype.hasOwnProperty.call(list, name)) { throw new Error(t('O servidor "{0}" não está mais no .mcp.json.', name)); }
 	delete list[name];
 	return serialize(config);
 }
@@ -290,7 +291,7 @@ export function splitCommandLine(input: string): string[] {
 		else if (/\s/.test(ch)) { if (started) { out.push(current); current = ''; started = false; } }
 		else { current += ch; started = true; }
 	}
-	if (quote) { throw new Error('Aspas sem fechamento no comando.'); }
+	if (quote) { throw new Error(t('Aspas sem fechamento no comando.')); }
 	if (started) { out.push(current); }
 	return out;
 }
@@ -299,11 +300,11 @@ export function splitCommandLine(input: string): string[] {
 export function entryFromInput(input: string): Json {
 	const text = input.trim();
 	if (/^https?:\/\//i.test(text)) {
-		try { new URL(text); } catch { throw new Error('URL inválida.'); }
+		try { new URL(text); } catch { throw new Error(t('URL inválida.')); }
 		return { type: 'http', url: text };
 	}
 	const [command, ...args] = splitCommandLine(text);
-	if (!command) { throw new Error('Informe um comando ou uma URL.'); }
+	if (!command) { throw new Error(t('Informe um comando ou uma URL.')); }
 	return { type: 'stdio', command, args };
 }
 

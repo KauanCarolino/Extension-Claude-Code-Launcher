@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { t } from './i18n';
 
 /** Peças de disco comuns às abas de regras, agentes e MCP. Sem dependência do VS Code, para ser testável. */
 export type EntryState = 'active' | 'disabled' | 'broken';
@@ -103,17 +104,17 @@ export async function markdownFile(file: string): Promise<{ actual: string; stat
 }
 
 /** Ativa ou desativa renomeando `x.md` para `x.md.disabled` e vice-versa. Nunca sobrescreve. */
-export async function setFileEnabled(file: string, enabled: boolean, what = 'O arquivo'): Promise<void> {
+export async function setFileEnabled(file: string, enabled: boolean, what = t('O arquivo')): Promise<void> {
 	const from = enabled ? file + DISABLED_SUFFIX : file;
 	const to = enabled ? file : file + DISABLED_SUFFIX;
-	if (!(await isFile(from))) { throw new Error(`${what} já está ${enabled ? 'ativo' : 'desativado'} ou foi alterado fora do launcher.`); }
-	if (await isFile(to) || await isBrokenLink(to)) { throw new Error(`Já existe ${path.basename(to)} nesta pasta.`); }
+	if (!(await isFile(from))) { throw new Error(enabled ? t('{0} já está ativo ou foi alterado fora do launcher.', what) : t('{0} já está desativado ou foi alterado fora do launcher.', what)); }
+	if (await isFile(to) || await isBrokenLink(to)) { throw new Error(t('Já existe {0} nesta pasta.', path.basename(to))); }
 	await fs.rename(from, to);
 }
 
 /** Cria `file` sem sobrescrever nada, nem a versão desativada. */
 export async function createFileExclusive(file: string, text: string): Promise<void> {
-	if (await isFile(file + DISABLED_SUFFIX)) { throw new Error(`Já existe ${path.basename(file)}${DISABLED_SUFFIX} (desativado).`); }
+	if (await isFile(file + DISABLED_SUFFIX)) { throw new Error(t('Já existe {0} (desativado).', path.basename(file) + DISABLED_SUFFIX)); }
 	await fs.mkdir(path.dirname(file), { recursive: true });
 	await fs.writeFile(file, text, { flag: 'wx' });
 }
@@ -128,7 +129,7 @@ export async function readText(file: string, maxBytes: number): Promise<TextRead
 		if ((error as { code?: string }).code === 'ENOENT') { return { kind: 'absent' }; }
 		throw error;
 	}
-	if (size > maxBytes) { throw new Error(`${path.basename(file)} passa de ${Math.round(maxBytes / 1024 / 1024)} MB.`); }
+	if (size > maxBytes) { throw new Error(t('{0} passa de {1} MB.', path.basename(file), Math.round(maxBytes / 1024 / 1024))); }
 	return { kind: 'content', text: await fs.readFile(file, 'utf8') };
 }
 
@@ -141,12 +142,12 @@ export async function writeTextIfUnchanged(file: string, expected: string | unde
 		const now = await readText(file, maxBytes);
 		return (now.kind === 'content' ? now.text : undefined) === expected;
 	};
-	if (!(await same())) { throw new Error(`${path.basename(file)} mudou enquanto era editado. Tente de novo.`); }
+	if (!(await same())) { throw new Error(t('{0} mudou enquanto era editado. Tente de novo.', path.basename(file))); }
 	await fs.mkdir(path.dirname(file), { recursive: true });
 	const temp = `${file}.${randomUUID()}.tmp`;
 	try {
 		await fs.writeFile(temp, next, { flag: 'wx' });
-		if (!(await same())) { throw new Error(`${path.basename(file)} mudou enquanto era editado. Tente de novo.`); }
+		if (!(await same())) { throw new Error(t('{0} mudou enquanto era editado. Tente de novo.', path.basename(file))); }
 		await fs.rename(temp, file);
 	} finally {
 		await fs.unlink(temp).catch(() => undefined);

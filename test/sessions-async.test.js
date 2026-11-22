@@ -13,7 +13,7 @@ function fixture(t, fileSystem = fs) {
   const filename = path.resolve(__dirname, '../out/sessions.js'), module = { exports: {} };
   vm.runInNewContext(fs.readFileSync(filename, 'utf8'), { module, exports: module.exports, Buffer,
     process: { env: { CLAUDE_CONFIG_DIR: directory } },
-    require: name => name === 'fs' ? fileSystem : require(name) }, { filename });
+    require: name => name === 'fs' ? fileSystem : name.startsWith('./') ? require(path.join(path.dirname(filename), name)) : require(name) }, { filename });
   const api = module.exports;
   const write = (workspace, number, title, time = number + 1000) => {
     const dir = api.sessionsDir(workspace); fs.mkdirSync(dir, { recursive: true });

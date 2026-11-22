@@ -1,0 +1,56 @@
+name: Compatibility with latest editor and Claude Code
+
+# A validação comum fixa o VS Code 1.94.0. Esta verificação roda toda segunda-feira (e sob demanda)
+# contra o VS Code estável mais recente e a versão atual da extensão oficial Claude Code, para
+# avisar cedo quando um comando interno da extensão oficial (claude-vscode.*) ou o formato dos
+# hooks mudar. Não usa login, modelo nem serviço pago.
+
+on:
+  schedule:
+    - cron: '0 9 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  latest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --ignore-scripts --no-audit --fund=false
+      - name: Resolve the latest stable VS Code
+        id: editor
+        run: |
+          version="$(curl -fsSL https://update.code.visualstudio.com/api/releases/stable | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const v=JSON.parse(s)[0];if(!/^\d+\.\d+\.\d+$/.test(v)){process.exit(1)}console.log(v)})")"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "VS Code ${version}" >> "$GITHUB_STEP_SUMMARY"
+      - name: Build candidate VSIX
+        run: npm run package -- --out "${{ runner.temp }}/launcher-candidate.vsix" --no-dependencies
+      - name: Verify candidate bytes against source
+        run: npm run verify:package -- "${{ runner.temp }}/launcher-candidate.vsix"
+      - name: Install the current official Claude Code extension
+        id: official
+        run: |
+          node scripts/install-official-extension.cjs --download-version "${{ steps.editor.outputs.version }}" \
+            --extensions-dir "${{ runner.temp }}/official-extensions" | tee -a "$GITHUB_OUTPUT"
+          grep '^version=' "$GITHUB_OUTPUT" | tail -1 | sed 's/^version=/Claude Code /' >> "$GITHUB_STEP_SUMMARY"
+      - name: Installed VSIX and capture chain on the latest VS Code
+        run: xvfb-run -a npm run test:host -- --vsix "${{ runner.temp }}/launcher-candidate.vsix" --download-version "${{ steps.editor.outputs.version }}" --report-dir "${{ runner.temp }}/compat-host-evidence"
+      - name: Launcher opens the real official extension
+        run: xvfb-run -a npm run test:host:contracts -- official --official-extension "${{ steps.official.outputs.directory }}" --vsix "${{ runner.temp }}/launcher-candidate.vsix" --download-version "${{ steps.editor.outputs.version }}" --report-dir "${{ runner.temp }}/compat-official-evidence"
+      - name: Retain evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: compat-latest
+          path: |
+            ${{ runner.temp }}/compat-host-evidence/
+            ${{ runner.temp }}/compat-official-evidence/
+          retention-days: 14
+          if-no-files-found: warn

@@ -1,6 +1,6 @@
 # Verificação e compatibilidade
 
-Detalhes de verificação do Launcher for Claude Code, separados do README para mantê-lo objetivo.
+Detalhes de verificação do Launcher for Claude Code, separados do README para mantê-lo objetivo. O comportamento completo está na [referência](REFERENCIA.md).
 
 ## Escopo da verificação
 
@@ -9,6 +9,10 @@ As jornadas de teste cobrem ativação, comandos, preservação das preferência
 No modo VSIX, uma jornada adicional executa o hook instalado em um arquivo sintético e verifica sua ingestão e revisão no editor. Os testes de adaptadores abrangem falhas de gravação, recuperação e concorrência. Notebooks com alterações não salvas e providers virtuais recebem testes negativos reais, que comprovam a preservação dos buffers e o bloqueio de mutações; isso não habilita a revisão desses recursos, e a revisão de recursos não admitidos bloqueia alterações de conteúdo.
 
 Esses cenários não comprovam a abertura autenticada de conversas nem o funcionamento em hosts remotos. Os relatórios identificam o editor, o sistema e o artefato de cada execução. Uma matriz configurada não equivale a um resultado aprovado.
+
+A validação comum fixa o VS Code 1.94.0, a versão mínima declarada. Toda semana, o workflow de compatibilidade (`.github/workflows/compat.yml`) repete a instalação do VSIX, a jornada do hook e o contrato `official` no VS Code estável mais recente e na versão atual da extensão oficial, para avisar cedo quando um comando interno do Claude Code (`claude-vscode.*`) ou o formato dos hooks mudar. Uma execução aprovada vale para as versões daquela data; o resumo do job registra quais foram.
+
+Os testes de Node também carregam as páginas das views em português e com o dicionário em inglês, e `test/l10n.test.js` reprova quando uma frase marcada no código não tem tradução ou quando o manifesto usa uma chave ausente em `package.nls.json` ou `package.nls.pt-br.json`.
 
 ## Compatibilidade de hooks
 

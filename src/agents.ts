@@ -1,6 +1,7 @@
 import * as path from 'node:path';
 import { createFileExclusive, readHead, scanMarkdownTree, validKebabName, type EntryState } from './catalog';
 import { frontmatterFields, yamlQuoted } from './frontmatter';
+import { t } from './i18n';
 
 /** Subagentes do Claude Code: um `.md` por agente em `.claude/agents/`, com subpastas. */
 export type AgentScope = 'project' | 'global';
@@ -42,9 +43,9 @@ export function markShadowedAgents(agents: AgentInfo[]): AgentInfo[] {
 }
 
 export async function createAgent(root: string, name: string, description: string): Promise<string> {
-	if (!validKebabName(name)) { throw new Error('Use letras minúsculas, números e hífens (ex.: revisor-de-codigo).'); }
+	if (!validKebabName(name)) { throw new Error(t('Use letras minúsculas, números e hífens (ex.: revisor-de-codigo).')); }
 	const file = path.join(root, `${name}.md`);
 	await createFileExclusive(file, `---\nname: ${name}\ndescription: ${yamlQuoted(description)}\n---\n\n`
-		+ 'Descreva aqui o papel do agente, como ele deve trabalhar e o formato da resposta.\n');
+		+ t('Descreva aqui o papel do agente, como ele deve trabalhar e o formato da resposta.') + '\n');
 	return file;
 }

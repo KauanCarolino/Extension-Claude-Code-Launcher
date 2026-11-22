@@ -2,19 +2,20 @@
 // depois as recentes agrupadas por dia. Monta tudo com textContent: nenhum título
 // de conversa é interpretado como HTML.
 (function () {
+	const { t, locale } = window.launcherL10n;
 	const vscode = acquireVsCodeApi();
-	const root = document.getElementById('root');
+	const root = /** @type {HTMLElement} */ (document.getElementById('root'));
 	const saved = readSaved();
 	let filter = saved.filter || '';
 	let lastState = null;
 	let skillsState = null;
 	// Abas além de Conversas: Skills tem desenho próprio (skills.js); as outras usam catalog.js.
 	const TABS = [
-		['chats', 'comment', 'Conversas'],
-		['skills', 'sparkle', 'Skills'],
-		['rules', 'law', 'Regras'],
-		['agents', 'hubot', 'Agentes'],
-		['mcp', 'plug', 'MCP'],
+		['chats', 'comment', t('Conversas')],
+		['skills', 'sparkle', t('Skills')],
+		['rules', 'law', t('Regras')],
+		['agents', 'hubot', t('Agentes')],
+		['mcp', 'plug', t('MCP')],
 	];
 	const catalogStates = {};
 	let tab = TABS.some(([id]) => id === saved.tab) ? saved.tab : 'chats';
@@ -53,14 +54,14 @@
 		if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') {
 			return;
 		}
-		const current = document.activeElement;
+		const current = /** @type {HTMLElement | null} */ (document.activeElement);
 		if (!current || !current.classList.contains('row-main')) {
 			return;
 		}
-		const rows = [...root.querySelectorAll('.row-main')];
+		const rows = /** @type {HTMLElement[]} */ ([...root.querySelectorAll('.row-main')]);
 		const index = rows.indexOf(current);
 		if (event.key === 'ArrowUp' && index === 0) {
-			const search = root.querySelector('.search input');
+			const search = /** @type {HTMLInputElement | null} */ (root.querySelector('.search input'));
 			if (search) {
 				event.preventDefault();
 				search.focus();
@@ -184,7 +185,7 @@
 	}
 
 	function captureFocus() {
-		const active = document.activeElement;
+		const active = /** @type {HTMLInputElement | null} */ (document.activeElement);
 		if (!active || !active.dataset || !active.dataset.focusKey) {
 			return null;
 		}
@@ -195,7 +196,7 @@
 		if (!focus) {
 			return;
 		}
-		const target = [...root.querySelectorAll('[data-focus-key]')].find((node) => node.dataset.focusKey === focus.key);
+		const target = /** @type {HTMLInputElement[]} */ ([...root.querySelectorAll('[data-focus-key]')]).find((node) => node.dataset.focusKey === focus.key);
 		if (!target) {
 			return;
 		}
@@ -228,9 +229,9 @@
 	function renderNotInstalled() {
 		const box = el('div', 'empty-state');
 		box.append(icon('sparkle'));
-		box.append(el('p', 'empty-title', 'Falta a extensão oficial do Claude Code'));
-		box.append(el('p', null, 'O chat vem dela. Depois de instalar, as conversas aparecem aqui.'));
-		box.append(button({ className: 'btn-primary', icon: 'cloud-download', label: 'Instalar Claude Code', command: 'install', focusKey: 'install' }));
+		box.append(el('p', 'empty-title', t('Falta a extensão oficial do Claude Code')));
+		box.append(el('p', null, t('O chat vem dela. Depois de instalar, as conversas aparecem aqui.')));
+		box.append(button({ className: 'btn-primary', icon: 'cloud-download', label: t('Instalar Claude Code'), command: 'install', focusKey: 'install' }));
 		return box;
 	}
 
@@ -239,12 +240,12 @@
 		const node = button({
 			className: 'new-chat',
 			icon: 'add',
-			label: 'Nova conversa',
+			label: t('Nova conversa'),
 			command: 'newTab',
-			title: 'Abre uma conversa nova numa aba do editor',
+			title: t('Abre uma conversa nova numa aba do editor'),
 			focusKey: 'newTab',
 		});
-		node.append(el('span', 'new-chat-hint', 'em aba'));
+		node.append(el('span', 'new-chat-hint', t('em aba')));
 		return node;
 	}
 
@@ -263,19 +264,19 @@
 		const shownRecent = recent.filter((session) => match(session.title));
 
 		if (shownTabs.length > 0) {
-			root.append(renderGroup('Abertas', shownTabs.map(renderTab)));
+			root.append(renderGroup(t('Abertas'), shownTabs.map(renderTab)));
 		}
 
 		if (!state.hasFolder) {
-			root.append(renderHint('folder-opened', 'Abra uma pasta de projeto para ver as conversas dela.'));
+			root.append(renderHint('folder-opened', t('Abra uma pasta de projeto para ver as conversas dela.')));
 			return;
 		}
 		if (state.sessions.length === 0 && tabs.length === 0) {
-			root.append(renderHint('comment-discussion', 'Nenhuma conversa neste projeto ainda. Comece uma nova acima.'));
+			root.append(renderHint('comment-discussion', t('Nenhuma conversa neste projeto ainda. Comece uma nova acima.')));
 			return;
 		}
 		if (query && shownTabs.length === 0 && shownRecent.length === 0) {
-			root.append(el('p', 'hint muted', 'Nenhuma conversa com “' + filter + '”.'));
+			root.append(el('p', 'hint muted', t('Nenhuma conversa com “{0}”.', filter)));
 			return;
 		}
 
@@ -314,7 +315,7 @@
 			className: 'row-main',
 			command: 'focusTab',
 			extra: { key: tab.key },
-			title: tab.active ? tab.label + '\nAba ativa' : tab.label + '\nIr para esta aba',
+			title: tab.label + '\n' + (tab.active ? t('Aba ativa') : t('Ir para esta aba')),
 			focusKey: 'tab:' + tab.key,
 		});
 		main.append(el('span', 'live-dot' + (tab.active ? ' on' : '')));
@@ -328,8 +329,8 @@
 			icon: 'close',
 			command: 'closeTab',
 			extra: { key: tab.key },
-			title: 'Fechar esta aba',
-			ariaLabel: 'Fechar ' + tab.label,
+			title: t('Fechar esta aba'),
+			ariaLabel: t('Fechar {0}', tab.label),
 			focusKey: 'close:' + tab.key,
 		}));
 		return item;
@@ -341,7 +342,7 @@
 			className: 'row-main',
 			command: 'openSession',
 			extra: { id: session.id },
-			title: session.title + '\n' + new Date(session.updated).toLocaleString('pt-BR') + ' · clique para abrir numa aba',
+			title: session.title + '\n' + new Date(session.updated).toLocaleString(locale) + ' · ' + t('clique para abrir numa aba'),
 			focusKey: 'session:' + session.id,
 		});
 		main.append(el('span', 'row-title', session.title));
@@ -355,9 +356,9 @@
 		box.append(icon('search'));
 		const input = el('input');
 		input.type = 'search';
-		input.placeholder = 'Buscar conversas';
+		input.placeholder = t('Buscar conversas');
 		input.value = filter;
-		input.setAttribute('aria-label', 'Buscar conversas');
+		input.setAttribute('aria-label', t('Buscar conversas'));
 		input.dataset.focusKey = 'filter';
 		input.addEventListener('input', () => {
 			filter = input.value;
@@ -372,7 +373,7 @@
 				input.value = '';
 				input.dispatchEvent(new Event('input'));
 			} else if (event.key === 'ArrowDown') {
-				const first = root.querySelector('.row-main');
+				const first = /** @type {HTMLElement | null} */ (root.querySelector('.row-main'));
 				if (first) {
 					event.preventDefault();
 					first.focus();
@@ -400,37 +401,37 @@
 	function groupLabel(ms) {
 		const days = Math.round((startOfDay(Date.now()) - startOfDay(ms)) / 86400000);
 		if (days <= 0) {
-			return 'Hoje';
+			return t('Hoje');
 		}
 		if (days === 1) {
-			return 'Ontem';
+			return t('Ontem');
 		}
 		if (days < 7) {
-			return 'Esta semana';
+			return t('Esta semana');
 		}
 		if (days < 30) {
-			return 'Este mês';
+			return t('Este mês');
 		}
-		return 'Mais antigas';
+		return t('Mais antigas');
 	}
 
 	/** Tempo curto, para caber à direita da linha: "agora", "5 min", "3 h", "2 d", "07 nov". */
 	function shortTime(ms) {
 		const minutes = Math.max(0, Math.round((Date.now() - ms) / 60000));
 		if (minutes < 1) {
-			return 'agora';
+			return t('agora');
 		}
 		if (minutes < 60) {
-			return minutes + ' min';
+			return t('{0} min', minutes);
 		}
 		const hours = Math.round(minutes / 60);
 		if (hours < 24) {
-			return hours + ' h';
+			return t('{0} h', hours);
 		}
 		const days = Math.round(hours / 24);
 		if (days < 7) {
-			return days + ' d';
+			return t('{0} d', days);
 		}
-		return new Date(ms).toLocaleDateString('pt-BR', { day: '2-digit', month: 'short' }).replace('.', '');
+		return new Date(ms).toLocaleDateString(locale, { day: '2-digit', month: 'short' }).replace('.', '');
 	}
 })();

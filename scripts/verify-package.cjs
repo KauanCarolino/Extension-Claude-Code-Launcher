@@ -97,10 +97,14 @@ async function verifyPackage(filename, root = path.resolve(__dirname, '..')) {
     ['extension/readme.md', 'README.md'],
     ['extension/LICENSE.txt', 'LICENSE'],
   ]);
+  // Traduções do manifesto (package.nls*.json) vão na raiz do pacote, como o package.json.
+  for (const name of await fs.readdir(root)) {
+    if (/^package\.nls(\.[a-z-]+)?\.json$/.test(name)) expected.set('extension/' + name, name);
+  }
   // vsce ships the changelog when the project has one; it must then match the source too.
   try { await fs.access(path.join(root, 'CHANGELOG.md')); expected.set('extension/changelog.md', 'CHANGELOG.md'); }
   catch (error) { if (error.code !== 'ENOENT') throw error; }
-  for (const directory of ['out', 'media', 'hooks']) {
+  for (const directory of ['out', 'media', 'hooks', 'l10n']) {
     for (const relative of await sourceFiles(root, directory)) {
       if (directory === 'out' && !relative.endsWith('.js')) continue;
       expected.set('extension/' + relative, relative);

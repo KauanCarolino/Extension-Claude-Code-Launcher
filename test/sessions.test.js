@@ -103,7 +103,7 @@ function syntheticReader(records, overrides = {}) {
 	} };
 	const filename = path.join(OUT, 'sessions.js'), module = { exports: {} };
 	vm.runInNewContext(fs.readFileSync(filename, 'utf8'), { module, exports: module.exports, Buffer, process: { env: {} },
-		require: name => name === 'fs' ? fileSystem : require(name) }, { filename });
+		require: name => name === 'fs' ? fileSystem : name.startsWith('./') ? require(path.join(OUT, name)) : require(name) }, { filename });
 	return { api: module.exports, calls };
 }
 function transcriptText(lines) { return lines.map(line => JSON.stringify(line)).join('\n') + '\n'; }

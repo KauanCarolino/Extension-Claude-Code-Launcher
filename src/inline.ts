@@ -4,6 +4,7 @@ import { DROP_REVIEW_COMMAND } from './changes';
 import { fileKey, RawEntry, Status } from './logic';
 import { ReviewDecisionRequest, SharedReview } from './review';
 import { blockedReviewResult, formatReviewItemResult, ReviewResultError } from './review-results';
+import { htmlLanguage, plural, t } from './i18n';
 
 const CONFIG_SECTION = 'claudeCodeLauncher';
 const CONFIG_KEY = 'inlineChanges';
@@ -174,7 +175,7 @@ class InlineChanges implements vscode.CodeLensProvider, vscode.Disposable {
 			let allowed = false;
 			try { allowed = await this.source.canOpenResource(entry.file); } catch { /* Unknown scope never authorizes reading. */ }
 			if (!allowed) {
-				void vscode.window.showWarningMessage('Não abri este recurso: ele está fora do escopo autorizado ou sua identidade não pôde ser confirmada.');
+				void vscode.window.showWarningMessage(t('Não abri este recurso: ele está fora do escopo autorizado ou sua identidade não pôde ser confirmada.'));
 				return;
 			}
 		}
@@ -188,15 +189,14 @@ class InlineChanges implements vscode.CodeLensProvider, vscode.Disposable {
 		try {
 			editor = await vscode.window.showTextDocument(uri, { preview: false });
 		} catch {
-			void vscode.window.showWarningMessage(`O arquivo ${basename(entry.file)} não existe mais.`);
+			void vscode.window.showWarningMessage(t('O arquivo {0} não existe mais.', basename(entry.file)));
 			return;
 		}
 
 		const built = this.apply(editor);
 		if (!built) {
 			void vscode.window.showInformationMessage(
-				'Este arquivo mudou depois da edição do Claude, então as marcas não batem mais com o código. '
-				+ 'Use "Lado a lado" no painel Mudanças.',
+				t('Este arquivo mudou depois da edição do Claude, então as marcas não batem mais com o código. Use "Lado a lado" no painel Mudanças.'),
 			);
 			return;
 		}
@@ -283,8 +283,8 @@ class InlineChanges implements vscode.CodeLensProvider, vscode.Disposable {
 		}
 		void vscode.window.showInformationMessage(
 			files.length === 0
-				? 'Nenhuma mudança do Claude para revisar.'
-				: 'As mudanças pendentes não batem mais com o código. Revise pelo painel Mudanças.',
+				? t('Nenhuma mudança do Claude para revisar.')
+				: t('As mudanças pendentes não batem mais com o código. Revise pelo painel Mudanças.'),
 		);
 	}
 
@@ -407,15 +407,15 @@ function build(review: Review, document: vscode.TextDocument): Built {
 				end += 1;
 			}
 			const removed = lines.slice(index, end).map((item) => item.text);
-			const label = removed.length === 1 ? '1 linha removida' : `${removed.length} linhas removidas`;
-			const hover = markdown(`${head}**${capitalize(label)} neste ponto:**\n\n${codeBlock(removed.join('\n'), language)}`);
+			const label = plural(removed.length, '{0} linha removida', '{0} linhas removidas');
+			const hover = markdown(`${head}**${capitalize(t('{0} neste ponto:', label))}**\n\n${codeBlock(removed.join('\n'), language)}`);
 			const anchor = nextNewLine(lines, end);
 			if (anchor !== undefined) {
 				built.removedAbove.push({ range: lineRange(anchor), hoverMessage: hover });
-				addGhost(anchor, `↑ ${label} aqui`);
+				addGhost(anchor, t('↑ {0} aqui', label));
 			} else {
 				built.removedBelow.push({ range: lineRange(lastLine), hoverMessage: hover });
-				addGhost(lastLine, `↓ ${label} no fim do arquivo`);
+				addGhost(lastLine, t('↓ {0} no fim do arquivo', label));
 			}
 			index = end - 1;
 			continue;
@@ -428,7 +428,7 @@ function build(review: Review, document: vscode.TextDocument): Built {
 			built.modified.push({
 				range: lineRange(lineIndex),
 				hoverMessage: markdown(
-					`${head}**Linha modificada**\n\nAntes:\n${codeBlock(oldText, language)}\nDepois:\n${codeBlock(line.text, language)}`,
+					`${head}**${t('Linha modificada')}**\n\n${t('Antes:')}\n${codeBlock(oldText, language)}\n${t('Depois:')}\n${codeBlock(line.text, language)}`,
 				),
 			});
 			let offset = 0;
@@ -440,9 +440,9 @@ function build(review: Review, document: vscode.TextDocument): Built {
 				}
 				offset += segment.text.length;
 			}
-			addGhost(lineIndex, `antes: ${oldText.trim() || '(linha vazia)'}`);
+			addGhost(lineIndex, t('antes: {0}', oldText.trim() || t('(linha vazia)')));
 		} else {
-			built.added.push({ range: lineRange(lineIndex), hoverMessage: markdown(`${head}**Linha nova**`) });
+			built.added.push({ range: lineRange(lineIndex), hoverMessage: markdown(`${head}**${t('Linha nova')}**`) });
 		}
 	}
 
@@ -464,31 +464,31 @@ function build(review: Review, document: vscode.TextDocument): Built {
 			built.lenses.push(
 				new vscode.CodeLens(range, {
 					title: `$(sparkle) Claude: ${shortReason(review)}`,
-					tooltip: review.reason ?? 'Abrir o painel Mudanças',
+					tooltip: review.reason ?? t('Abrir o painel Mudanças'),
 					command: 'claude-code-launcher.showChanges',
 				}),
 				new vscode.CodeLens(range, {
-					title: '$(diff) Lado a lado',
+					title: '$(diff) ' + t('Lado a lado'),
 					command: 'claude-code-launcher.compareInline',
 					arguments: [review.first.id, review.last.id, review.file],
 				}),
 			);
 		} else {
 			built.lenses.push(new vscode.CodeLens(range, {
-				title: `$(sparkle) Claude · trecho ${group.index + 1} de ${groups.length}`,
+				title: '$(sparkle) ' + t('Claude · trecho {0} de {1}', group.index + 1, groups.length),
 				command: 'claude-code-launcher.showChanges',
 			}));
 		}
 		built.lenses.push(
 			new vscode.CodeLens(range, {
-				title: '$(check) Aceitar',
-				tooltip: 'Manter este trecho como o Claude deixou',
+				title: '$(check) ' + t('Aceitar'),
+				tooltip: t('Manter este trecho como o Claude deixou'),
 				command: 'claude-code-launcher.acceptChange',
 					arguments: [uri, group.index, signature, review.revision],
 			}),
 			new vscode.CodeLens(range, {
-				title: '$(close) Recusar',
-				tooltip: 'Voltar este trecho para o código de antes e salvar o arquivo',
+				title: '$(close) ' + t('Recusar'),
+				tooltip: t('Voltar este trecho para o código de antes e salvar o arquivo'),
 				command: 'claude-code-launcher.rejectChange',
 					arguments: [uri, group.index, signature, review.revision],
 			}),
@@ -496,13 +496,13 @@ function build(review: Review, document: vscode.TextDocument): Built {
 		if (group.index === 0 && groups.length > 1) {
 			built.lenses.push(
 				new vscode.CodeLens(range, {
-					title: `$(check-all) Aceitar tudo (${groups.length})`,
+					title: '$(check-all) ' + t('Aceitar tudo ({0})', groups.length),
 					command: 'claude-code-launcher.acceptAllChanges',
 						arguments: [uri, review.revision],
 				}),
 				new vscode.CodeLens(range, {
-					title: '$(discard) Recusar tudo',
-					tooltip: 'Voltar o arquivo inteiro para antes das edições do Claude e salvar',
+					title: '$(discard) ' + t('Recusar tudo'),
+					tooltip: t('Voltar o arquivo inteiro para antes das edições do Claude e salvar'),
 					command: 'claude-code-launcher.rejectAllChanges',
 						arguments: [uri, review.revision],
 				}),
@@ -527,8 +527,8 @@ function hoverHeader(review: Review): string {
 	const date = new Date(review.last.time);
 	const when = isNaN(date.getTime())
 		? ''
-		: ` · ${date.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
-	const what = review.ids.length > 1 ? `${review.ids.length} edições do Claude` : 'Edição do Claude';
+		: ` · ${date.toLocaleTimeString(htmlLanguage(), { hour: '2-digit', minute: '2-digit' })}`;
+	const what = review.ids.length > 1 ? t('{0} edições do Claude', review.ids.length) : t('Edição do Claude');
 	let text = `$(sparkle) **${what}**${when}\n\n`;
 	if (review.reason) {
 		text += `${truncate(review.reason, MAX_HOVER_REASON)
@@ -541,7 +541,7 @@ function hoverHeader(review: Review): string {
 
 function shortReason(review: Review): string {
 	if (!review.reason) {
-		return review.ids.length > 1 ? `${review.ids.length} edições neste arquivo` : 'alterou este arquivo';
+		return review.ids.length > 1 ? t('{0} edições neste arquivo', review.ids.length) : t('alterou este arquivo');
 	}
 	const firstLine = review.reason.split('\n').find((line) => line.trim()) ?? '';
 	return truncate(firstLine.replace(/[*_`#>]/g, '').trim(), MAX_LENS_REASON);

@@ -7,6 +7,7 @@ import { listSessionsAsync, sessionsDir } from './sessions';
 import { matchChatSessions, sessionsForTabLabel } from './logic';
 import { ManagedPreference, PreferenceManager } from './preferences';
 import { validateMessage } from './history';
+import { configureLanguage, htmlLanguage, resolveLanguage, t, webviewDictionaryScript } from './i18n';
 
 import { randomBytes } from 'crypto';
 
@@ -125,8 +126,8 @@ class LauncherViewProvider implements vscode.WebviewViewProvider, vscode.Disposa
 		const sessions = recent.map(({ aliases: _aliases, ...session }) => ({ ...session, open: openIds.has(session.id) }));
 		void view.webview.postMessage({
 			coverageMessage: results.some((result) => result.status === 'rejected')
-				? 'Lista parcial: não foi possível ler as conversas de uma das pastas.'
-				: listings.some((listing) => listing.partial) ? 'Lista parcial: o orçamento de leitura foi atingido. As conversas mais antigas podem não aparecer.' : null,
+				? t('Lista parcial: não foi possível ler as conversas de uma das pastas.')
+				: listings.some((listing) => listing.partial) ? t('Lista parcial: o orçamento de leitura foi atingido. As conversas mais antigas podem não aparecer.') : null,
 			type: 'state',
 			installed: isClaudeInstalled(),
 			hasFolder: folders.length > 0,
@@ -144,8 +145,9 @@ class LauncherViewProvider implements vscode.WebviewViewProvider, vscode.Disposa
 		const skillsStyle = webview.asWebviewUri(vscode.Uri.joinPath(media, 'skills.css'));
 		const base = webview.asWebviewUri(vscode.Uri.joinPath(media, 'base.css'));
 		const codicons = webview.asWebviewUri(vscode.Uri.joinPath(media, 'codicons', 'codicon.css'));
+		const l10n = webview.asWebviewUri(vscode.Uri.joinPath(media, 'l10n.js'));
 		return `<!DOCTYPE html>
-<html lang="pt-BR">
+<html lang="${htmlLanguage()}">
 <head>
 	<meta charset="UTF-8" />
 	<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; font-src ${webview.cspSource}; script-src 'nonce-${nonce}';" />
@@ -157,7 +159,9 @@ class LauncherViewProvider implements vscode.WebviewViewProvider, vscode.Disposa
 	<title>Claude Code</title>
 </head>
 <body>
-	<div id="root"><p class="loading muted"><span class="codicon codicon-loading codicon-modifier-spin"></span> Carregando…</p></div>
+	<div id="root"><p class="loading muted"><span class="codicon codicon-loading codicon-modifier-spin"></span> ${t('Carregando…')}</p></div>
+	${webviewDictionaryScript()}
+	<script nonce="${nonce}" src="${l10n}"></script>
 	<script nonce="${nonce}" src="${skillsScript}"></script>
 	<script nonce="${nonce}" src="${catalogScript}"></script>
 	<script nonce="${nonce}" src="${script}"></script>
@@ -230,6 +234,7 @@ let preferenceManager: PreferenceManager | undefined;
 const PREFERENCE_KEY = 'claudeCodeLauncher.managedPreferences.v1';
 
 export function activate(context: vscode.ExtensionContext): void {
+	applyLanguage(context);
 	const scope = vscode.workspace.workspaceFile?.toString() ?? (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.toString()).join('|');
 	preferenceManager = new PreferenceManager({
 		load: () => context.globalState.get<ManagedPreference[]>(PREFERENCE_KEY, []),
@@ -255,6 +260,7 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.commands.registerCommand('claude-code-launcher.openSidebar', () => openClaude('sidebar')),
 		vscode.commands.registerCommand('claude-code-launcher.openTab', () => openClaude('tab')),
 		vscode.commands.registerCommand('claude-code-launcher.install', () => installClaude()),
+		vscode.commands.registerCommand('claude-code-launcher.openWalkthrough', () => vscode.commands.executeCommand('workbench.action.openWalkthrough', `${context.extension.id}#gettingStarted`, false)),
 		vscode.extensions.onDidChange(() => provider?.refresh()),
 		vscode.commands.registerCommand('claude-code-launcher.newTab', () => openClaude('tab')),
 		vscode.commands.registerCommand('claude-code-launcher.refreshSessions', () => provider?.refresh(0)),
@@ -291,7 +297,7 @@ export function activate(context: vscode.ExtensionContext): void {
 	const statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
 	statusItem.name = 'Launcher for Claude Code';
 	statusItem.text = '$(comment-discussion) Claude';
-	statusItem.tooltip = 'Abrir o chat do Claude Code';
+	statusItem.tooltip = t('Abrir o chat do Claude Code');
 	statusItem.command = 'claude-code-launcher.openSidebar';
 	statusItem.show();
 	context.subscriptions.push(statusItem);
@@ -308,6 +314,23 @@ export function deactivate(): Promise<void> | undefined {
 	if (!controller) { return undefined; }
 	controller.dispose();
 	return controller.whenDisposed();
+}
+
+/**
+ * Idioma da interface: `claudeCodeLauncher.language`, ou o do editor com "auto". As páginas das views
+ * recebem o dicionário ao serem criadas, por isso a troca pede para recarregar a janela.
+ */
+function applyLanguage(context: vscode.ExtensionContext): void {
+	const preference = () => vscode.workspace.getConfiguration('claudeCodeLauncher').get<string>('language', 'auto');
+	configureLanguage(resolveLanguage(vscode.env?.language, preference()), context.extensionPath);
+	context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((event) => {
+		if (!event.affectsConfiguration('claudeCodeLauncher.language')) { return; }
+		configureLanguage(resolveLanguage(vscode.env?.language, preference()), context.extensionPath);
+		const reload = t('Recarregar janela');
+		void vscode.window.showInformationMessage(t('O novo idioma vale por completo depois de recarregar a janela.'), reload).then((choice) => {
+			if (choice === reload) { void vscode.commands.executeCommand('workbench.action.reloadWindow'); }
+		});
+	}));
 }
 
 function isClaudeInstalled(): boolean {
@@ -376,19 +399,19 @@ async function bounded<T>(work: Thenable<T>, milliseconds: number, code: string)
 function reportLaunchError(error: unknown): void {
 	const text = error instanceof Error ? error.message : String(error);
 	const explanations: Record<string, string> = {
-		missingExtension: 'A extensão oficial não está disponível nesta janela. Instale-a ou recarregue a janela.',
-		activationTimeout: 'A extensão oficial não terminou de iniciar no prazo. Consulte a saída do Claude Code antes de tentar novamente.',
-		commandTimeout: 'O comando não respondeu no prazo. Ele ainda pode concluir; confira o Claude Code antes de repetir a abertura.',
-		tabTimeout: 'O comando foi enviado, mas não confirmei uma aba nova ou ativada. Confira a aba existente, o login e a saída do Claude Code.',
-		uriDenied: 'O editor não aceitou a abertura do endereço do Claude Code.',
-		unsupportedUri: 'Este editor não informou um protocolo de abertura compatível.',
-		sidebarUnavailable: 'Esta versão da extensão oficial não disponibilizou um comando conhecido para a barra lateral.',
+		missingExtension: t('A extensão oficial não está disponível nesta janela. Instale-a ou recarregue a janela.'),
+		activationTimeout: t('A extensão oficial não terminou de iniciar no prazo. Consulte a saída do Claude Code antes de tentar novamente.'),
+		commandTimeout: t('O comando não respondeu no prazo. Ele ainda pode concluir; confira o Claude Code antes de repetir a abertura.'),
+		tabTimeout: t('O comando foi enviado, mas não confirmei uma aba nova ou ativada. Confira a aba existente, o login e a saída do Claude Code.'),
+		uriDenied: t('O editor não aceitou a abertura do endereço do Claude Code.'),
+		unsupportedUri: t('Este editor não informou um protocolo de abertura compatível.'),
+		sidebarUnavailable: t('Esta versão da extensão oficial não disponibilizou um comando conhecido para a barra lateral.'),
 	};
 	const detail = error instanceof LaunchError ? explanations[error.code]
 		: /auth|login|sign.?in|unauthori[sz]ed|401/i.test(text)
-			? 'A extensão oficial solicitou autenticação. Faça login no Claude Code e tente novamente.'
-			: 'A extensão oficial não concluiu a abertura. Consulte o canal de saída do Claude Code para os detalhes.';
-	void vscode.window.showErrorMessage(`Não foi possível confirmar a abertura do Claude Code. ${detail}`);
+			? t('A extensão oficial solicitou autenticação. Faça login no Claude Code e tente novamente.')
+			: t('A extensão oficial não concluiu a abertura. Consulte o canal de saída do Claude Code para os detalhes.');
+	void vscode.window.showErrorMessage(t('Não foi possível confirmar a abertura do Claude Code. {0}', detail));
 }
 
 /**
@@ -413,15 +436,12 @@ async function keepNewSessionsInTabs(): Promise<void> {
 }
 
 async function promptInstall(): Promise<boolean> {
-	const choice = await vscode.window.showInformationMessage(
-		'O chat do Claude Code vem da extensão oficial da Anthropic.',
-		'Instalar',
-		'Ver na loja',
-	);
-	if (choice === 'Instalar') {
+	const install = t('Instalar'), store = t('Ver na loja');
+	const choice = await vscode.window.showInformationMessage(t('O chat do Claude Code vem da extensão oficial da Anthropic.'), install, store);
+	if (choice === install) {
 		return installClaude();
 	}
-	if (choice === 'Ver na loja') {
+	if (choice === store) {
 		await vscode.commands.executeCommand('workbench.extensions.search', CLAUDE_EXTENSION_ID);
 	}
 	return false;
@@ -432,7 +452,7 @@ async function installClaude(): Promise<boolean> {
 		await vscode.window.withProgress(
 			{
 				location: vscode.ProgressLocation.Notification,
-				title: 'Instalando Claude Code…',
+				title: t('Instalando Claude Code…'),
 			},
 			async () => {
 				await vscode.commands.executeCommand(
@@ -443,11 +463,9 @@ async function installClaude(): Promise<boolean> {
 		);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
-		const choice = await vscode.window.showErrorMessage(
-			`Não foi possível instalar o Claude Code: ${message}`,
-			'Ver na loja',
-		);
-		if (choice === 'Ver na loja') {
+		const store = t('Ver na loja');
+		const choice = await vscode.window.showErrorMessage(t('Não foi possível instalar o Claude Code: {0}', message), store);
+		if (choice === store) {
 			await vscode.commands.executeCommand('workbench.extensions.search', CLAUDE_EXTENSION_ID);
 		}
 		return false;
@@ -457,7 +475,7 @@ async function installClaude(): Promise<boolean> {
 	provider?.refresh();
 	if (!extension) {
 		void vscode.window.showInformationMessage(
-			'Claude Code foi solicitado. Se o chat não abrir, recarregue a janela e use o botão de novo.',
+			t('Claude Code foi solicitado. Se o chat não abrir, recarregue a janela e use o botão de novo.'),
 		);
 		return false;
 	}
@@ -647,7 +665,7 @@ async function configureManagement(): Promise<void> {
 		if (!manageEditorGroups()) { await preferenceManager?.restore(); return; }
 		await keepNewSessionsInTabs();
 		await keepClaudeGroupFreeOfFiles();
-	} catch { void vscode.window.showWarningMessage('Não foi possível atualizar as preferências de organização. Seus valores atuais foram preservados quando possível.'); }
+	} catch { void vscode.window.showWarningMessage(t('Não foi possível atualizar as preferências de organização. Seus valores atuais foram preservados quando possível.')); }
 }
 
 function createNonce(): string {
@@ -693,7 +711,8 @@ function localFolders(): string[] {
 function watchSessions(context: vscode.ExtensionContext): void {
 	let watchers: vscode.Disposable[] = [];
 	// O título gerado chega ao transcript depois de aparecer na aba: refaz também a conversa em foco.
-	const refresh = () => { provider?.refresh(1500); scheduleActiveChat(1500); };
+	// Os comandos de terminal da conversa também vêm do transcript.
+	const refresh = () => { provider?.refresh(1500); scheduleActiveChat(1500); changes?.refreshShellActivity(); };
 	const setup = () => {
 		watchers.forEach((watcher) => watcher.dispose());
 		watchers = [];

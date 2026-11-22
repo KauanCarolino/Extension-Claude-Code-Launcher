@@ -1,9 +1,10 @@
 // Aba de skills, desenhada dentro da view do launcher (mesma página das conversas: a troca é instantânea).
 // Tudo é montado com textContent: nada vindo de SKILL.md vira HTML.
 (function () {
-	const LABELS = { all: 'Todas', project: 'Projeto', global: 'Global', claudeai: 'claude.ai' };
-	const TITLES = { project: 'Projeto', global: 'Global', claudeai: 'claude.ai' };
-	const BADGES = { project: 'projeto', global: 'global', claudeai: 'claude.ai' };
+	const { t, plural } = window.launcherL10n;
+	const LABELS = { all: t('Todas'), project: t('Projeto'), global: t('Global'), claudeai: 'claude.ai' };
+	const TITLES = { project: t('Projeto'), global: t('Global'), claudeai: 'claude.ai' };
+	const BADGES = { project: t('projeto'), global: t('global'), claudeai: 'claude.ai' };
 	let filter = 'all';
 	let query = '';
 
@@ -26,12 +27,12 @@
 	window.renderSkills = function (host, state, send) {
 		const wrap = el('div', 'sk-fade');
 		const bar = el('div', 'sk-bar');
-		const input = el('input'); input.type = 'search'; input.placeholder = 'Buscar skills…'; input.value = query;
+		const input = el('input'); input.type = 'search'; input.placeholder = t('Buscar skills…'); input.value = query;
 		input.dataset.focusKey = 'sk-query';
-		input.setAttribute('aria-label', 'Buscar skills');
+		input.setAttribute('aria-label', t('Buscar skills'));
 		const list = el('div');
 		input.addEventListener('input', () => { query = input.value; renderList(); });
-		bar.append(input, iconBtn('refresh', 'Atualizar', () => send('skills.refresh')));
+		bar.append(input, iconBtn('refresh', t('Atualizar'), () => send('skills.refresh')));
 		const filters = el('div', 'sk-filters');
 		for (const key of Object.keys(LABELS)) {
 			const b = el('button', 'sk-filter', LABELS[key]); b.type = 'button';
@@ -49,13 +50,13 @@
 
 		function renderList() {
 			list.textContent = '';
-			if (!state) { list.appendChild(el('div', 'sk-empty', 'Carregando…')); return; }
+			if (!state) { list.appendChild(el('div', 'sk-empty', t('Carregando…'))); return; }
 			const q = query.trim().toLowerCase();
 			const items = state.skills.filter((s) => (filter === 'all' || s.scope === filter) &&
 				(!q || s.name.toLowerCase().includes(q) || s.description.toLowerCase().includes(q)));
-			list.appendChild(el('div', 'sk-count', items.length + (items.length === 1 ? ' skill' : ' skills')));
+			list.appendChild(el('div', 'sk-count', plural(items.length, '{0} skill', '{0} skills')));
 			if (!items.length) {
-				list.appendChild(el('div', 'sk-empty', state.skills.length ? 'Nenhuma skill encontrada.' : 'Nenhuma skill instalada.'));
+				list.appendChild(el('div', 'sk-empty', state.skills.length ? t('Nenhuma skill encontrada.') : t('Nenhuma skill instalada.')));
 			}
 			for (const scope of ['project', 'global', 'claudeai']) {
 				const group = items.filter((s) => s.scope === scope);
@@ -63,7 +64,7 @@
 				if (!group.length && !(canCreate && filter === scope)) { continue; }
 				const head = el('div', 'sk-group', TITLES[scope]);
 				if (canCreate) {
-					const add = el('button', 'sk-new', '+ Nova'); add.type = 'button';
+					const add = el('button', 'sk-new', t('+ Nova')); add.type = 'button';
 					add.addEventListener('click', () => send('skills.create', { key: scope }));
 					head.appendChild(add);
 				}
@@ -75,23 +76,28 @@
 		function row(s) {
 			const r = el('div', 'sk-skill' + (s.state === 'disabled' ? ' disabled' : ''));
 			const head = el('div', 'sk-head');
-			const name = el('button', 'sk-name', s.name); name.type = 'button'; name.title = 'Abrir SKILL.md';
+			const name = el('button', 'sk-name', s.name); name.type = 'button'; name.title = t('Abrir SKILL.md');
 			name.disabled = s.state === 'broken';
 			name.addEventListener('click', () => send('skills.open', { id: s.id }));
 			head.appendChild(name);
-			if (s.state === 'disabled') { head.appendChild(el('span', 'sk-badge off', 'desativada')); }
-			if (s.state === 'broken') { head.appendChild(el('span', 'sk-badge broken', 'sem SKILL.md')); }
+			if (s.state === 'disabled') { head.appendChild(el('span', 'sk-badge off', t('desativada'))); }
+			if (s.state === 'broken') { head.appendChild(el('span', 'sk-badge broken', t('sem SKILL.md'))); }
 			head.appendChild(el('span', 'sk-badge ' + s.scope, BADGES[s.scope]));
+			if (s.folder) {
+				const f = el('span', 'sk-badge', s.folder);
+				f.title = t('Pasta do workspace');
+				head.appendChild(f);
+			}
 			r.appendChild(head);
 			if (s.description) { r.appendChild(el('p', 'sk-desc', s.description)); }
 			const actions = el('div', 'sk-actions');
-			actions.appendChild(iconBtn('folder-opened', 'Mostrar pasta', () => send('skills.reveal', { id: s.id })));
+			actions.appendChild(iconBtn('folder-opened', t('Mostrar pasta'), () => send('skills.reveal', { id: s.id })));
 			if (s.scope !== 'claudeai') {
 				if (s.state !== 'broken') {
 					const off = s.state === 'disabled';
-					actions.appendChild(iconBtn(off ? 'check' : 'circle-slash', off ? 'Ativar' : 'Desativar', () => send('skills.toggle', { id: s.id })));
+					actions.appendChild(iconBtn(off ? 'check' : 'circle-slash', off ? t('Ativar') : t('Desativar'), () => send('skills.toggle', { id: s.id })));
 				}
-				actions.appendChild(iconBtn('trash', 'Excluir', () => send('skills.delete', { id: s.id })));
+				actions.appendChild(iconBtn('trash', t('Excluir'), () => send('skills.delete', { id: s.id })));
 			}
 			r.appendChild(actions);
 			return r;

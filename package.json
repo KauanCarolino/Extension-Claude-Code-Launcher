@@ -1,8 +1,8 @@
 {
   "name": "launcher-for-claude-code",
   "displayName": "Launcher for Claude Code",
-  "description": "Abre o chat oficial do Claude Code e mostra, de forma didática, o que ele mudou em cada arquivo. Extensão independente: não é um produto da Anthropic.",
-  "version": "1.1.0",
+  "description": "%extension.description%",
+  "version": "1.2.0",
   "publisher": "KauanDeveloper",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -12,7 +12,11 @@
     "launcher",
     "revisão de mudanças",
     "diff",
-    "code review"
+    "code review",
+    "review",
+    "changes",
+    "accept",
+    "reject"
   ],
   "repository": {
     "type": "git",
@@ -41,195 +45,201 @@
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": false,
-      "description": "A revisão pode restaurar arquivos e configurar hooks locais. Confie no workspace para habilitar o launcher."
+      "description": "%capabilities.untrustedWorkspaces%"
     },
     "virtualWorkspaces": {
       "supported": "limited",
-      "description": "A revisão e o registro de mudanças exigem pastas no disco local. A abertura do chat depende do suporte da extensão oficial a esse tipo de workspace."
+      "description": "%capabilities.virtualWorkspaces%"
     }
   },
   "contributes": {
     "commands": [
       {
         "command": "claude-code-launcher.openSidebar",
-        "title": "Abrir chat na barra lateral",
+        "title": "%command.openSidebar%",
         "category": "Launcher for Claude Code",
         "icon": "$(layout-sidebar-right)"
       },
       {
         "command": "claude-code-launcher.openTab",
-        "title": "Abrir chat em nova aba",
+        "title": "%command.openTab%",
         "category": "Launcher for Claude Code",
         "icon": "$(open-preview)"
       },
       {
         "command": "claude-code-launcher.install",
-        "title": "Instalar Claude Code",
+        "title": "%command.install%",
         "category": "Launcher for Claude Code"
       },
       {
         "command": "claude-code-launcher.showChanges",
-        "title": "Mostrar mudanças do Claude",
+        "title": "%command.showChanges%",
         "category": "Launcher for Claude Code",
         "icon": "$(screen-full)"
       },
       {
         "command": "claude-code-launcher.enableChangeLog",
-        "title": "Ativar registro de mudanças",
+        "title": "%command.enableChangeLog%",
         "category": "Launcher for Claude Code",
         "icon": "$(record)"
       },
       {
         "command": "claude-code-launcher.disableChangeLog",
-        "title": "Desligar registro de mudanças",
+        "title": "%command.disableChangeLog%",
         "category": "Launcher for Claude Code",
         "icon": "$(debug-pause)"
       },
       {
         "command": "claude-code-launcher.clearChanges",
-        "title": "Limpar histórico revisado",
+        "title": "%command.clearChanges%",
         "category": "Launcher for Claude Code",
         "icon": "$(trash)"
       },
       {
         "command": "claude-code-launcher.clearAllReviewData",
-        "title": "Apagar todos os dados locais de revisão",
+        "title": "%command.clearAllReviewData%",
         "category": "Launcher for Claude Code",
         "icon": "$(clear-all)"
       },
       {
         "command": "claude-code-launcher.releaseReviewWriter",
-        "title": "Liberar revisão para outra janela",
+        "title": "%command.releaseReviewWriter%",
         "category": "Launcher for Claude Code",
         "icon": "$(unlock)"
       },
       {
         "command": "claude-code-launcher.recoverReviewWriter",
-        "title": "Recuperar revisão bloqueada",
+        "title": "%command.recoverReviewWriter%",
         "category": "Launcher for Claude Code",
         "icon": "$(lock)"
       },
       {
         "command": "claude-code-launcher.toggleInlineChanges",
-        "title": "Ligar/desligar marcas das mudanças no código",
+        "title": "%command.toggleInlineChanges%",
         "category": "Launcher for Claude Code"
       },
       {
         "command": "claude-code-launcher.hideInlineChanges",
-        "title": "Ocultar marcas (aceita as mudanças do Claude neste arquivo)",
+        "title": "%command.hideInlineChanges%",
         "category": "Launcher for Claude Code"
       },
       {
         "command": "claude-code-launcher.showInlineChanges",
-        "title": "Ver mudança no código",
+        "title": "%command.showInlineChanges%",
         "category": "Launcher for Claude Code"
       },
       {
         "command": "claude-code-launcher.compareInline",
-        "title": "Comparar lado a lado",
+        "title": "%command.compareInline%",
         "category": "Launcher for Claude Code"
       },
       {
         "command": "claude-code-launcher.newTab",
-        "title": "Nova conversa em aba",
+        "title": "%command.newTab%",
         "category": "Launcher for Claude Code",
         "icon": "$(add)"
       },
       {
         "command": "claude-code-launcher.acceptAllChanges",
-        "title": "Aceitar todas as mudanças do Claude neste arquivo",
+        "title": "%command.acceptAllChanges%",
         "category": "Launcher for Claude Code"
       },
       {
         "command": "claude-code-launcher.rejectAllChanges",
-        "title": "Recusar todas as mudanças do Claude neste arquivo",
+        "title": "%command.rejectAllChanges%",
         "category": "Launcher for Claude Code"
       },
       {
         "command": "claude-code-launcher.acceptEverything",
-        "title": "Aceitar todas as mudanças pendentes do Claude",
+        "title": "%command.acceptEverything%",
         "category": "Launcher for Claude Code",
         "icon": "$(check-all)"
       },
       {
         "command": "claude-code-launcher.rejectEverything",
-        "title": "Recusar todas as mudanças pendentes do Claude",
+        "title": "%command.rejectEverything%",
         "category": "Launcher for Claude Code",
         "icon": "$(close-all)"
       },
       {
         "command": "claude-code-launcher.undoReject",
-        "title": "Desfazer a última recusa",
+        "title": "%command.undoReject%",
         "category": "Launcher for Claude Code",
         "icon": "$(discard)"
       },
       {
         "command": "claude-code-launcher.nextChange",
-        "title": "Próxima mudança do Claude",
+        "title": "%command.nextChange%",
         "category": "Launcher for Claude Code"
       },
       {
         "command": "claude-code-launcher.previousChange",
-        "title": "Mudança anterior do Claude",
+        "title": "%command.previousChange%",
         "category": "Launcher for Claude Code"
       },
       {
         "command": "claude-code-launcher.acceptChange",
-        "title": "Aceitar trecho",
+        "title": "%command.acceptChange%",
         "category": "Launcher for Claude Code"
       },
       {
         "command": "claude-code-launcher.rejectChange",
-        "title": "Recusar trecho",
+        "title": "%command.rejectChange%",
         "category": "Launcher for Claude Code"
       },
       {
         "command": "claude-code-launcher.refreshChanges",
-        "title": "Atualizar mudanças",
+        "title": "%command.refreshChanges%",
         "category": "Launcher for Claude Code",
         "icon": "$(refresh)"
       },
       {
         "command": "claude-code-launcher.refreshSessions",
-        "title": "Atualizar conversas",
+        "title": "%command.refreshSessions%",
         "category": "Launcher for Claude Code",
         "icon": "$(refresh)"
       },
       {
         "command": "claude-code-launcher.skills.refresh",
-        "title": "Atualizar skills",
+        "title": "%command.skills.refresh%",
         "category": "Launcher for Claude Code",
         "icon": "$(refresh)"
       },
       {
         "command": "claude-code-launcher.showSkills",
-        "title": "Mostrar skills",
+        "title": "%command.showSkills%",
         "category": "Launcher for Claude Code",
         "icon": "$(sparkle)"
       },
       {
         "command": "claude-code-launcher.showChats",
-        "title": "Mostrar conversas e mudanças",
+        "title": "%command.showChats%",
         "category": "Launcher for Claude Code",
         "icon": "$(comment-discussion)"
       },
       {
         "command": "claude-code-launcher.showRules",
-        "title": "Mostrar regras (CLAUDE.md e .claude/rules)",
+        "title": "%command.showRules%",
         "category": "Launcher for Claude Code",
         "icon": "$(law)"
       },
       {
         "command": "claude-code-launcher.showAgents",
-        "title": "Mostrar agentes",
+        "title": "%command.showAgents%",
         "category": "Launcher for Claude Code",
         "icon": "$(hubot)"
       },
       {
         "command": "claude-code-launcher.showMcp",
-        "title": "Mostrar servidores MCP",
+        "title": "%command.showMcp%",
         "category": "Launcher for Claude Code",
         "icon": "$(plug)"
+      },
+      {
+        "command": "claude-code-launcher.openWalkthrough",
+        "title": "%command.openWalkthrough%",
+        "category": "Launcher for Claude Code",
+        "icon": "$(book)"
       }
     ],
     "menus": {
@@ -309,6 +319,11 @@
           "command": "claude-code-launcher.clearAllReviewData",
           "when": "view == claude-code-launcher.changes",
           "group": "3_log@3"
+        },
+        {
+          "command": "claude-code-launcher.openWalkthrough",
+          "when": "view == claude-code-launcher.home",
+          "group": "9_help@1"
         }
       ],
       "commandPalette": [
@@ -351,7 +366,7 @@
     "colors": [
       {
         "id": "claudeCodeLauncher.pendingChangeForeground",
-        "description": "Cor dos arquivos com mudanças do Claude para revisar, no Explorer.",
+        "description": "%color.pendingChangeForeground%",
         "defaults": {
           "dark": "#d98c5f",
           "light": "#b5592a",
@@ -379,7 +394,7 @@
         {
           "type": "webview",
           "id": "claude-code-launcher.changes",
-          "name": "Mudanças",
+          "name": "%view.changes%",
           "when": "!claudeCodeLauncher.panel || claudeCodeLauncher.panel == 'chats'"
         }
       ]
@@ -390,12 +405,12 @@
         "claudeCodeLauncher.inlineChanges": {
           "type": "boolean",
           "default": true,
-          "description": "Mostra a revisão das mudanças do Claude no editor, preservando decisões parciais e bloqueando ações quando houver conflito."
+          "description": "%config.inlineChanges%"
         },
         "claudeCodeLauncher.manageEditorGroups": {
           "type": "boolean",
           "default": false,
-          "description": "Permite ao launcher organizar os grupos do chat e gerir suas preferências de abertura. Ao desligar, restaura somente valores que continuem iguais aos definidos pelo launcher."
+          "description": "%config.manageEditorGroups%"
         },
         "claudeCodeLauncher.hookExecutionMode": {
           "type": "string",
@@ -407,11 +422,11 @@
           ],
           "default": "auto",
           "enumDescriptions": [
-            "Ativa hooks somente quando o Claude Code selecionado declara suporte a executável e argumentos separados.",
-            "Usa executável e argumentos separados após você confirmar que sua versão do Claude Code suporta esse formato.",
-            "Desativa a instalação e execução dos hooks geridos pelo launcher."
+            "%config.hookExecutionMode.auto%",
+            "%config.hookExecutionMode.exec%",
+            "%config.hookExecutionMode.disabled%"
           ],
-          "description": "Formato de execução do registro de mudanças. Versões sem suporte confirmado permanecem desativadas; não há alternativa automática via shell. Vale para a máquina: as configurações de um projeto não alteram esta opção."
+          "description": "%config.hookExecutionMode%"
         },
         "claudeCodeLauncher.historyExcludedPatterns": {
           "type": "array",
@@ -432,29 +447,109 @@
             "**/id_ed25519",
             "**/credentials.json"
           ],
-          "description": "Padrões de caminhos excluídos de novas cópias de conteúdo no histórico local. Os padrões definidos no projeto somam-se aos do usuário e não os substituem. Alterar a lista não apaga cópias já existentes."
+          "description": "%config.historyExcludedPatterns%"
         },
         "claudeCodeLauncher.historyRetentionDays": {
           "type": "integer",
           "minimum": 0,
           "maximum": 3650,
           "default": 30,
-          "description": "Retenção do histórico já revisado, em dias. Zero desativa a limpeza por idade. Pendências e dados necessários à recuperação são preservados."
+          "description": "%config.historyRetentionDays%"
         },
         "claudeCodeLauncher.historyMaxStorageMB": {
           "type": "integer",
           "minimum": 16,
           "maximum": 2048,
           "default": 128,
-          "description": "Limite de armazenamento local do histórico em MiB. Ao atingir o limite, novas capturas são suspensas sem apagar revisões pendentes."
+          "description": "%config.historyMaxStorageMB%"
+        },
+        "claudeCodeLauncher.language": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "en",
+            "pt-br"
+          ],
+          "default": "auto",
+          "enumDescriptions": [
+            "%config.language.auto%",
+            "%config.language.en%",
+            "%config.language.pt-br%"
+          ],
+          "description": "%config.language%"
         }
       }
-    }
+    },
+    "walkthroughs": [
+      {
+        "id": "gettingStarted",
+        "title": "%walkthrough.title%",
+        "description": "%walkthrough.description%",
+        "steps": [
+          {
+            "id": "install",
+            "title": "%walkthrough.install.title%",
+            "description": "%walkthrough.install.description%",
+            "media": {
+              "markdown": "%walkthrough.install.media%"
+            },
+            "completionEvents": [
+              "onExtensionInstalled:anthropic.claude-code"
+            ]
+          },
+          {
+            "id": "openFolder",
+            "title": "%walkthrough.openFolder.title%",
+            "description": "%walkthrough.openFolder.description%",
+            "media": {
+              "markdown": "%walkthrough.openFolder.media%"
+            },
+            "completionEvents": [
+              "onContext:workspaceFolderCount != 0"
+            ]
+          },
+          {
+            "id": "enableChangeLog",
+            "title": "%walkthrough.enableChangeLog.title%",
+            "description": "%walkthrough.enableChangeLog.description%",
+            "media": {
+              "markdown": "%walkthrough.enableChangeLog.media%"
+            },
+            "completionEvents": [
+              "onContext:claudeCodeLauncher.changeLogEnabled"
+            ]
+          },
+          {
+            "id": "newChat",
+            "title": "%walkthrough.newChat.title%",
+            "description": "%walkthrough.newChat.description%",
+            "media": {
+              "markdown": "%walkthrough.newChat.media%"
+            },
+            "completionEvents": [
+              "onCommand:claude-code-launcher.newTab"
+            ]
+          },
+          {
+            "id": "review",
+            "title": "%walkthrough.review.title%",
+            "description": "%walkthrough.review.description%",
+            "media": {
+              "markdown": "%walkthrough.review.media%"
+            },
+            "completionEvents": [
+              "onCommand:claude-code-launcher.showChanges",
+              "onView:claude-code-launcher.changes"
+            ]
+          }
+        ]
+      }
+    ]
   },
   "scripts": {
     "compile": "node scripts/build.cjs",
-    "typecheck": "tsc -p ./ --noEmit",
-    "lint": "eslint src",
+    "typecheck": "tsc -p ./ --noEmit && tsc -p tsconfig.hooks.json && tsc -p tsconfig.webview.json",
+    "lint": "eslint src hooks media",
     "watch": "tsc -watch -p ./",
     "test": "npm run compile && node --test \"test/*.test.js\"",
     "vscode:prepublish": "npm run compile",

@@ -1,30 +1,31 @@
 // Abas de regras, agentes e MCP, desenhadas dentro da view do launcher, no mesmo formato da aba de skills.
 // Tudo é montado com textContent: nada vindo dos arquivos vira HTML.
 (function () {
+	const { t, plural } = window.launcherL10n;
 	const KINDS = {
 		rules: {
-			one: 'regra', many: 'regras', search: 'Buscar regras…', all: 'Todas', fem: true,
-			empty: 'Nenhum CLAUDE.md ou regra encontrado.',
-			scopes: { project: 'Projeto', global: 'Global', managed: 'Organização' },
-			creatable: ['project', 'global'], open: 'Abrir arquivo',
+			count: (n) => plural(n, '{0} regra', '{0} regras'), search: t('Buscar regras…'), all: t('Todas'), add: t('+ Nova'),
+			disabled: t('desativada'), empty: t('Nenhum CLAUDE.md ou regra encontrado.'),
+			scopes: { project: t('Projeto'), global: t('Global'), managed: t('Organização') },
+			creatable: ['project', 'global'], open: t('Abrir arquivo'),
 		},
 		agents: {
-			one: 'agente', many: 'agentes', search: 'Buscar agentes…', all: 'Todos',
-			empty: 'Nenhum agente instalado.',
-			scopes: { project: 'Projeto', global: 'Global' },
-			creatable: ['project', 'global'], open: 'Abrir arquivo do agente',
+			count: (n) => plural(n, '{0} agente', '{0} agentes'), search: t('Buscar agentes…'), all: t('Todos'), add: t('+ Novo'),
+			disabled: t('desativado'), empty: t('Nenhum agente instalado.'),
+			scopes: { project: t('Projeto'), global: t('Global') },
+			creatable: ['project', 'global'], open: t('Abrir arquivo do agente'),
 		},
 		mcp: {
-			one: 'servidor', many: 'servidores', search: 'Buscar servidores MCP…', all: 'Todos',
-			empty: 'Nenhum servidor MCP configurado.',
-			scopes: { local: 'Local', project: 'Projeto', user: 'Usuário', managed: 'Organização' },
+			count: (n) => plural(n, '{0} servidor', '{0} servidores'), search: t('Buscar servidores MCP…'), all: t('Todos'), add: t('+ Novo'),
+			disabled: t('desativado'), empty: t('Nenhum servidor MCP configurado.'),
+			scopes: { local: t('Local'), project: t('Projeto'), user: t('Usuário'), managed: t('Organização') },
 			hints: {
-				local: 'Só você, neste projeto (~/.claude.json). Gerencie pelo /mcp ou por claude mcp.',
-				project: 'Compartilhado pelo repositório (.mcp.json).',
-				user: 'Todos os seus projetos (~/.claude.json). Gerencie pelo /mcp ou por claude mcp.',
-				managed: 'Definido pela organização (managed-mcp.json).',
+				local: t('Só você, neste projeto (~/.claude.json). Gerencie pelo /mcp ou por claude mcp.'),
+				project: t('Compartilhado pelo repositório (.mcp.json).'),
+				user: t('Todos os seus projetos (~/.claude.json). Gerencie pelo /mcp ou por claude mcp.'),
+				managed: t('Definido pela organização (managed-mcp.json).'),
 			},
-			creatable: ['project'], open: 'Abrir a configuração na entrada do servidor',
+			creatable: ['project'], open: t('Abrir a configuração na entrada do servidor'),
 		},
 	};
 	const ui = {};
@@ -45,10 +46,9 @@
 	}
 
 	function stateBadge(kind, item) {
-		const fem = KINDS[kind].fem;
-		if (item.state === 'disabled') { return el('span', 'sk-badge off', fem ? 'desativada' : 'desativado'); }
-		if (item.state === 'pending') { return el('span', 'sk-badge off', 'pendente'); }
-		if (item.state === 'broken') { return el('span', 'sk-badge broken', kind === 'mcp' ? 'com erro' : 'link quebrado'); }
+		if (item.state === 'disabled') { return el('span', 'sk-badge off', KINDS[kind].disabled); }
+		if (item.state === 'pending') { return el('span', 'sk-badge off', t('pendente')); }
+		if (item.state === 'broken') { return el('span', 'sk-badge broken', kind === 'mcp' ? t('com erro') : t('link quebrado')); }
 		return null;
 	}
 
@@ -64,7 +64,7 @@
 		const filters = el('div', 'sk-filters');
 		const list = el('div');
 		input.addEventListener('input', () => { view.query = input.value; renderList(); });
-		bar.append(input, iconBtn('refresh', 'Atualizar', () => send(kind + '.refresh')));
+		bar.append(input, iconBtn('refresh', t('Atualizar'), () => send(kind + '.refresh')));
 		wrap.append(bar, filters, list);
 		host.appendChild(wrap);
 		renderFilters();
@@ -98,7 +98,7 @@
 
 		function renderList() {
 			list.textContent = '';
-			if (!state) { list.appendChild(el('div', 'sk-empty', 'Carregando…')); return; }
+			if (!state) { list.appendChild(el('div', 'sk-empty', t('Carregando…'))); return; }
 			for (const problem of state.problems || []) {
 				const box = el('div', 'hint-box notice');
 				const icon = el('span', 'codicon codicon-warning'); icon.setAttribute('aria-hidden', 'true');
@@ -106,13 +106,13 @@
 				list.appendChild(box);
 			}
 			if (state.managedPolicy) {
-				list.appendChild(el('p', 'sk-note', 'Há um managed-mcp.json: a política da organização pode limitar os outros servidores.'));
+				list.appendChild(el('p', 'sk-note', t('Há um managed-mcp.json: a política da organização pode limitar os outros servidores.')));
 			}
 			const q = view.query.trim().toLowerCase();
 			const items = state.items.filter((i) => (view.filter === 'all' || i.scope === view.filter) && matches(i, q));
-			list.appendChild(el('div', 'sk-count', items.length + ' ' + (items.length === 1 ? conf.one : conf.many)));
+			list.appendChild(el('div', 'sk-count', conf.count(items.length)));
 			if (!items.length) {
-				list.appendChild(el('div', 'sk-empty', state.items.length ? 'Nada encontrado.' : conf.empty));
+				list.appendChild(el('div', 'sk-empty', state.items.length ? t('Nada encontrado.') : conf.empty));
 			}
 			for (const scope of Object.keys(conf.scopes)) {
 				const group = items.filter((i) => i.scope === scope);
@@ -120,7 +120,7 @@
 				if (!group.length && !(canCreate && view.filter === scope)) { continue; }
 				const head = el('div', 'sk-group', conf.scopes[scope]);
 				if (canCreate) {
-					const add = el('button', 'sk-new', conf.fem ? '+ Nova' : '+ Novo'); add.type = 'button';
+					const add = el('button', 'sk-new', conf.add); add.type = 'button';
 					add.addEventListener('click', () => send(kind + '.create', { key: scope }));
 					head.appendChild(add);
 				}
@@ -142,30 +142,35 @@
 			const badge = stateBadge(kind, item);
 			if (badge) { head.appendChild(badge); }
 			if (item.shadowed) {
-				const s = el('span', 'sk-badge off', 'sobreposto');
-				s.title = kind === 'agents' ? 'Um agente do projeto com o mesmo nome tem prioridade.' : (item.note || '');
+				const s = el('span', 'sk-badge off', t('sobreposto'));
+				s.title = kind === 'agents' ? t('Um agente do projeto com o mesmo nome tem prioridade.') : (item.note || '');
 				head.appendChild(s);
+			}
+			if (item.folder) {
+				const f = el('span', 'sk-badge', item.folder);
+				f.title = t('Pasta do workspace');
+				head.appendChild(f);
 			}
 			if (item.model) { head.appendChild(el('span', 'sk-badge', item.model)); }
 			if (item.transport) { head.appendChild(el('span', 'sk-badge', item.transport)); }
 			r.appendChild(head);
 			if (item.description) { r.appendChild(el('p', 'sk-desc', item.description)); }
 			if (item.paths && item.paths.length) {
-				const meta = el('p', 'sk-meta', 'Aplica-se a: ' + item.paths.join(', '));
+				const meta = el('p', 'sk-meta', t('Aplica-se a: {0}', item.paths.join(', ')));
 				meta.title = item.paths.join('\n');
 				r.appendChild(meta);
 			}
 			if (item.target) { r.appendChild(el('p', 'sk-meta', item.target)); }
 			if (kind === 'mcp' && item.note && item.state !== 'active') { r.appendChild(el('p', 'sk-desc', item.note)); }
 			const actions = el('div', 'sk-actions');
-			actions.appendChild(iconBtn('folder-opened', 'Mostrar no sistema', () => send(kind + '.reveal', { id: item.id })));
+			actions.appendChild(iconBtn('folder-opened', t('Mostrar no sistema'), () => send(kind + '.reveal', { id: item.id })));
 			if (item.canToggle) {
 				const on = item.state === 'active';
-				const label = kind === 'mcp' ? (on ? 'Recusar neste projeto' : 'Aprovar neste projeto') : (on ? 'Desativar' : 'Ativar');
+				const label = kind === 'mcp' ? (on ? t('Recusar neste projeto') : t('Aprovar neste projeto')) : (on ? t('Desativar') : t('Ativar'));
 				actions.appendChild(iconBtn(on ? 'circle-slash' : 'check', label, () => send(kind + '.toggle', { id: item.id })));
 			}
 			if (item.canDelete) {
-				actions.appendChild(iconBtn('trash', kind === 'mcp' ? 'Remover do .mcp.json' : 'Excluir', () => send(kind + '.delete', { id: item.id })));
+				actions.appendChild(iconBtn('trash', kind === 'mcp' ? t('Remover do .mcp.json') : t('Excluir'), () => send(kind + '.delete', { id: item.id })));
 			}
 			r.appendChild(actions);
 			return r;

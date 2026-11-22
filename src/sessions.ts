@@ -6,6 +6,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { Buffer as ByteBuffer } from 'buffer';
 import * as crypto from 'node:crypto';
+import { t } from './i18n';
 
 const TAIL_BYTES = 256 * 1024;
 const HEAD_BYTES = 512 * 1024;
@@ -190,7 +191,7 @@ function titleFromRanges(tail: string, head: string): SessionTitles | null {
 		if (alias && !aliases.includes(alias)) { aliases.push(alias); }
 		if (aliases.length >= MAX_ALIASES) { break; }
 	}
-	return { title: clip(custom || generated || firstPrompt || 'Conversa sem título'), aliases };
+	return { title: clip(custom || generated || firstPrompt || t('Conversa sem título')), aliases };
 }
 
 function firstUserText(text: string): string | null {

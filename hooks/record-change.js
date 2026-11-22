@@ -215,6 +215,7 @@ function diagnosticNames(directory, io) {
 			if (index === MAX_DIAGNOSTIC_FILES) { return { names, complete: false }; }
 			names.push(entry.name);
 		}
+		return { names, complete: false };
 	} finally { directoryHandle.closeSync(); }
 }
 function diagnosticFilename(event) { return `${event.observedAt.replace(/[-:.]/g, '')}-${event.id}.json`; }

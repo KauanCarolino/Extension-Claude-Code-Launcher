@@ -116,7 +116,8 @@ function fixture(t, options = {}) {
 		if (id === './sessions') { return { ...sessionModule, sessionsDir: () => path.join(root, 'sessions'), ...(options.sessions || {}) }; }
 		if (id === 'node:fs' && options.nodeFs) { return options.nodeFs; }
 		if (id === 'node:path' && options.nodePath) { return options.nodePath; }
-		if (id === './changes-support') { return load('changes-support.js'); }
+		// Os módulos extraídos do controlador também precisam dos falsos de vscode, fs e history.
+		if (['./changes-support', './capture-setup', './housekeeping', './owned-file'].includes(id)) { return load(id.slice(2) + '.js'); }
 		return sourceRequire(id);
 	};
 	const loaded = new Map();
@@ -156,7 +157,7 @@ function fixture(t, options = {}) {
 		return value;
 	}
 	function configuredHooks() {
-		const plan = hooks.planHooks({ read: { kind: 'absent' }, scriptPath: controller.scriptPath(folder), enable: true,
+		const plan = hooks.planHooks({ read: { kind: 'absent' }, scriptPath: controller.capture.scriptPath(folder), enable: true,
 			capability: { status: 'confirmed', harness: 'fixture-contract' } });
 		fs.mkdirSync(path.join(root, '.claude'), { recursive: true });
 		fs.writeFileSync(path.join(root, '.claude', 'settings.local.json'), plan.nextText);
@@ -164,7 +165,7 @@ function fixture(t, options = {}) {
 	}
 	return { root, temporaryRoot, dir, folder, controller, context, settings, warnings, messages, store, policy, configuredHooks,
 		workspaceHandlers, configurationHandlers, documentHandlers, watchers, controllerHistory, executedCommands, quickPicks, vscode, Uri,
-		editor, documents, openDocument, newController };
+		editor, documents, openDocument, newController, module: load };
 }
 
 function entry(root, id, name = id + '.txt', time = '2026-11-19T12:00:00.000Z') {

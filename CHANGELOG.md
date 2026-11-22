@@ -2,6 +2,28 @@
 
 O projeto segue [Versionamento Semântico](https://semver.org/lang/pt-BR/) a partir da 1.0.0.
 
+## 1.2.0 — 2026-11-22
+
+### Adicionado
+
+- **Interface em inglês.** A interface segue o idioma do editor: português quando ele está em português, inglês nos demais. A opção nova `claudeCodeLauncher.language` (`auto`, `en`, `pt-br`) fixa o idioma; com o editor em inglês, use `pt-br` para manter a interface como antes. Títulos de comandos e configurações vêm de `package.nls.json` (inglês) e `package.nls.pt-br.json`.
+- **Passo a passo de primeiros passos** (walkthrough), com cinco etapas que se marcam sozinhas: instalar o Claude Code, abrir a pasta, ativar o registro, começar uma conversa nova e revisar. Comando **Abrir o passo a passo**, também no menu `…` da view do launcher e no convite para ativar o registro.
+- Com o registro ativo e nenhum evento do hook observado, o painel **Mudanças** mostra **Registro ativado: falta uma conversa nova**, com o botão **Nova conversa**, em vez de "Nenhuma mudança ainda".
+- **Aviso de comandos de terminal.** O painel lê do transcript os comandos Bash e PowerShell que o Claude pediu na conversa em foco (ou nas conversas com pendências) e avisa quando algum pode ter alterado arquivos fora da captura, com o nome dos programas e o atalho **Conferir no controle de código-fonte**. Comandos só de leitura reconhecidos não contam. Nada novo é instalado nos hooks e o texto dos comandos não é mostrado.
+- **Workspaces com várias pastas** nas abas **Skills**, **Regras**, **Agentes** e **MCP**: as origens do projeto são lidas de cada pasta local, cada item mostra a pasta, e criar no projeto pergunta em qual pasta. Aprovar ou recusar um servidor do `.mcp.json` grava na pasta dele. Com uma pasta só, nada muda.
+- Workflow semanal **Compatibility with latest editor and Claude Code** (`.github/workflows/compat.yml`): instala o VSIX e roda a jornada do hook e o contrato `official` no VS Code estável mais recente, com a versão atual da extensão oficial (`scripts/install-official-extension.cjs`).
+
+### Mudado
+
+- README curto, em inglês, para a página do Marketplace, com a versão em português em `README.pt-BR.md`. O detalhe completo foi para `docs/REFERENCIA.md`.
+
+### Interno
+
+- `typecheck` passa a conferir o hook (`tsconfig.hooks.json`) e as páginas das views (`tsconfig.webview.json`), e `lint` cobre `hooks/` e `media/`. Um caminho do hook que o TypeScript não via como retorno ganhou `return` explícito, sem mudança de comportamento.
+- Do `ChangesController` saíram `capture-setup.ts` (script, política e handlers da captura), `housekeeping.ts` (retenção e coleta) e `owned-file.ts` (escrita atômica dos dados próprios).
+- Tradução: `src/i18n.ts` e `media/l10n.js`, dicionário em `l10n/en.json` e `scripts/l10n-check.cjs`, que lista frases sem tradução. A página recebe `actionKind` para não depender do rótulo traduzido da ação.
+- Testes novos: `test/l10n.test.js`, `test/shell-activity.test.js`, multi-root em `catalogs.test.js` e `skills.test.js`, e o painel renderizado em inglês em `review-ui.test.js`.
+
 ## 1.1.0 — 2026-11-21
 
 ### Adicionado

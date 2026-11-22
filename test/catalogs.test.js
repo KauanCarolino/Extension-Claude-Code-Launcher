@@ -272,7 +272,7 @@ test('a localização no JSON acha a chave certa mesmo com o mesmo nome em outro
 
 // ---- Controlador da view -----------------------------------------------------------
 
-function controllerFixture(t, { project, config, answers = {} }) {
+function controllerFixture(t, { project, projects, config, answers = {} }) {
   const previous = process.env.CLAUDE_CONFIG_DIR;
   process.env.CLAUDE_CONFIG_DIR = config;
   t.after(() => { if (previous === undefined) { delete process.env.CLAUDE_CONFIG_DIR; } else { process.env.CLAUDE_CONFIG_DIR = previous; } });
@@ -288,9 +288,11 @@ function controllerFixture(t, { project, config, answers = {} }) {
       showWarningMessage: async (message, ...rest) => { warnings.push(message); return answers.warning?.(message, ...rest); },
       showErrorMessage: async (message) => { errors.push(message); },
       showInputBox: async (options) => answers.input?.shift()?.(options),
+      showWorkspaceFolderPick: async () => answers.folder?.(),
     },
     workspace: {
-      workspaceFolders: project ? [{ uri: Uri.file(project) }] : undefined,
+      workspaceFolders: projects ? projects.map((root, index) => ({ uri: Uri.file(root), name: path.basename(root), index }))
+        : project ? [{ uri: Uri.file(project) }] : undefined,
       fs: { delete: async (uri, options) => { deleted.push([uri.fsPath, options]); fs.rmSync(uri.fsPath); } },
       createFileSystemWatcher: (pattern) => {
         const handlers = [];
@@ -434,4 +436,28 @@ test('a troca de aba liga só a lista visível, ajusta o contexto e acompanha a 
   await c.commands.get('claude-code-launcher.showRules')();
   assert.deepEqual(c.posted.at(-1), { type: 'tab', tab: 'rules' });
   for (const id of ['showChats', 'showSkills', 'showRules', 'showAgents', 'showMcp']) { assert.equal(c.commands.has('claude-code-launcher.' + id), true, id); }
+});
+
+test('com várias pastas, cada uma traz suas regras, agentes e servidores, e a criação pergunta a pasta', async (t) => {
+  const roots = catalogRoots(t);
+  const second = path.join(roots.base, 'segunda');
+  write(path.join(second, 'CLAUDE.md'), '# Segunda');
+  write(path.join(second, '.claude', 'agents', 'rev.md'), '---\nname: rev\n---\n');
+  write(path.join(second, '.mcp.json'), JSON.stringify({ mcpServers: { srv: { command: 'node' } } }, null, 2));
+  const answers = { folder: () => ({ uri: { fsPath: second } }), input: [() => 'nova-regra', () => ''] };
+  const c = controllerFixture(t, { config: roots.config, projects: [roots.project, second], answers });
+  for (const kind of ['rules', 'agents', 'mcp']) { await c.catalogs.handle(kind + '.refresh'); }
+  const project = (kind) => c.last(kind).items.filter((i) => i.scope === 'project' || i.scope === 'local').map((i) => [i.id, i.folder]);
+  assert.deepEqual(project('rules'), [['project:memory:CLAUDE.md', 'projeto'], ['project:rule:p.md', 'projeto'], ['project:memory:CLAUDE.md@1', 'segunda']]);
+  assert.deepEqual(project('agents'), [['project:rev.md', 'projeto'], ['project:rev.md@1', 'segunda']]);
+  assert.deepEqual(project('mcp'), [['project:srv', 'projeto'], ['project:srv@1', 'segunda']]);
+  assert.equal(c.last('mcp').items.filter((i) => i.scope === 'user').length, 1, 'escopo do usuário aparece uma vez só');
+  assert.equal(JSON.stringify(c.posted).includes(roots.base), false, 'nenhum caminho absoluto chega à página');
+  // Aprovar o servidor da segunda pasta grava no settings.local.json dela, não no da primeira.
+  await c.catalogs.handle('mcp.toggle', 'project:srv@1');
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(second, '.claude', 'settings.local.json'), 'utf8')).enabledMcpjsonServers, ['srv']);
+  assert.equal(fs.existsSync(path.join(roots.project, '.claude', 'settings.local.json')), false);
+  await c.catalogs.handle('rules.create', undefined, 'project');
+  assert.equal(fs.existsSync(path.join(second, '.claude', 'rules', 'nova-regra.md')), true);
+  assert.deepEqual(c.errors, []);
 });

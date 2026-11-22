@@ -1,6 +1,7 @@
 import * as path from 'node:path';
 import { createFileExclusive, firstLine, markdownFile, readHead, scanMarkdownTree, validKebabName, type EntryState } from './catalog';
 import { frontmatterBody, frontmatterFields, frontmatterList, splitOutsideBraces, yamlQuoted } from './frontmatter';
+import { t } from './i18n';
 
 /**
  * Instruções que o Claude Code carrega em toda conversa: os arquivos de memória (`CLAUDE.md`)
@@ -63,9 +64,9 @@ export function parsePathsInput(input: string): string[] {
 }
 
 export async function createRule(root: string, name: string, paths: readonly string[]): Promise<string> {
-	if (!validKebabName(name)) { throw new Error('Use letras minúsculas, números e hífens (ex.: minha-regra).'); }
+	if (!validKebabName(name)) { throw new Error(t('Use letras minúsculas, números e hífens (ex.: minha-regra).')); }
 	const file = path.join(root, `${name}.md`);
 	const head = paths.length ? `---\npaths:\n${paths.map((p) => `  - ${yamlQuoted(p)}`).join('\n')}\n---\n\n` : '';
-	await createFileExclusive(file, `${head}# ${name}\n\n- Descreva aqui a regra.\n`);
+	await createFileExclusive(file, `${head}# ${name}\n\n- ${t('Descreva aqui a regra.')}\n`);
 	return file;
 }

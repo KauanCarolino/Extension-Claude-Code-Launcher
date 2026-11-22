@@ -227,7 +227,7 @@ test('GC keeps unknown files, canonical namespaces and simulated links, removing
 		const file = path.join(blobs, name); fs.writeFileSync(file, 'ordinary snapshot'); fs.utimesSync(file, new Date(1000), new Date(1000));
 	}
 	const canonical = path.join(f.dir, 'review-blobs', 'v1', 'd'.repeat(64) + '.txt'); fs.writeFileSync(canonical, 'canonical recovery');
-	await f.controller.collectBlobs(f.folder.uri, [JSON.stringify({ before: { hash: live } })]);
+	await f.module('housekeeping.js').collectBlobs(await f.store(), [JSON.stringify({ before: { hash: live } })], () => false);
 	assert.equal(fs.existsSync(path.join(blobs, old + '.txt')), false);
 	for (const name of [live + '.txt', linked + '.txt', 'ordinary-not-a-blob.txt']) { assert.equal(fs.existsSync(path.join(blobs, name)), true); }
 	assert.equal(fs.readFileSync(canonical, 'utf8'), 'canonical recovery');
@@ -241,7 +241,7 @@ test('GC refuses an unsafe directory identity supplied by the IO boundary before
 	} });
 	await f.store(); blocked = path.join(f.dir, 'blobs'); fs.mkdirSync(blocked);
 	const file = path.join(blocked, 'a'.repeat(40) + '.txt'); fs.writeFileSync(file, 'ordinary snapshot');
-	await assert.rejects(f.controller.collectBlobs(f.folder.uri, []), /unsafeStorageType/);
+	await assert.rejects(f.module('housekeeping.js').collectBlobs(await f.store(), [], () => false), /unsafeStorageType/);
 	assert.equal(fs.readFileSync(file, 'utf8'), 'ordinary snapshot');
 });
 
@@ -513,7 +513,7 @@ test('a configured hook without node on PATH is reported until a capture event p
 	const key = f.folder.uri.toString();
 	await f.controller.loadCaptureHealth(f.folder);
 	assert.equal(f.controller.runtimeWarnings.has(key), false, 'node is on PATH in the test process');
-	f.controller.nodeLookup = { at: Date.now(), found: false };
+	f.controller.capture.nodeLookup = { at: Date.now(), found: false };
 	await f.controller.loadCaptureHealth(f.folder);
 	assert.match(f.controller.runtimeWarnings.get(key), /"node".*PATH/);
 	let state; f.controller.post({ postMessage: async (value) => { state = value; } }, false);
@@ -524,7 +524,7 @@ test('a configured hook without node on PATH is reported until a capture event p
 });
 
 test('enabling the change log warns when node is not on PATH and stays quiet when hooks are not configured', async (t) => {
-	const f = fixture(t); f.controller.nodeLookup = { at: Date.now(), found: false };
+	const f = fixture(t); f.controller.capture.nodeLookup = { at: Date.now(), found: false };
 	await f.controller.loadCaptureHealth(f.folder);
 	assert.equal(f.controller.runtimeWarnings.size, 0);
 	await f.controller.setEnabled(true);
@@ -645,7 +645,7 @@ test('a hook left in the globalStorage of the pre-1.0 identifier is recognized a
 	await f.controller.setEnabled(true);
 	const text = fs.readFileSync(settings, 'utf8');
 	assert.equal(text.includes(legacy), false, 'the legacy entry is replaced, not duplicated');
-	assert.equal(text.includes(f.controller.scriptPath(f.folder)), true);
+	assert.equal(text.includes(f.controller.capture.scriptPath(f.folder)), true);
 	assert.ok(f.warnings.every((message) => !message.includes(describeReason('ambiguousHookOwnership'))));
 	assert.equal(await f.controller.hooksEnabled(), true);
 });

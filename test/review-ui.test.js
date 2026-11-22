@@ -6,7 +6,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 // DOM adapter exercises the shipped webview script; browser layout is a separate host gate.
-function webview(saved = {}) {
+function webview(saved = {}, dictionary) {
 	let document, listener;
 	class Element {
 		constructor(tag) { this.tagName = tag; this.children = []; this.dataset = {}; this.attributes = {}; this.events = {}; this.className = ''; this.value = ''; }
@@ -25,11 +25,14 @@ function webview(saved = {}) {
 		}
 	}
 	const root = new Element('main'), body = new Element('body'), messages = [], states = [];
-	document = { body, activeElement: null, getElementById: () => root, createElement: tag => new Element(tag) };
+	const l10n = new Element('script'); l10n.textContent = JSON.stringify(dictionary || {});
+	document = { body, activeElement: null, getElementById: id => id === 'launcher-l10n' ? (dictionary ? l10n : null) : root, createElement: tag => new Element(tag) };
 	const window = { scrollY: 17, scrollTo(x, y) { assert.equal(y, 17); }, addEventListener(name, handler) { if (name === 'message') listener = handler; } };
-	vm.runInNewContext(fs.readFileSync(path.resolve(__dirname, '../media/changes.js'), 'utf8'), {
+	const context = vm.createContext({
 		document, window, setInterval() {}, acquireVsCodeApi: () => ({ getState: () => saved, setState: state => states.push(state), postMessage: message => messages.push(message) })
 	});
+	// Mesma ordem da página: o dicionário (l10n.js) antes do painel.
+	for (const name of ['l10n.js', 'changes.js']) { vm.runInContext(fs.readFileSync(path.resolve(__dirname, '../media', name), 'utf8'), context); }
 	return { root, body, document, messages, states, render: state => listener({ data: { type: 'state', hasFolder: true, enabled: true, entries: [], files: [], ...state } }),
 		find: key => root.querySelectorAll('[data-focus-key]').find(node => node.dataset.focusKey === key),
 		click(node) { assert(node); assert.notEqual(node.disabled, true); node.events.click({ preventDefault() {}, stopPropagation() {} }); } };
@@ -124,4 +127,20 @@ test('chat scope banner says when pending changes of conversations without a tab
 	assert.doesNotMatch(ui.root.textContent, /sem aba/, 'only while the filter is on');
 	ui.render({ ...fixture(), chat: { title: 'Conversa A', scoped: true, matches: 1, others: 0, unclaimed: 0 } });
 	assert.doesNotMatch(ui.root.textContent, /sem aba/);
+});
+
+test('com o dicionário em inglês, o painel aparece em inglês, inclusive plurais e etiquetas', () => {
+	const dictionary = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../l10n/en.json'), 'utf8'));
+	const ui = webview({}, dictionary);
+	ui.render({ entries: [], files: [], enabled: false });
+	assert.match(ui.root.textContent, /Record what Claude changes/);
+	assert.match(ui.root.textContent, /Turn on change log/);
+	assert.doesNotMatch(ui.root.textContent, /Registre o que o Claude muda/);
+	ui.render({ ...fixture({ actionKind: 'created', action: 'Created' }), wide: false });
+	assert.match(ui.root.textContent, /To review/);
+	assert.match(ui.root.textContent, /1 accepted · 1 rejected · 2 pending hunks/);
+	assert.match(ui.root.textContent, /new/);
+	ui.render({ entries: [], files: [], shell: { commands: 3, mayWrite: 2, programs: ['npm'], partial: false, scope: 'chat' } });
+	assert.match(ui.root.textContent, /Claude ran 2 terminal commands that may have changed files/);
+	assert.match(ui.root.textContent, /Recent programs: npm\./);
 });

@@ -49,7 +49,7 @@ function launcher(t, { tabs, sessions }) {
     setTimeout: (fn) => { const timer = setTimeout(fn, 0); timers.add(timer); return timer; },
     clearTimeout: (timer) => { clearTimeout(timer); timers.delete(timer); },
     require: (id) => id === 'vscode' ? vscode
-      : id === './changes' ? { registerChanges: () => ({ setActiveChat: (chat) => chats.push(chat === null ? null : JSON.parse(JSON.stringify(chat))), dispose() {}, whenDisposed: async () => {} }) }
+      : id === './changes' ? { registerChanges: () => ({ setActiveChat: (chat) => chats.push(chat === null ? null : JSON.parse(JSON.stringify(chat))), refreshShellActivity() {}, dispose() {}, whenDisposed: async () => {} }) }
       : id === './inline' ? { registerInline() {} } : id === './skills-view' ? { registerSkills() {} }
       : id === './catalog-view' ? { registerCatalogs() {} }
       : id === './sessions' ? { sessionsDir: () => '/fixture/sessions', listSessionsAsync: async () => ({ sessions: listing, partial: false }) }

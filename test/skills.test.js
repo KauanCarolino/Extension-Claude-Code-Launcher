@@ -127,7 +127,7 @@ test('a pasta global respeita CLAUDE_CONFIG_DIR, como a lista de conversas', () 
 });
 
 /** Carrega o controlador compilado com o editor simulado; o disco é real. */
-function controller(t, { project, config, answers = {} } = {}) {
+function controller(t, { project, projects, config, answers = {} } = {}) {
   const posted = [], errors = [], warnings = [], opened = [], deleted = [], revealed = [];
   const Uri = { file: (fsPath) => ({ fsPath, scheme: 'file' }) };
   const vscode = {
@@ -137,9 +137,11 @@ function controller(t, { project, config, answers = {} } = {}) {
       showWarningMessage: async (message, ...rest) => { warnings.push(message); return answers.warning?.(message, ...rest); },
       showErrorMessage: async (message) => { errors.push(message); },
       showInputBox: async (options) => answers.input?.shift()?.(options),
+      showWorkspaceFolderPick: async () => answers.folder?.(),
     },
     workspace: {
-      workspaceFolders: project ? [{ uri: Uri.file(project) }] : undefined,
+      workspaceFolders: projects ? projects.map((root, index) => ({ uri: Uri.file(root), name: path.basename(root), index }))
+        : project ? [{ uri: Uri.file(project) }] : undefined,
       fs: { delete: async (uri, options) => { deleted.push([uri.fsPath, options]); fs.rmSync(uri.fsPath, { recursive: true }); } },
     },
     commands: { executeCommand: async (...args) => { revealed.push(args); } },
@@ -150,7 +152,7 @@ function controller(t, { project, config, answers = {} } = {}) {
     module, exports: module.exports, setTimeout, clearTimeout,
     process: { ...process, env },
     require: (name) => name === 'vscode' ? vscode : name === './skills'
-      ? loadSkillsWithEnv(env) : require(name),
+      ? loadSkillsWithEnv(env) : name.startsWith('./') ? require(path.join(OUT, name)) : require(name),
   }, { filename });
   const instance = new module.exports.SkillsController((message) => posted.push(message));
   t.after(() => instance.dispose());
@@ -270,4 +272,19 @@ test('sem pasta aberta não há skills do projeto nem criação no projeto', asy
   assert.equal(c.last().skills.some((s) => s.scope === 'project'), false);
   await c.instance.handle('skills.create', undefined, 'project');
   assert.match(c.warnings[0], /Abra uma pasta/);
+});
+
+test('com várias pastas, as skills de cada uma aparecem com a pasta e a criação vai para a escolhida', async (t) => {
+  const roots = setupRoots(t);
+  const second = path.join(path.dirname(roots.project), 'segunda');
+  writeSkill(path.join(second, '.claude', 'skills'), 'proj-a', '---\nname: proj-a\n---');
+  const answers = { folder: () => ({ uri: { fsPath: second } }), input: [() => 'nova', () => 'quando usar'] };
+  const c = controller(t, { config: roots.config, projects: [roots.project, second], answers });
+  await c.instance.post();
+  assert.deepEqual(c.last().skills.filter((s) => s.scope === 'project').map((s) => [s.id, s.folder]),
+    [['project:proj-a', 'projeto'], ['project:proj-a@1', 'segunda']]);
+  await c.instance.handle('skills.create', undefined, 'project');
+  assert.equal(fs.existsSync(path.join(second, '.claude', 'skills', 'nova', 'SKILL.md')), true);
+  assert.equal(fs.existsSync(path.join(roots.projectDir, 'nova')), false);
+  assert.deepEqual(c.errors, []);
 });

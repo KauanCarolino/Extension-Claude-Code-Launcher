@@ -6,11 +6,15 @@ import { ReviewError, ReviewResolution } from './review';
 import { operationView, projectReview } from './review-results';
 import type { PurgeInventory, PurgeReason, PurgeReport } from './purge-plan';
 import { describeReason } from './messages';
+import { m, plural, t } from './i18n';
 
 export interface ViewEntry extends Partial<ReturnType<typeof projectReview>> {
 	id: string;
 	time: string;
+	/** Rótulo traduzido da ação ("Criou", "Editou"…). */
 	action: string;
+	/** Tipo estável da ação, para a página escolher cor e etiqueta sem depender do idioma. */
+	actionKind: 'created' | 'rewrote' | 'edited';
 	file: string;
 	dir: string;
 	summary: string;
@@ -55,6 +59,7 @@ export function toViewEntry(entry: RawEntry, relativePath: string): BaseView {
 		id: entry.id,
 		time: entry.time,
 		action: actionLabel(entry.tool, created),
+		actionKind: created ? 'created' as const : entry.tool === 'Write' ? 'rewrote' as const : 'edited' as const,
 		file: slash >= 0 ? relative.slice(slash + 1) : relative,
 		dir: slash >= 0 ? relative.slice(0, slash) : '',
 		summary: '',
@@ -68,17 +73,17 @@ export function toViewEntry(entry: RawEntry, relativePath: string): BaseView {
 	};
 
 	if (deleted) {
-		return { ...base, summary: 'O arquivo não existe mais depois desta ação.' };
+		return { ...base, summary: t('O arquivo não existe mais depois desta ação.') };
 	}
 	if (before?.large || after?.large) {
-		return { ...base, summary: 'Arquivo grande demais (mais de 512 KB) para guardar o antes e o depois.' };
+		return { ...base, summary: t('Arquivo grande demais (mais de 512 KB) para guardar o antes e o depois.') };
 	}
 	// Texto null num arquivo que existe: o blob dele sumiu (ou nunca foi guardado).
 	if (before === null || after === null || after.text === null || (before.exists && before.text === null)) {
 		return {
 			...base,
-			summary: 'Não foi possível capturar o conteúdo de antes desta edição.',
-			note: 'Isso acontece quando o registro foi ativado no meio de uma conversa.',
+			summary: t('Não foi possível capturar o conteúdo de antes desta edição.'),
+			note: t('Isso acontece quando o registro foi ativado no meio de uma conversa.'),
 		};
 	}
 
@@ -92,63 +97,60 @@ export function toViewEntry(entry: RawEntry, relativePath: string): BaseView {
 		hunks: diff.hunks,
 		canCompare: true,
 		note: diff.clipped
-			? 'Parte das linhas foi omitida aqui. Use "Lado a lado" para ver tudo.'
+			? t('Parte das linhas foi omitida aqui. Use "Lado a lado" para ver tudo.')
 			: diff.approximate
-				? 'Arquivo grande: as linhas foram comparadas em bloco. "Lado a lado" mostra o diff exato.'
+				? t('Arquivo grande: as linhas foram comparadas em bloco. "Lado a lado" mostra o diff exato.')
 				: null,
 	};
 }
 
 export function actionLabel(tool: string | null | undefined, created: boolean): string {
 	if (created) {
-		return 'Criou';
+		return t('Criou');
 	}
 	switch (tool) {
 		case 'Write':
-			return 'Reescreveu';
+			return t('Reescreveu');
 		case 'MultiEdit':
-			return 'Editou em várias partes';
+			return t('Editou em várias partes');
 		case 'NotebookEdit':
-			return 'Editou notebook';
+			return t('Editou notebook');
 		default:
-			return 'Editou';
+			return t('Editou');
 	}
 }
 
 export function summarize(diff: DiffResult, created: boolean): string {
 	if (created) {
-		return `Arquivo novo, com ${plural(diff.added, 'linha', 'linhas')}.`;
+		return t('Arquivo novo, com {0}.', plural(diff.added, '{0} linha', '{0} linhas'));
 	}
 	if (diff.hunks.length === 0) {
-		return 'O conteúdo ficou igual: nenhuma linha mudou.';
+		return t('O conteúdo ficou igual: nenhuma linha mudou.');
 	}
 	const parts: string[] = [];
 	if (diff.modified > 0) {
-		parts.push(`${plural(diff.modified, 'linha modificada', 'linhas modificadas')}`);
+		parts.push(plural(diff.modified, '{0} linha modificada', '{0} linhas modificadas'));
 	}
 	if (diff.added > 0) {
-		parts.push(`${plural(diff.added, 'linha nova', 'linhas novas')}`);
+		parts.push(plural(diff.added, '{0} linha nova', '{0} linhas novas'));
 	}
 	if (diff.removed > 0) {
-		parts.push(`${plural(diff.removed, 'linha removida', 'linhas removidas')}`);
+		parts.push(plural(diff.removed, '{0} linha removida', '{0} linhas removidas'));
 	}
-	const where = diff.hunks.length === 1 ? 'em 1 trecho' : `em ${diff.hunks.length} trechos`;
-	return `${joinPt(parts)}, ${where} do arquivo.`;
+	const where = plural(diff.hunks.length, 'em {0} trecho', 'em {0} trechos');
+	return t('{0}, {1} do arquivo.', joinList(parts), where);
 }
 
 export function countFiles(count: number): string {
-	return plural(count, 'arquivo', 'arquivos');
+	return plural(count, '{0} arquivo', '{0} arquivos');
 }
 
-export function plural(count: number, one: string, many: string): string {
-	return `${count} ${count === 1 ? one : many}`;
-}
-
-export function joinPt(parts: string[]): string {
+/** "a", "a e b", "a, b e c" (no idioma da interface), com a primeira letra maiúscula. */
+export function joinList(parts: string[]): string {
 	if (parts.length <= 1) {
 		return capitalize(parts[0] ?? '');
 	}
-	return capitalize(`${parts.slice(0, -1).join(', ')} e ${parts[parts.length - 1]}`);
+	return capitalize(t('{0} e {1}', parts.slice(0, -1).join(', '), parts[parts.length - 1]));
 }
 
 export function capitalize(text: string): string {
@@ -177,16 +179,18 @@ export function excludedPatterns(config: vscode.WorkspaceConfiguration): string[
 
 /** Explicação para o usuário; o código interno só aparece quando não há texto para ele. */
 export function explain(error: unknown): string { return describeReason(errorCode(error)); }
-export const NODE_MISSING = 'O hook de captura é executado com o comando "node", que não foi encontrado no PATH desta janela. Instale o Node.js e reinicie o editor; sem ele nenhuma mudança do Claude é registrada.';
-export const HOOK_SCRIPT_DIFFERS = 'O script de captura em .claude/launcher-changes está ausente ou diferente do distribuído pela extensão e não pôde ser restaurado nesta janela. A captura pode não ser confiável.';
-export const HOOK_SCRIPT_RESTORED = 'O script de captura em .claude/launcher-changes estava diferente do distribuído pela extensão e foi restaurado. Se você não o alterou, confira o que mais mudou na pasta .claude.';
+export const NODE_MISSING = m('O hook de captura é executado com o comando "node", que não foi encontrado no PATH desta janela. Instale o Node.js e reinicie o editor; sem ele nenhuma mudança do Claude é registrada.');
+export const HOOK_SCRIPT_DIFFERS = m('O script de captura em .claude/launcher-changes está ausente ou diferente do distribuído pela extensão e não pôde ser restaurado nesta janela. A captura pode não ser confiável.');
+export const HOOK_SCRIPT_RESTORED = m('O script de captura em .claude/launcher-changes estava diferente do distribuído pela extensão e foi restaurado. Se você não o alterou, confira o que mais mudou na pasta .claude.');
 
 export function purgeInventoryText(inventory: PurgeInventory): string {
 	return ['history', 'capture', 'blobs', 'canonical', 'metadata', 'projection', 'backups'].map((category) => `${category}=${inventory.items.filter((item) => item.category === category).length}`).join(', ')
-		+ `; memória da janela: undo=${inventory.memory.undoCount ?? '?'}, cache=${inventory.memory.cacheCount ?? '?'}; desconhecidos preservados=${inventory.unknown.length}${inventory.coverage === 'partial' ? '; inventário parcial' : ''}`;
+		+ t('; memória da janela: undo={0}, cache={1}; desconhecidos preservados={2}', inventory.memory.undoCount ?? '?', inventory.memory.cacheCount ?? '?', inventory.unknown.length)
+		+ (inventory.coverage === 'partial' ? t('; inventário parcial') : '');
 }
 export function purgeReportText(report: PurgeReport): string {
-	return report.categories.filter((category) => category.beforeCount || category.remainingCount || category.reasons.length).map((category) => `${category.category}: ${category.outcome}, restantes=${category.remainingCount ?? '?'}${category.reasons.length ? ` (${category.reasons.join(', ')})` : ''}`).join('; ') || 'sem dados próprios restantes';
+	return report.categories.filter((category) => category.beforeCount || category.remainingCount || category.reasons.length).map((category) => t('{0}: {1}, restantes={2}', category.category, category.outcome, category.remainingCount ?? '?')
+		+ (category.reasons.length ? ` (${category.reasons.join(', ')})` : '')).join('; ') || t('sem dados próprios restantes');
 }
 export function purgeFailureReason(error: unknown): PurgeReason {
 	const reason = errorCode(error);

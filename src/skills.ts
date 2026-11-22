@@ -2,6 +2,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { parseFrontmatter, yamlQuoted } from './frontmatter';
+import { t } from './i18n';
 
 export { parseFrontmatter };
 
@@ -72,23 +73,23 @@ export async function scanSkills(root: string, scope: SkillScope): Promise<Skill
  * É uma convenção do launcher, não do Claude Code: sem `SKILL.md`, o Claude Code não carrega a skill.
  */
 export async function setSkillEnabled(skill: SkillInfo, enabled: boolean): Promise<void> {
-	if (skill.state === 'broken') { throw new Error('Skill sem SKILL.md.'); }
-	if (skill.scope === 'claudeai') { throw new Error('Skills do claude.ai são somente leitura.'); }
+	if (skill.state === 'broken') { throw new Error(t('Skill sem SKILL.md.')); }
+	if (skill.scope === 'claudeai') { throw new Error(t('Skills do claude.ai são somente leitura.')); }
 	const from = path.join(skill.dir, enabled ? DISABLED_FILE : SKILL_FILE);
 	const to = path.join(skill.dir, enabled ? SKILL_FILE : DISABLED_FILE);
-	if (!(await exists(from))) { throw new Error(`A skill já está ${enabled ? 'ativa' : 'desativada'} ou foi alterada fora do launcher.`); }
-	if (await exists(to)) { throw new Error(`Já existe ${path.basename(to)} nesta pasta.`); }
+	if (!(await exists(from))) { throw new Error(enabled ? t('A skill já está ativa ou foi alterada fora do launcher.') : t('A skill já está desativada ou foi alterada fora do launcher.')); }
+	if (await exists(to)) { throw new Error(t('Já existe {0} nesta pasta.', path.basename(to))); }
 	await fs.rename(from, to);
 }
 
 export const validSkillName = (name: string): boolean => /^[a-z0-9]+(-[a-z0-9]+)*$/.test(name) && name.length <= 64;
 
 export async function createSkill(root: string, name: string, description: string): Promise<string> {
-	if (!validSkillName(name)) { throw new Error('Use letras minúsculas, números e hífens (ex.: minha-skill).'); }
+	if (!validSkillName(name)) { throw new Error(t('Use letras minúsculas, números e hífens (ex.: minha-skill).')); }
 	const dir = path.join(root, name);
 	await fs.mkdir(root, { recursive: true });
 	await fs.mkdir(dir); // falha se já existir: nunca sobrescreve
 	const file = path.join(dir, SKILL_FILE);
-	await fs.writeFile(file, `---\nname: ${name}\ndescription: ${yamlQuoted(description)}\n---\n\n# ${name}\n\nDescreva aqui as instruções da skill.\n`, { flag: 'wx' });
+	await fs.writeFile(file, `---\nname: ${name}\ndescription: ${yamlQuoted(description)}\n---\n\n# ${name}\n\n${t('Descreva aqui as instruções da skill.')}\n`, { flag: 'wx' });
 	return file;
 }

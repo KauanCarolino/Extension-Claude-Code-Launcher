@@ -14,10 +14,10 @@ const cli = path.join(root, 'node_modules/@vscode/vsce/vsce');
 async function fixture(t) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'launcher-package-'));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
-  for (const name of ['package.json', '.vscodeignore', 'tsconfig.json', 'LICENSE', 'README.md', 'CHANGELOG.md']) {
+  for (const name of ['package.json', 'package.nls.json', 'package.nls.pt-br.json', '.vscodeignore', 'tsconfig.json', 'LICENSE', 'README.md', 'CHANGELOG.md']) {
     await fs.copyFile(path.join(root, name), path.join(directory, name));
   }
-  for (const name of ['media', 'hooks', 'scripts']) {
+  for (const name of ['media', 'hooks', 'scripts', 'l10n']) {
     await fs.cp(path.join(root, name), path.join(directory, name), { recursive: true });
   }
   // A minimal source fixture keeps this gate independent of concurrent runtime work.
