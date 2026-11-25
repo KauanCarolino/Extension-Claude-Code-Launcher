@@ -82,7 +82,8 @@ exports.observeRuntime = function observeRuntime(vscode, directory) {
     wrapped.webview = webview;
     return { view: wrapped, disposeObservation: () => observation.dispose() };
   }
-  function load(filename, exposeHomeProvider = false) {
+  // `exposures` maps a test-only export name to a top-level class of the loaded file.
+  function load(filename, exposures = {}) {
     filename = path.resolve(filename); if (modules.has(filename)) return modules.get(filename).exports;
     const module = { exports: {} }; modules.set(filename, module); const nativeRequire = createRequire(filename);
     const requireObserved = name => {
@@ -97,7 +98,7 @@ exports.observeRuntime = function observeRuntime(vscode, directory) {
       timers.set(handle, repeat ? 'interval' : 'timeout'); return handle;
     };
     const cancel = handle => { timers.delete(handle); clearTimeout(handle); clearInterval(handle); };
-    const exposure = exposeHomeProvider ? '\nmodule.exports.__testHomeProvider = LauncherViewProvider;\n' : '';
+    const exposure = Object.entries(exposures).map(([name, local]) => '\nmodule.exports.' + name + ' = ' + local + ';').join('') + '\n';
     vm.runInNewContext(fs.readFileSync(filename, 'utf8') + exposure, { module, exports: module.exports, require: requireObserved,
       __filename: filename, __dirname: path.dirname(filename), process, Buffer, console, URL, TextEncoder, TextDecoder,
       setTimeout: (fn, ms, ...args) => schedule(false, fn, ms, ...args), clearTimeout: cancel,

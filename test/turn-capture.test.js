@@ -46,7 +46,7 @@ test('mudanças por comando aparecem como tal, com pedido e explicação do turn
 	writeLog(f, [{ id: 'command-1', time: at(20), session: SESSION, tool: 'Command', file: path.join(f.root, 'a.txt'),
 		before: { exists: true, text: 'a', large: false }, after: { exists: true, text: 'b', large: false }, reason: null, transcript: file, toolUseId: null }]);
 	f.controller.entries = await f.controller.loadEntries();
-	await f.controller.fillMeta(); await f.controller.writeChain;
+	await f.controller.meta.fill(); await f.controller.writeChain;
 	const states = []; const view = { postMessage: async (state) => { states.push(state); } };
 	f.controller.post(view, false);
 	const [shown] = states.at(-1).entries;

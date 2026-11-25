@@ -41,7 +41,7 @@ The walkthrough (**Launcher for Claude Code: Open the Walkthrough**) opens on in
 
 - Everything stays on your disk. Nothing is sent to an external service.
 - The change log adds hooks to the project's `.claude/settings.local.json` and keeps copies in `.claude/launcher-changes/`, which gets its own `.gitignore`. The hook only observes: it never approves or blocks a tool, and it never runs anything from your project.
-- To capture what commands changed, the hook notes the project state when you send a request and keeps copies of text files, within half of the storage budget and up to 2,000 files. `.git`, `node_modules`, `.claude` and what the root `.gitignore` lists are skipped. Turn it off with `claudeCodeLauncher.captureCommandChanges`.
+- To capture what commands changed, the hook notes the project state when you send a request and keeps copies of text files, within half of the storage budget and up to 2,000 files. `.git`, `node_modules`, `.claude` and what the project's `.gitignore` files list (in any folder, with `!` negations) are skipped. Turn it off with `claudeCodeLauncher.captureCommandChanges`.
 - `.env` files, private keys, certificates and credential files are never copied (`claudeCodeLauncher.historyExcludedPatterns`). Reviewed history is cleaned up after 30 days.
 - Changes made outside Claude (by you or other programs) are not captured.
 
@@ -67,12 +67,13 @@ The launcher runs where your workspace is, like the official extension: in WSL, 
 | `claudeCodeLauncher.historyRetentionDays` | `30` | Days to keep reviewed history; `0` keeps it |
 | `claudeCodeLauncher.historyMaxStorageMB` | `128` | Storage budget; new captures pause when it is reached |
 | `claudeCodeLauncher.manageEditorGroups` | `false` | Lets the launcher keep file tabs out of the chat's editor group |
+| `claudeCodeLauncher.showStatusBarItem` | `true` | Shows the **Claude** item in the status bar |
 | `claudeCodeLauncher.hookExecutionMode` | `auto` | How the hook is registered; `disabled` turns it off |
 
 ## Learn more
 
-- [Full reference](https://github.com/KauanCarolino/Extension-Claude-Code-Launcher/blob/main/docs/REFERENCIA.md) (Portuguese): review semantics, command capture, capture diagnostics, local data, remote windows, recovery and development.
-- [What the tests prove](https://github.com/KauanCarolino/Extension-Claude-Code-Launcher/blob/main/docs/VERIFICACAO.md) (Portuguese).
+- [Full reference](https://github.com/KauanCarolino/Extension-Claude-Code-Launcher/blob/main/docs/REFERENCE.md): review semantics, command capture, capture diagnostics, local data, remote windows, recovery and development.
+- [What the tests prove](https://github.com/KauanCarolino/Extension-Claude-Code-Launcher/blob/main/docs/VERIFICATION.md).
 - [Changelog](https://github.com/KauanCarolino/Extension-Claude-Code-Launcher/blob/main/CHANGELOG.md).
 
 Licensed under MIT.

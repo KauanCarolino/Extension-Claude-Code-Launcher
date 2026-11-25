@@ -36,10 +36,12 @@ jobs:
             echo "::error::A tag ${GITHUB_REF_NAME} não coincide com a versão ${version} do package.json."
             exit 1
           fi
-          if ! grep -q "^## ${version} " CHANGELOG.md; then
-            echo "::error::O CHANGELOG.md não tem a seção ## ${version}."
-            exit 1
-          fi
+          for changelog in CHANGELOG.md CHANGELOG.pt-BR.md; do
+            if ! grep -q "^## ${version} " "$changelog"; then
+              echo "::error::O ${changelog} não tem a seção ## ${version}."
+              exit 1
+            fi
+          done
           echo "vsix=launcher-for-claude-code-${version}.vsix" >> "$GITHUB_OUTPUT"
       - run: npm ci --ignore-scripts --no-audit --fund=false
       - run: npm run typecheck

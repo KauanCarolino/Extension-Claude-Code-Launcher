@@ -38,6 +38,7 @@
   "view.changes": "Mudanças",
   "config.inlineChanges": "Mostra a revisão das mudanças do Claude no editor, preservando decisões parciais e bloqueando ações quando houver conflito.",
   "config.manageEditorGroups": "Permite ao launcher organizar os grupos do chat e gerir suas preferências de abertura. Ao desligar, restaura somente valores que continuem iguais aos definidos pelo launcher.",
+  "config.showStatusBarItem": "Mostra o item Claude na barra de status, que abre o chat.",
   "config.hookExecutionMode": "Formato de execução do registro de mudanças. Versões sem suporte confirmado permanecem desativadas; não há alternativa automática via shell. Vale para a máquina: as configurações de um projeto não alteram esta opção.",
   "config.historyExcludedPatterns": "Padrões de caminhos excluídos de novas cópias de conteúdo no histórico local. Os padrões definidos no projeto somam-se aos do usuário e não os substituem. Alterar a lista não apaga cópias já existentes.",
   "config.historyRetentionDays": "Retenção do histórico já revisado, em dias. Zero desativa a limpeza por idade. Pendências e dados necessários à recuperação são preservados.",

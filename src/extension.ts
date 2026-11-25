@@ -3,7 +3,7 @@ import { registerSkills } from './skills-view';
 import * as vscode from 'vscode';
 import { ChangesController, registerChanges } from './changes';
 import { registerInline } from './inline';
-import { listSessionsAsync, sessionsDir } from './sessions';
+import { listSessionsAsync, sessionsDir, type SessionInfo } from './sessions';
 import { matchChatSessions, sessionsForTabLabel } from './logic';
 import { ManagedPreference, PreferenceManager } from './preferences';
 import { validateMessage } from './history';
@@ -264,9 +264,9 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.extensions.onDidChange(() => provider?.refresh()),
 		vscode.commands.registerCommand('claude-code-launcher.newTab', () => openClaude('tab')),
 		vscode.commands.registerCommand('claude-code-launcher.refreshSessions', () => provider?.refresh(0)),
-		vscode.window.tabGroups.onDidChangeTabs(() => { provider?.refresh(); scheduleActiveChat(); }),
 		vscode.window.tabGroups.onDidChangeTabGroups(() => { provider?.refresh(); scheduleActiveChat(); }),
 		vscode.window.tabGroups.onDidChangeTabs((event) => {
+			provider?.refresh(); scheduleActiveChat();
 			if (isolatingClaudeGroup) {
 				return;
 			}
@@ -299,8 +299,13 @@ export function activate(context: vscode.ExtensionContext): void {
 	statusItem.text = '$(comment-discussion) Claude';
 	statusItem.tooltip = t('Abrir o chat do Claude Code');
 	statusItem.command = 'claude-code-launcher.openSidebar';
-	statusItem.show();
-	context.subscriptions.push(statusItem);
+	const showStatusItem = () => {
+		if (vscode.workspace.getConfiguration('claudeCodeLauncher').get<boolean>('showStatusBarItem', true)) { statusItem.show(); } else { statusItem.hide(); }
+	};
+	showStatusItem();
+	context.subscriptions.push(statusItem, vscode.workspace.onDidChangeConfiguration((event) => {
+		if (event.affectsConfiguration('claudeCodeLauncher.showStatusBarItem')) { showStatusItem(); }
+	}));
 }
 
 /**
@@ -698,11 +703,11 @@ async function configureManagement(): Promise<void> {
 	} catch { void vscode.window.showWarningMessage(t('Não foi possível atualizar as preferências de organização. Seus valores atuais foram preservados quando possível.')); }
 }
 
+// Extension Host Node; avoid adding a runtime dependency.
 function createNonce(): string {
-	return requireCryptoNonce();
+	return randomBytes(24).toString('hex');
 }
 
-/** Pastas do workspace no disco local (as conversas do Claude Code ficam indexadas por esse caminho). */
 /**
  * Descobre qual conversa está em foco (pelo título da aba do chat) e avisa o painel Mudanças.
  * Se o foco vai para um arquivo, mantém a última conversa; sem correspondência, mostra tudo.
@@ -726,11 +731,28 @@ async function updateActiveChat(): Promise<void> {
 	const generation = ++chatGeneration;
 	const label = tab.label;
 	const others = open.filter((other) => other !== tab).map((other) => other.label);
-	const results = await Promise.allSettled(localFolders().map((folder) => listSessionsAsync(folder, 100)));
+	const sessions = await chatSessions();
 	if (generation !== chatGeneration) { return; }
-	changes.setActiveChat(matchChatSessions(label, results.flatMap((result) => result.status === 'fulfilled' ? result.value.sessions : []), others));
+	changes.setActiveChat(matchChatSessions(label, sessions, others));
 }
 
+/**
+ * Conversas usadas para reconhecer a aba em foco. Trocar de aba não muda os transcripts, então a
+ * lista é reaproveitada até o observador de transcripts (ou das pastas) avisar, ou por no máximo 30 s.
+ */
+const CHAT_SESSIONS_TTL = 30_000;
+let chatSessionsCache: { at: number; sessions: Promise<SessionInfo[]> } | undefined;
+function chatSessions(): Promise<SessionInfo[]> {
+	if (!chatSessionsCache || Date.now() - chatSessionsCache.at > CHAT_SESSIONS_TTL) {
+		const sessions = Promise.allSettled(localFolders().map((folder) => listSessionsAsync(folder, 100)))
+			.then((results) => results.flatMap((result) => result.status === 'fulfilled' ? result.value.sessions : []));
+		chatSessionsCache = { at: Date.now(), sessions };
+	}
+	return chatSessionsCache.sessions;
+}
+function forgetChatSessions(): void { chatSessionsCache = undefined; }
+
+/** Pastas do workspace no disco local (as conversas do Claude Code ficam indexadas por esse caminho). */
 function localFolders(): string[] {
 	return (vscode.workspace.workspaceFolders ?? [])
 		.filter((folder) => folder.uri.scheme === 'file')
@@ -742,7 +764,7 @@ function watchSessions(context: vscode.ExtensionContext): void {
 	let watchers: vscode.Disposable[] = [];
 	// O título gerado chega ao transcript depois de aparecer na aba: refaz também a conversa em foco.
 	// Os comandos de terminal da conversa também vêm do transcript.
-	const refresh = () => { provider?.refresh(1500); scheduleActiveChat(1500); changes?.refreshShellActivity(); };
+	const refresh = () => { forgetChatSessions(); provider?.refresh(1500); scheduleActiveChat(1500); changes?.refreshShellActivity(); };
 	const setup = () => {
 		watchers.forEach((watcher) => watcher.dispose());
 		watchers = [];
@@ -755,14 +777,10 @@ function watchSessions(context: vscode.ExtensionContext): void {
 	setup();
 	context.subscriptions.push(
 		vscode.workspace.onDidChangeWorkspaceFolders(() => {
+			forgetChatSessions();
 			setup();
 			provider?.refresh(0);
 		}),
 		{ dispose: () => watchers.forEach((watcher) => watcher.dispose()) },
 	);
-}
-
-function requireCryptoNonce(): string {
-	// Extension Host Node; avoid adding a runtime dependency.
-	return randomBytes(24).toString('hex');
 }

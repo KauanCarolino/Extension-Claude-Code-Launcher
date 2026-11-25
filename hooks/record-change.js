@@ -513,22 +513,84 @@ const TURN_LIMITS = Object.freeze({
 });
 const SHA1 = /^[a-f0-9]{40}$/;
 
-/** Padrões simples do .gitignore da raiz, como globs. Negações e classes de caracteres ficam de fora. */
-function gitignoreGlobs(store) {
-	let text;
-	try { text = store.read(path.join(store.root, '.gitignore'), 64 * 1024); } catch { return []; }
-	const globs = [];
-	for (const raw of text.split(/\r?\n/)) {
-		const line = raw.trim();
-		if (!line || line.startsWith('#') || line.startsWith('!') || /[[\]\\]/.test(line)) { continue; }
-		const anchored = line.startsWith('/') || line.replace(/\/+$/, '').includes('/');
-		const pattern = line.replace(/^\/+/, '').replace(/\/+$/, '');
-		if (!pattern || pattern.split('/').includes('..')) { continue; }
-		const base = anchored ? pattern : `**/${pattern}`;
-		globs.push(base, `${base}/**`);
-		if (globs.length >= 400) { break; }
+/** Limites da leitura dos .gitignore: quantos arquivos por percurso, regras por arquivo e tamanho. */
+const GITIGNORE_LIMITS = Object.freeze({ files: 200, rules: 400, bytes: 64 * 1024 });
+
+function regexLiteral(text) { return text.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&'); }
+
+/** Corpo de expressão regular de um padrão do .gitignore (`*`, `**`, `?`, `[...]` e `\`); `null` se malformado. */
+function gitignoreExpression(pattern) {
+	let out = '';
+	for (let i = 0; i < pattern.length; i += 1) {
+		const char = pattern[i];
+		if (char === '\\') {
+			i += 1;
+			if (i >= pattern.length) { return null; }
+			out += regexLiteral(pattern[i]);
+		} else if (char === '*') {
+			const segmentStart = i === 0 || pattern[i - 1] === '/';
+			if (pattern[i + 1] === '*' && segmentStart && (i + 2 === pattern.length || pattern[i + 2] === '/')) {
+				// "**/" casa zero ou mais pastas; "/**" no fim casa tudo o que está dentro.
+				if (pattern[i + 2] === '/') { out += '(?:.*/)?'; i += 2; } else { out += '.*'; i += 1; }
+				continue;
+			}
+			while (pattern[i + 1] === '*') { i += 1; }
+			out += '[^/]*';
+		} else if (char === '?') {
+			out += '[^/]';
+		} else if (char === '[') {
+			let j = i + 1;
+			const negated = pattern[j] === '!' || pattern[j] === '^';
+			if (negated) { j += 1; }
+			// Um "]" logo no começo da classe é literal.
+			const end = pattern.indexOf(']', pattern[j] === ']' ? j + 1 : j);
+			if (end < 0) { out += '\\['; continue; }
+			const members = pattern.slice(j, end).replace(/\\(.)/g, '$1').replace(/[\\\]^]/g, '\\$&');
+			out += negated ? `[^/${members}]` : `(?!/)[${members}]`;
+			i = end;
+		} else {
+			out += regexLiteral(char);
+		}
 	}
-	return globs;
+	return out;
+}
+
+/**
+ * Regras de um .gitignore, na ordem do arquivo. Como no git: `!` reinclui, `/` no começo ou no meio
+ * prende o padrão à pasta do arquivo, `/` no fim vale só para pastas e `\` escapa `#`, `!` e espaços.
+ */
+function gitignoreRules(text) {
+	const rules = [];
+	for (const raw of text.split(/\r?\n/)) {
+		// Espaços no fim são ignorados, a não ser que escapados com "\".
+		let line = raw.replace(/(^|[^\\])\s+$/, '$1');
+		if (!line || line.startsWith('#')) { continue; }
+		let negate = false;
+		if (line.startsWith('!')) { negate = true; line = line.slice(1); }
+		const dirOnly = line.endsWith('/');
+		line = line.replace(/\/+$/, '');
+		const anchored = line.includes('/');
+		line = line.replace(/^\/+/, '');
+		if (!line || line.split('/').includes('..')) { continue; }
+		const body = gitignoreExpression(line);
+		if (body === null) { continue; }
+		rules.push({ negate, dirOnly, expression: new RegExp(`^${anchored ? '' : '(?:.*/)?'}${body}$`) });
+		if (rules.length >= GITIGNORE_LIMITS.rules) { break; }
+	}
+	return rules;
+}
+
+/** Aplica as regras dos .gitignore da raiz até a pasta do caminho; a última regra que casa decide. */
+function gitignored(relative, isDirectory, layers) {
+	let ignored = false;
+	for (const { base, rules } of layers) {
+		const local = base ? relative.slice(base.length + 1) : relative;
+		for (const rule of rules) {
+			if (rule.dirOnly && !isDirectory) { continue; }
+			if (rule.expression.test(local)) { ignored = !rule.negate; }
+		}
+	}
+	return ignored;
 }
 
 function validTurnPath(relative) {
@@ -553,11 +615,15 @@ function validManifest(value, session) {
 		&& typeof value.complete === 'boolean' && typeof value.limited === 'boolean' && validTurnFiles(value.files);
 }
 
-/** Arquivos comuns do projeto, sem seguir links. `complete` é falso quando um limite cortou o percurso. */
+/**
+ * Arquivos comuns do projeto, sem seguir links. Cada pasta percorrida contribui com o próprio
+ * .gitignore. `complete` é falso quando um limite cortou o percurso.
+ */
 function walkProject(store, io, globs, deadline, now) {
 	const files = new Map();
-	let complete = true;
-	const stack = [{ dir: store.root, relative: '', depth: 0 }];
+	let complete = true, gitignoreFiles = 0;
+	/** @type {Array<{ dir: string, relative: string, depth: number, layers: Array<{ base: string, rules: ReturnType<typeof gitignoreRules> }> }>} */
+	const stack = [{ dir: store.root, relative: '', depth: 0, layers: [] }];
 	while (stack.length) {
 		if (now() > deadline) { return { files, complete: false }; }
 		const top = stack.pop();
@@ -565,6 +631,14 @@ function walkProject(store, io, globs, deadline, now) {
 		const { dir, relative, depth } = top;
 		let names;
 		try { names = io.readdirSync(dir); } catch { complete = false; continue; }
+		let layers = top.layers;
+		if (names.includes('.gitignore') && gitignoreFiles < GITIGNORE_LIMITS.files) {
+			gitignoreFiles += 1;
+			try {
+				const rules = gitignoreRules(store.read(path.join(dir, '.gitignore'), GITIGNORE_LIMITS.bytes));
+				if (rules.length) { layers = [...layers, { base: relative, rules }]; }
+			} catch { /* Unreadable or too large: the folder is walked without it. */ }
+		}
 		for (const name of names.sort()) {
 			const child = relative ? `${relative}/${name}` : name;
 			if (TURN_SKIPPED_NAMES.includes(name) || !validTurnPath(child) || matchesGlobs(child, globs)) { continue; }
@@ -572,9 +646,10 @@ function walkProject(store, io, globs, deadline, now) {
 			let stat;
 			try { stat = io.lstatSync(full); } catch { continue; }
 			if (stat.isSymbolicLink()) { continue; }
+			if (layers.length && gitignored(child, stat.isDirectory(), layers)) { continue; }
 			if (stat.isDirectory()) {
 				if (depth + 1 > TURN_LIMITS.depth) { complete = false; continue; }
-				stack.push({ dir: full, relative: child, depth: depth + 1 });
+				stack.push({ dir: full, relative: child, depth: depth + 1, layers });
 			} else if (stat.isFile()) {
 				if (files.size >= TURN_LIMITS.files) { return { files, complete: false }; }
 				files.set(child, { size: stat.size, mtimeMs: stat.mtimeMs });
@@ -801,7 +876,7 @@ function runTurn(phase, input, options = {}) {
 		const turnsDir = path.join(dir, TURN_DIR), mirrorDir = path.join(dir, TURN_BLOB_DIR);
 		const ctx = { store, io, dir, turnsDir, mirrorDir, policy, session: input.session_id, now,
 			manifestFile: path.join(turnsDir, `${sessionKey}.json`), deadline: now() + TURN_LIMITS.millis,
-			globs: compileGlobs([...policy.excludedPatterns, ...gitignoreGlobs(store)]), used: storageBytes(dir, io) };
+			globs: compileGlobs(policy.excludedPatterns), used: storageBytes(dir, io) };
 		return phase === 'turn-start' ? turnStart(ctx) : turnEnd(ctx, input);
 	} catch (error) {
 		return { state: 'blocked', code: diagnosticErrorCode(error) };
@@ -834,6 +909,6 @@ function main() {
 	});
 	process.stdin.on('error', () => { process.exitCode = 0; });
 }
-module.exports = { run, runTurn, TURN_LIMITS, TURN_PHASES, gitignoreGlobs, validatePolicy, excluded, storage, readSmall, storageBytes, rebuildBefore, DEFAULT_POLICY, MAX_FILE_BYTES, MAX_INPUT_BYTES,
+module.exports = { run, runTurn, TURN_LIMITS, TURN_PHASES, gitignoreRules, gitignored, validatePolicy, excluded, storage, readSmall, storageBytes, rebuildBefore, DEFAULT_POLICY, MAX_FILE_BYTES, MAX_INPUT_BYTES,
 	CAPTURE_MAINTENANCE_FILE, CAPTURE_DIAGNOSTICS_DIR, DIAGNOSTIC_STAGES, DIAGNOSTIC_CODES };
 if (require.main === module) { main(); }

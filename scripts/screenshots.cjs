@@ -161,7 +161,7 @@ function main() {
   const target = path.resolve(root, argument('--out', 'docs/images'));
   fs.mkdirSync(target, { recursive: true });
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'launcher-shots-'));
-  const changes = { scripts: ['changes.js'], styles: ['base.css', 'changes.css'] };
+  const changes = { scripts: ['changes-time.js', 'changes-diff.js', 'changes.js'], styles: ['base.css', 'changes.css'] };
   const homeView = { scripts: ['skills.js', 'catalog.js', 'home.js'], styles: ['base.css', 'home.css', 'skills.css'] };
   const sidebar = '#181818', editor = '#1f1f1f';
   const produced = [];

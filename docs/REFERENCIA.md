@@ -1,6 +1,6 @@
 # Referência do Launcher for Claude Code
 
-Descrição completa do comportamento, dos dados locais e da validação. Para uma visão rápida, veja o [README](../README.pt-BR.md).
+Descrição completa do comportamento, dos dados locais e da validação. Para uma visão rápida, veja o [README](../README.pt-BR.md). [English version](REFERENCE.md).
 
 ## Sumário
 
@@ -55,7 +55,7 @@ A interface segue o idioma do editor: português quando ele está em português,
 
 ## Conversas
 
-O ícone de balão no título do editor e o item **Claude** na barra de status abrem a barra lateral oficial. Os comandos **Nova conversa em aba** e **Abrir chat em nova aba** utilizam o editor de conversas do Claude.
+O ícone de balão no título do editor e o item **Claude** na barra de status abrem a barra lateral oficial. Os comandos **Nova conversa em aba** e **Abrir chat em nova aba** utilizam o editor de conversas do Claude. A opção `claudeCodeLauncher.showStatusBarItem` esconde o item da barra de status.
 
 O contêiner **Launcher for Claude Code**, na barra de atividades, contém a view homônima, que apresenta uma barra de abas no topo: **Conversas**, **Skills** (consulte [Gerenciamento de skills](#gerenciamento-de-skills)), **Regras**, **Agentes**, **MCP** (consulte [Regras, agentes e MCP](#regras-agentes-e-mcp)), **Permissões** e **Hooks** (consulte [Permissões e hooks](#permissões-e-hooks)). A aba ativa mostra o nome; as demais, só o ícone. A aba **Conversas** exibe:
 
@@ -242,7 +242,7 @@ Essas mudanças entram na revisão como as outras, com o rótulo **Mudou por com
 
 Limites e o que fica de fora:
 
-- nunca entram `.git`, `.hg`, `.svn`, `node_modules`, `.claude`, os padrões simples do `.gitignore` da raiz (sem negações nem classes de caracteres; `.gitignore` de subpastas não é lido), as exclusões de privacidade e links simbólicos;
+- nunca entram `.git`, `.hg`, `.svn`, `node_modules`, `.claude`, o que os `.gitignore` do projeto ignoram, as exclusões de privacidade e links simbólicos. Cada pasta percorrida lê o próprio `.gitignore` (até 200 arquivos por percurso, 400 regras e 64 KiB cada), com as regras do git: a última que casa decide, `!` reinclui, `/` no começo ou no meio prende o padrão à pasta do arquivo, `/` no fim vale só para pastas, e `*`, `**`, `?`, `[...]` e `\` funcionam. Como no git, uma pasta ignorada não é percorrida, então `!` não reinclui nada dentro dela. Ficam de fora o `.git/info/exclude` e o `core.excludesFile` global;
 - até 5.000 arquivos e 24 níveis de pasta por percurso, 4 segundos de percurso e 200 mudanças por turno; acima disso, o turno é marcado como limitado e arquivos que não foram percorridos não são dados como apagados;
 - as cópias do início do turno usam no máximo metade de `historyMaxStorageMB` e 2.000 arquivos de até 512 KiB. Um arquivo sem cópia aparece mudado, mas sem o conteúdo de antes, e não pode ser recusado;
 - binários não entram: só texto UTF-8 é revisado;
@@ -287,6 +287,7 @@ O histórico contém cópias locais em texto, sem criptografia própria. As excl
 | --- | --- | --- |
 | `claudeCodeLauncher.inlineChanges` | `true` | Exibe as marcas de revisão |
 | `claudeCodeLauncher.manageEditorGroups` | `false` | Habilita a gestão de grupos e preferências |
+| `claudeCodeLauncher.showStatusBarItem` | `true` | Mostra o item **Claude** da barra de status, que abre o chat |
 | `claudeCodeLauncher.hookExecutionMode` | `auto` | `auto`, `exec` ou `disabled`. Opção da máquina: o `settings.json` de um projeto não a altera |
 | `claudeCodeLauncher.historyExcludedPatterns` | Padrões de arquivos sensíveis | Exclusões de novas cópias; aceita `*`, `**` e `?`. Os padrões do `settings.json` de um projeto somam-se aos do usuário e não os substituem |
 | `claudeCodeLauncher.historyRetentionDays` | `30` | Retenção do histórico revisado; `0` desabilita a limpeza por idade |
@@ -344,7 +345,7 @@ Um hook interrompido durante a execução (tempo esgotado, queda do processo ou 
 
 #### Versões anteriores e downgrade
 
-A partir da 1.0.0, os formatos versionados deste diretório são compatíveis dentro da série 1.x: uma versão 1.x lê o que qualquer 1.x anterior gravou. O compromisso completo está no [CHANGELOG](../CHANGELOG.md).
+A partir da 1.0.0, os formatos versionados deste diretório são compatíveis dentro da série 1.x: uma versão 1.x lê o que qualquer 1.x anterior gravou. O compromisso completo está no [CHANGELOG](../CHANGELOG.pt-BR.md).
 
 A versão 0.7.0 não participa desse protocolo. Não se deve manter versões antigas e novas escrevendo no mesmo projeto. Para realizar downgrade, devem-se encerrar os escritores e preservar o diretório de revisão, pois o formato antigo não representa decisões parciais, estado misto nem toda a recuperação atual. A reinstalação do executável anterior não desfaz o conteúdo dos arquivos.
 
@@ -428,7 +429,7 @@ npm run compile && node scripts/l10n-check.cjs
 
 O comando lista frases sem tradução, traduções sem uso e marcadores `{n}` diferentes; `test/l10n.test.js` reprova nos mesmos casos. O manifesto usa `package.nls.json` (inglês, padrão) e `package.nls.pt-br.json`.
 
-O script `vscode:prepublish` executa o build, que remove a saída gerada anteriormente e compila com `noEmitOnError`. Os testes de pacote utilizam árvores temporárias, inclusive uma sem `out/` e outra com saída obsoleta. O verificador inspeciona o VSIX real, compara seus bytes com o runtime atual, calcula o SHA-256 e rejeita conteúdo inesperado. `docs/`, testes, scripts, configurações locais e dependências de desenvolvimento são excluídos do VSIX.
+O script `vscode:prepublish` executa o build, que remove a saída gerada anteriormente, compila com `noEmitOnError` para `out/` (os módulos que os testes usam) e só então junta a extensão num arquivo, `dist/extension.js`, com o esbuild. O pacote leva só o `dist/`: um arquivo carrega mais rápido na ativação do que dezenas de módulos. `npm run watch` mantém os dois atualizados para a depuração (F5). Os testes de pacote utilizam árvores temporárias, inclusive uma sem saída e outra com saída obsoleta em `out/` e `dist/`. O verificador inspeciona o VSIX real, compara seus bytes com o runtime atual, calcula o SHA-256 e rejeita conteúdo inesperado. `docs/`, testes, scripts, configurações locais e dependências de desenvolvimento são excluídos do VSIX.
 
 ### Testes de host
 
@@ -479,12 +480,12 @@ Nenhum desses cenários comprova uma conversa autenticada nem a execução do ho
 
 ### Documentação interna e publicação
 
-Os PRDs, specs e registros de implementação em `docs/` são locais e estão ignorados pelo Git; não se deve utilizar `git add -f docs/`. As exceções são `docs/VERIFICACAO.md` e esta referência, `docs/REFERENCIA.md`, versionados porque o README aponta para eles. A geração de um VSIX não executa commit, push nem publicação em Marketplace ou Open VSX.
+Os PRDs, specs e registros de implementação em `docs/` são locais e estão ignorados pelo Git; não se deve utilizar `git add -f docs/`. As exceções são `docs/VERIFICACAO.md` e esta referência, `docs/REFERENCIA.md`, com as versões em inglês `docs/VERIFICATION.md` e `docs/REFERENCE.md`, versionados porque os READMEs apontam para eles. Ao mudar um, atualize o outro idioma. A geração de um VSIX não executa commit, push nem publicação em Marketplace ou Open VSX.
 
 A publicação é feita pelo workflow `.github/workflows/release.yml`, disparado por uma tag `vX.Y.Z`:
 
-1. Atualizar `version` no `package.json` e no `package-lock.json` e criar a seção `## X.Y.Z — data` no `CHANGELOG.md`.
+1. Atualizar `version` no `package.json` e no `package-lock.json` e trocar `## Não publicado` / `## Unreleased` pela seção `## X.Y.Z — data` no `CHANGELOG.pt-BR.md` e no `CHANGELOG.md` (inglês).
 2. Conferir os checks de **Validate extension** do commit nos três sistemas.
 3. Criar e enviar a tag: `git tag vX.Y.Z && git push origin vX.Y.Z`.
 
-O workflow recusa uma tag que não coincida com o `package.json` ou sem seção no CHANGELOG. Ele repete as validações e o teste de host, gera e verifica o VSIX, e o publica no Visual Studio Marketplace (segredo `VSCE_PAT`) e no Open VSX (segredo `OVSX_PAT`, de onde o Cursor instala). Um registro sem segredo é pulado com aviso. O VSIX verificado é anexado a uma release do GitHub, com as notas tiradas do CHANGELOG. O job de publicação usa o ambiente `release`, que pode exigir aprovação manual nas configurações do repositório.
+O workflow recusa uma tag que não coincida com o `package.json` ou sem seção num dos dois CHANGELOGs. Ele repete as validações e o teste de host, gera e verifica o VSIX, e o publica no Visual Studio Marketplace (segredo `VSCE_PAT`) e no Open VSX (segredo `OVSX_PAT`, de onde o Cursor instala). Um registro sem segredo é pulado com aviso. O VSIX verificado é anexado a uma release do GitHub, com as notas tiradas do `CHANGELOG.md`. O job de publicação usa o ambiente `release`, que pode exigir aprovação manual nas configurações do repositório.

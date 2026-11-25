@@ -117,7 +117,7 @@ function fixture(t, options = {}) {
 		if (id === 'node:fs' && options.nodeFs) { return options.nodeFs; }
 		if (id === 'node:path' && options.nodePath) { return options.nodePath; }
 		// Os módulos extraídos do controlador também precisam dos falsos de vscode, fs e history.
-		if (['./changes-support', './capture-setup', './housekeeping', './owned-file', './remote'].includes(id)) { return load(id.slice(2) + '.js'); }
+		if (['./changes-support', './capture-setup', './housekeeping', './owned-file', './remote', './review-resource', './review-report', './change-metadata'].includes(id)) { return load(id.slice(2) + '.js'); }
 		return sourceRequire(id);
 	};
 	const loaded = new Map();

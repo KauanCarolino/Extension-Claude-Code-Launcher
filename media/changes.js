@@ -1,7 +1,10 @@
 // Painel "Mudanças do Claude". Monta tudo com textContent: nenhum texto vindo
 // dos arquivos ou do Claude é interpretado como HTML.
 (function () {
-	const { t, plural, locale } = window.launcherL10n;
+	const { t, plural } = window.launcherL10n;
+	// changes-time.js e changes-diff.js, carregados antes deste.
+	const { shortTime, relativeLabel, exactLabel, dayLabel } = window.launcherTime;
+	const { renderLine, renderSplitRow, splitRows } = window.launcherDiff;
 	const vscode = acquireVsCodeApi();
 	const root = /** @type {HTMLElement} */ (document.getElementById('root'));
 
@@ -914,77 +917,6 @@
 		return box;
 	}
 
-	function renderLine(line) {
-		const row = el('div', 'row ' + line.kind + (line.pair ? ' paired' : ''));
-		const number = line.kind === 'del' ? line.oldNo : line.newNo;
-		row.append(el('span', 'no', number === undefined ? '' : String(number)));
-		row.append(el('span', 'sign', signOf(line.kind)));
-		row.append(lineText(line));
-		if (line.pair) {
-			row.append(el('span', 'tag', line.pair === 'antes' ? t('antes') : t('depois')));
-		}
-		return row;
-	}
-
-	/** Junta cada bloco de linhas removidas com o de linhas novas, lado a lado. */
-	function splitRows(lines) {
-		const rows = [];
-		let index = 0;
-		while (index < lines.length) {
-			if (lines[index].kind === 'ctx') {
-				rows.push([lines[index], lines[index]]);
-				index += 1;
-				continue;
-			}
-			const dels = [];
-			const adds = [];
-			while (index < lines.length && lines[index].kind !== 'ctx') {
-				(lines[index].kind === 'del' ? dels : adds).push(lines[index]);
-				index += 1;
-			}
-			for (let k = 0; k < Math.max(dels.length, adds.length); k += 1) {
-				rows.push([dels[k] || null, adds[k] || null]);
-			}
-		}
-		return rows;
-	}
-
-	function renderSplitRow(pair) {
-		const row = el('div', 'split-row');
-		row.append(splitCell(pair[0], 'oldNo'), splitCell(pair[1], 'newNo'));
-		return row;
-	}
-
-	function splitCell(line, numberField) {
-		if (!line) {
-			const empty = el('div', 'row filler');
-			empty.append(el('span', 'no'), el('span', 'sign'), el('span', 'text'));
-			return empty;
-		}
-		const cell = el('div', 'row ' + line.kind + (line.pair ? ' paired' : ''));
-		const number = line[numberField];
-		cell.append(el('span', 'no', number === undefined ? '' : String(number)));
-		cell.append(el('span', 'sign', signOf(line.kind)));
-		cell.append(lineText(line));
-		return cell;
-	}
-
-	function lineText(line) {
-		const text = el('span', 'text');
-		if (line.segments) {
-			for (const segment of line.segments) {
-				text.append(el('span', segment.changed ? 'word' : null, segment.text));
-			}
-		} else {
-			text.textContent = line.text === '' ? ' ' : line.text;
-		}
-		return text;
-	}
-
-	function signOf(kind) {
-		return kind === 'add' ? '+' : kind === 'del' ? '−' : ' ';
-	}
-
 	function renderLegend() {
 		const details = el('details', 'legend');
 		details.open = legendOpen;
@@ -1039,67 +971,5 @@
 		for (const node of /** @type {NodeListOf<HTMLElement>} */ (root.querySelectorAll('[data-time]'))) {
 			node.textContent = node.dataset.short ? shortTime(node.dataset.time) : relativeLabel(node.dataset.time);
 		}
-	}
-
-	/** Tempo curto, para caber no fim da linha: "agora", "5 min", "3 h" ou a hora. */
-	function shortTime(iso) {
-		const ms = new Date(iso).getTime();
-		if (isNaN(ms)) {
-			return '';
-		}
-		const minutes = Math.max(0, Math.round((Date.now() - ms) / 60000));
-		if (minutes < 1) {
-			return t('agora');
-		}
-		if (minutes < 60) {
-			return t('{0} min', minutes);
-		}
-		const hours = Math.round(minutes / 60);
-		if (hours < 24) {
-			return t('{0} h', hours);
-		}
-		return new Date(ms).toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' });
-	}
-
-	function relativeLabel(iso) {
-		const ms = new Date(iso).getTime();
-		if (isNaN(ms)) {
-			return '';
-		}
-		const seconds = Math.max(0, Math.round((Date.now() - ms) / 1000));
-		if (seconds < 60) {
-			return t('agora');
-		}
-		const minutes = Math.round(seconds / 60);
-		if (minutes < 60) {
-			return t('há {0} min', minutes);
-		}
-		const hours = Math.round(minutes / 60);
-		if (hours < 24) {
-			return t('há {0} h', hours);
-		}
-		return new Date(ms).toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' });
-	}
-
-	function exactLabel(iso) {
-		const date = new Date(iso);
-		return isNaN(date.getTime()) ? '' : date.toLocaleString(locale, { dateStyle: 'short', timeStyle: 'medium' });
-	}
-
-	function dayLabel(iso) {
-		const date = new Date(iso);
-		if (isNaN(date.getTime())) {
-			return '';
-		}
-		const today = new Date();
-		const yesterday = new Date();
-		yesterday.setDate(today.getDate() - 1);
-		if (date.toDateString() === today.toDateString()) {
-			return t('Hoje');
-		}
-		if (date.toDateString() === yesterday.toDateString()) {
-			return t('Ontem');
-		}
-		return date.toLocaleDateString(locale, { day: '2-digit', month: 'long', year: 'numeric' });
 	}
 })();

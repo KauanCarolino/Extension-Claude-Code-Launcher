@@ -8,6 +8,9 @@ import type { PurgeInventory, PurgeReason, PurgeReport } from './purge-plan';
 import { describeReason } from './messages';
 import { m, plural, t } from './i18n';
 
+/** Edições mostradas no histórico. */
+export const MAX_HISTORY = 60;
+
 export interface ViewEntry extends Partial<ReturnType<typeof projectReview>> {
 	id: string;
 	time: string;

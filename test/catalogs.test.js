@@ -437,7 +437,10 @@ test('a troca de aba liga só a lista visível, ajusta o contexto e acompanha a 
   assert.deepEqual(c.executed.at(-1), ['setContext', 'claudeCodeLauncher.panel', 'mcp']);
   assert.equal(c.posted.some((m) => m.type === 'tab'), false, 'a página que pediu a troca não recebe a troca de volta');
   fire();
-  await new Promise((resolve) => setTimeout(resolve, 300));
+  // A releitura espera 250 ms e ainda lê o disco: aguarda o resultado em vez de um prazo fixo.
+  for (const deadline = Date.now() + 3000; !c.posted.some((m) => m.kind) && Date.now() < deadline;) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
   assert.deepEqual([...new Set(c.posted.map((m) => m.kind))], ['mcp']);
   await c.catalogs.showPanel('../fora');
   assert.deepEqual(c.executed.at(-1), ['setContext', 'claudeCodeLauncher.panel', 'mcp']);

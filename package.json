@@ -2,7 +2,7 @@
   "name": "launcher-for-claude-code",
   "displayName": "Launcher for Claude Code",
   "description": "%extension.description%",
-  "version": "1.2.9",
+  "version": "1.3.0",
   "publisher": "KauanDeveloper",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -41,7 +41,7 @@
   "activationEvents": [
     "onStartupFinished"
   ],
-  "main": "./out/extension.js",
+  "main": "./dist/extension.js",
   "extensionKind": [
     "workspace"
   ],
@@ -465,6 +465,11 @@
           "default": false,
           "description": "%config.manageEditorGroups%"
         },
+        "claudeCodeLauncher.showStatusBarItem": {
+          "type": "boolean",
+          "default": true,
+          "description": "%config.showStatusBarItem%"
+        },
         "claudeCodeLauncher.hookExecutionMode": {
           "type": "string",
           "scope": "machine",
@@ -603,7 +608,7 @@
     "compile": "node scripts/build.cjs",
     "typecheck": "tsc -p ./ --noEmit && tsc -p tsconfig.hooks.json && tsc -p tsconfig.webview.json",
     "lint": "eslint src hooks media",
-    "watch": "tsc -watch -p ./",
+    "watch": "node scripts/build.cjs --watch",
     "test": "npm run compile && node --test \"test/*.test.js\"",
     "vscode:prepublish": "npm run compile",
     "package": "vsce package",
@@ -618,6 +623,7 @@
     "@vscode/codicons": "0.0.36",
     "@vscode/test-electron": "3.1.0",
     "@vscode/vsce": "4.1.1",
+    "esbuild": "0.28.2",
     "eslint": "10.15.0",
     "typescript": "^5.6.0",
     "typescript-eslint": "8.73.0",

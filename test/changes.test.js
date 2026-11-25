@@ -191,12 +191,12 @@ test('metadata resolving after purge cannot repopulate caches from the earlier e
 	await f.store(); f.policy();
 	const row = { ...entry(f.root, 'ordinary'), transcript: path.join(f.root, 'sessions', 'ordinary.jsonl'), toolUseId: 'tool-1' };
 	writeLog(f, [row]); f.controller.entries = [row];
-	const loading = f.controller.fillMeta(); await began;
+	const loading = f.controller.meta.fill(); await began;
 	await f.controller.clearAllReviewData();
 	resolveMeta({ reasons: new Map([['tool-1', 'ordinary reason']]), requests: new Map([['tool-1', { id: 'request-1', text: 'ordinary request' }]]) });
 	await loading;
-	assert.equal(f.controller.reasonCache.size, 0);
-	assert.equal(f.controller.requestCache.size, 0);
+	assert.equal(f.controller.meta.reasonCache.size, 0);
+	assert.equal(f.controller.meta.requestCache.size, 0);
 	assert.equal(fs.existsSync(path.join(f.dir, 'meta.json')), false);
 });
 
@@ -285,6 +285,15 @@ test('capture quota is reflected in effective state, while active capture does n
 	f.controller.entries = await f.controller.loadEntries();
 	assert.equal(f.controller.captureWarnings.has(key), false);
 	assert.equal(f.controller.hookWarnings.get(key), 'configuration warning retained');
+	assert.equal(await f.controller.hooksEnabled(), true);
+});
+
+test('an edit outside the project neither warns nor turns the change log off', async (t) => {
+	const f = fixture(t); f.configuredHooks(); f.policy(); writeLog(f, [entry(f.root, 'ordinary')]);
+	const key = f.folder.uri.toString();
+	writeDiagnostic(f, { stage: 'scope', code: 'resourceOutsideScope' });
+	f.controller.entries = await f.controller.loadEntries();
+	assert.equal(f.controller.captureWarnings.has(key), false);
 	assert.equal(await f.controller.hooksEnabled(), true);
 });
 
@@ -536,10 +545,11 @@ test('a recreated project file gets the default permissions, not the private mod
 	if (process.platform === 'win32') { t.skip('POSIX permission bits'); return; }
 	const f = fixture(t), file = path.join(f.root, 'scripts', 'restored.sh'), sibling = path.join(f.root, 'sibling.txt');
 	fs.writeFileSync(sibling, 'ordinary file');
-	await f.controller.writeResource(file, f.root, { kind: 'text', text: '#!/bin/sh\n' }, { kind: 'absent' });
+	const resource = f.controller.resourceAdapter({ root: f.root });
+	await resource.write(file, { kind: 'text', text: '#!/bin/sh\n' }, { kind: 'absent' });
 	assert.equal(fs.readFileSync(file, 'utf8'), '#!/bin/sh\n');
 	assert.equal(fs.statSync(file).mode & 0o777, fs.statSync(sibling).mode & 0o777);
-	await assert.rejects(f.controller.writeResource(file, f.root, { kind: 'text', text: 'other' }, { kind: 'absent' }), { code: 'externalChange' });
+	await assert.rejects(resource.write(file, { kind: 'text', text: 'other' }, { kind: 'absent' }), { code: 'externalChange' });
 	assert.equal(fs.readFileSync(file, 'utf8'), '#!/bin/sh\n');
 });
 

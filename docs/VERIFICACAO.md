@@ -1,6 +1,6 @@
 # Verificação e compatibilidade
 
-Detalhes de verificação do Launcher for Claude Code, separados do README para mantê-lo objetivo. O comportamento completo está na [referência](REFERENCIA.md).
+Detalhes de verificação do Launcher for Claude Code, separados do README para mantê-lo objetivo. O comportamento completo está na [referência](REFERENCIA.md). [English version](VERIFICATION.md).
 
 ## Escopo da verificação
 
@@ -27,7 +27,7 @@ Para conferir num ambiente remoto real, siga a lista em [REFERENCIA.md](REFERENC
 
 ## Captura por comando
 
-`test/hook-turn.test.js` exercita o hook do turno com arquivos reais: criação, mudança e exclusão por comando com antes e depois revisáveis, um segundo `Stop` no mesmo turno, edições do Edit/Write que não se repetem e um formatador depois delas, as exclusões (`.git`, `node_modules`, `.gitignore` da raiz, privacidade, binários), captura pausada, manutenção, manifesto adulterado, orçamento das cópias, coleta das cópias antigas e a saída vazia do processo. `test/turn-capture.test.js` liga o resultado ao painel: o rótulo, o pedido e a explicação tirados do transcript e o aviso de terminal dispensado. O contrato `official` com o Claude Code real continua cobrindo só o formato dos hooks no evento Setup; uma conversa real com `UserPromptSubmit` e `Stop` não é automatizada.
+`test/hook-turn.test.js` exercita o hook do turno com arquivos reais: criação, mudança e exclusão por comando com antes e depois revisáveis, um segundo `Stop` no mesmo turno, edições do Edit/Write que não se repetem e um formatador depois delas, as exclusões (`.git`, `node_modules`, `.gitignore` da raiz e de subpastas com negações, privacidade, binários), as regras do `.gitignore` (âncoras, só pastas, negação, classes, `**` e escapes), captura pausada, manutenção, manifesto adulterado, orçamento das cópias, coleta das cópias antigas e a saída vazia do processo. `test/turn-capture.test.js` liga o resultado ao painel: o rótulo, o pedido e a explicação tirados do transcript e o aviso de terminal dispensado. O contrato `official` com o Claude Code real continua cobrindo só o formato dos hooks no evento Setup; uma conversa real com `UserPromptSubmit` e `Stop` não é automatizada.
 
 ## Compatibilidade de hooks
 

@@ -1,8 +1,8 @@
 import * as vscode from 'vscode';
 import { computeDiff } from './diff';
 import { type ActiveChat, fileKey, isBlobHash, RawEntry, resolveSnapshot, Status } from './logic';
-import { readTranscriptMeta, RequestInfo, sessionsDir, clearTranscriptMetadataForRoots, transcriptMetadataCacheCount, findTurnToolUse } from './sessions';
-import { activeReview, copyReview, ingestEntries, ReviewContent, ReviewDecisionRequest, ReviewError, ReviewResolution, SharedReview, sameContent } from './review';
+import { RequestInfo, sessionsDir, clearTranscriptMetadataForRoots, transcriptMetadataCacheCount } from './sessions';
+import { activeReview, copyReview, ingestEntries, ReviewDecisionRequest, ReviewError, ReviewResolution, SharedReview } from './review';
 import { ReviewStore } from './review-store';
 import { withCaptureMaintenance, recoverCaptureMaintenance } from './maintenance';
 import { executeDecisionDetailed, ResourceAdapter, undoItemDetailed } from './reversal';
@@ -10,22 +10,23 @@ import { inspectHookConfiguration } from './hooks';
 import { CaptureSetup, LOG_DIR } from './capture-setup';
 import { collectLogBlobs, housekeep, MAX_LOG_ENTRIES, pruneReviewedLog } from './housekeeping';
 import { writeOwnedFile } from './owned-file';
+import { PURGE_STATE_FILE, resourceAdapter as reviewResourceAdapter } from './review-resource';
+import { showReviewReport } from './review-report';
+import { ChangeMetadata } from './change-metadata';
 import { readShellActivity, emptyShellActivity, type ShellActivity } from './shell-activity';
 import { htmlLanguage, plural, t, webviewDictionaryScript } from './i18n';
-import { isTrashUnavailable, remoteName } from './remote';
-import { assessResourceScope, assessStoragePath, makeCapturePolicy, readLogFile, readVerifiedBlob, safeReadText, transcriptAllowed, validateMessage, validateSavedMeta, retentionCandidates, CaptureDiagnostics, readCaptureDiagnostics } from './history';
+import { remoteName } from './remote';
+import { assessStoragePath, readLogFile, readVerifiedBlob, safeReadText, validateMessage, validateSavedMeta, retentionCandidates, CaptureDiagnostics, readCaptureDiagnostics } from './history';
 import { captureHealth, CaptureConfiguration, retainCaptureEvidence } from './capture-health';
-import { projectReview, operationView, pendingOperationView, ReviewItemResult, blockedReviewResult, ReviewResultError, formatReviewItemResult, summarizeReviewResults } from './review-results';
-import { evaluateMetadataPolicy, revalidateMetadataPermit, MetadataPermit, MetadataPolicyContext } from './metadata-policy';
+import { projectReview, operationView, pendingOperationView, ReviewItemResult, blockedReviewResult, ReviewResultError, formatReviewItemResult } from './review-results';
 import { inventoryPurge, planPurge, summarizePurge, PurgeInventory, PurgeEffect, PurgeReport, PurgeReason, PurgeMemory, PURGE_MEMORY_PATHS } from './purge-plan';
 import { describeReason } from './messages';
-import { BaseView, FileSummary, ViewEntry, changesSummary, basename, capitalize, countFiles, errorCode, excludedPatterns, explain, purgeFailureReason, purgeInventoryText, purgeReportText, toViewEntry, HOOK_SCRIPT_DIFFERS, NODE_MISSING } from './changes-view';
+import { BaseView, FileSummary, ViewEntry, changesSummary, basename, capitalize, countFiles, errorCode, explain, purgeFailureReason, purgeInventoryText, purgeReportText, toViewEntry, HOOK_SCRIPT_DIFFERS, NODE_MISSING, MAX_HISTORY } from './changes-view';
 import { STATUS_KEY, LEGACY_REVIEWED_KEY, UNDO_KEY, Undo, loadStatus, loadUndo, confirm, createNonce, existsLocal, canonicalResource } from './changes-support';
 import * as nodeFs from 'node:fs';
 import * as nodePath from 'node:path';
 import * as crypto from 'node:crypto';
 import { Buffer as Bytes } from 'node:buffer';
-import { TextDecoder as Utf8Decoder } from 'node:util';
 
 export type { RawEntry, Snapshot } from './logic';
 
@@ -34,15 +35,11 @@ const BLOB_DIR = [...LOG_DIR, 'blobs'];
 /** Explicação e pedido já achados no transcript, para não depender dele depois. */
 const META_PATH = [...LOG_DIR, 'meta.json'];
 const SCHEME = 'claude-launcher-change';
-const PURGE_STATE_FILE = 'purge-state.v1.json';
 const PENDING_CONTEXT = 'claudeCodeLauncher.hasPendingChanges';
 /** Comando interno de inline.ts: esquece a revisão aberta de um arquivo, sem marcar nada. */
 export const DROP_REVIEW_COMMAND = 'claude-code-launcher.dropReview';
 
-/** Edições mostradas no histórico. */
-const MAX_HISTORY = 60;
 const MAX_STATUS = 3000;
-const MAX_META_ATTEMPTS = 10;
 /** Intervalo da coleta de marcadores e cópias sem uso, por pasta. */
 const HOUSEKEEPING_INTERVAL_MS = 6 * 60 * 60 * 1000;
 /** Nova tentativa depois de uma coleta que não pôde terminar. */
@@ -101,14 +98,7 @@ export class ChangesController implements
 	private shellGeneration = 0;
 	/** Pastas com a captura do turno configurada: nelas, o que os comandos mudam já entra na revisão. */
 	private readonly turnCaptureFolders = new Set<string>();
-	/** Chamada de ferramenta do transcript associada a cada mudança por comando, para achar pedido e explicação. */
-	private readonly commandToolUses = new Map<string, string>();
-	private metaTimer: ReturnType<typeof setTimeout> | undefined;
 	private readonly disposables: vscode.Disposable[] = [];
-	private readonly reasonCache = new Map<string, string>();
-	private readonly requestCache = new Map<string, RequestInfo>();
-	private readonly metaAttempts = new Map<string, number>();
-	private readonly pendingMetadata = new Map<string, { reason?: string; request?: RequestInfo; permits: MetadataPermit[]; epoch: number }>();
 	private readonly status: Map<string, ReviewResolution>;
 	private readonly undoStack: Undo[];
 	private readonly stores = new Map<string, ReviewStore>();
@@ -139,6 +129,8 @@ export class ChangesController implements
 	private readonly recoveryOffered = new Set<string>();
 	/** Script, política e handlers da captura de cada pasta. */
 	readonly capture: CaptureSetup;
+	/** Explicação e pedido de cada edição, lidos do transcript. */
+	private readonly meta: ChangeMetadata;
 	private readonly resourceAliases = new Map<string, string>();
 	private readonly ambiguousResources = new Set<string>();
 	private refreshing: Promise<void> | undefined;
@@ -154,8 +146,6 @@ export class ChangesController implements
 	private readonly stateText = new Map<string, string>();
 	private writeChain: Promise<void> = Promise.resolve();
 	private writeQueued = false;
-	private metaRunning = false;
-	private metaAgain = false;
 	/** Arquivos marcados no Explorer: chave → caminho real. */
 	private decorated = new Map<string, string>();
 	private readonly statusItem: vscode.StatusBarItem;
@@ -173,6 +163,18 @@ export class ChangesController implements
 			storeOf: (folder) => this.stores.get(folder.uri.toString()),
 			cancelled: () => this.disposed,
 			inMaintenance: () => this.maintenance,
+		});
+		this.meta = new ChangeMetadata({
+			entries: () => this.entries,
+			isDecided: (id) => this.status.has(id),
+			folderKeyOf: (id) => this.entryFolder.get(id),
+			storeWritable: (folderKey) => Boolean(this.stores.get(folderKey)?.writable),
+			readPurgeState: (folder) => this.readPurgeState(folder),
+			readCapturePolicy: (folder) => this.capture.readCapturePolicy(folder),
+			disposed: () => this.disposed,
+			inMaintenance: () => this.maintenance,
+			epoch: () => this.metaEpoch,
+			queueStateWrite: () => this.queueStateWrite(),
 		});
 		this.statusItem = vscode.window.createStatusBarItem('claude-code-launcher.pending', vscode.StatusBarAlignment.Right, 99);
 		this.statusItem.name = t('Mudanças do Claude');
@@ -207,7 +209,7 @@ export class ChangesController implements
 		this.disposables.push(vscode.workspace.onDidChangeConfiguration((event) => {
 			if (event.affectsConfiguration('claudeCodeLauncher') || event.affectsConfiguration('claudeCode.claudeProcessWrapper')) {
 				this.metaEpoch += 1;
-				this.pendingMetadata.clear();
+				this.meta.pendingMetadata.clear();
 				this.scheduleRefresh();
 				void this.repairHooks().catch(() => undefined);
 			}
@@ -224,7 +226,7 @@ export class ChangesController implements
 	dispose(): void {
 		if (this.disposed) { return; }
 		this.disposed = true; this.metaEpoch += 1;
-		clearTimeout(this.refreshTimer); clearTimeout(this.publishTimer); clearTimeout(this.metaTimer); clearTimeout(this.shellTimer);
+		clearTimeout(this.refreshTimer); clearTimeout(this.publishTimer); clearTimeout(this.shellTimer); this.meta.dispose();
 		this.viewSubscriptions.splice(0).forEach((subscription) => subscription.dispose());
 		this.panelSubscriptions.splice(0).forEach((subscription) => subscription.dispose());
 		this.view = undefined; const panel = this.panel; this.panel = undefined; panel?.dispose();
@@ -235,7 +237,7 @@ export class ChangesController implements
 			this.stores.clear(); this.sharedReviews.clear(); this.fileStores.clear(); this.resourceAliases.clear(); this.ambiguousResources.clear();
 			this.entries = []; this.undoStack.splice(0); this.status.clear(); this.logCache.clear(); this.entryFolder.clear(); this.ordinals.clear();
 			clearTranscriptMetadataForRoots((vscode.workspace.workspaceFolders ?? []).filter((folder) => folder.uri.scheme === 'file').map((folder) => sessionsDir(folder.uri.fsPath)));
-			this.reasonCache.clear(); this.requestCache.clear(); this.commandToolUses.clear(); this.metaAttempts.clear(); this.pendingMetadata.clear(); this.blobCache.clear(); this.viewCache.clear(); this.summaryCache.clear();
+			this.meta.clear(); this.blobCache.clear(); this.viewCache.clear(); this.summaryCache.clear();
 			this.stateText.clear(); this.comparisonTexts.clear(); this.decorated.clear(); this.lastOperationResults.clear();
 			this.captureEvidence.clear(); this.captureHealthStates.clear(); this.captureWarnings.clear(); this.hookWarnings.clear(); this.runtimeWarnings.clear(); this.nextHousekeeping.clear(); this.recoveryOffered.clear(); this.storeErrors.clear();
 		});
@@ -588,7 +590,7 @@ export class ChangesController implements
 			preview.push(t('Pasta {0}: {1}.', folder.index + 1, purgeInventoryText(inventory)));
 		}
 		if (!(await confirm(t('Apagar todos os dados locais de revisão?'), `${preview.join('\n')}\n` + t('Isso remove dados próprios de captura, histórico, cópias locais, decisões, metadados e recuperação de recusas. Caches são da janela. Arquivos atuais, controles de pausa e hooks de terceiros permanecem. Encerre conversas e outros escritores. O inventário será revalidado antes dos efeitos.'), t('Apagar dados de revisão')))) { return; }
-		this.beginMaintenance(); this.metaEpoch += 1; this.pendingMetadata.clear(); this.lastPurgeReports.splice(0);
+		this.beginMaintenance(); this.metaEpoch += 1; this.meta.pendingMetadata.clear(); this.lastPurgeReports.splice(0);
 		const runs: Array<{ folder: vscode.WorkspaceFolder; before: PurgeInventory; effects: PurgeEffect[]; reason?: PurgeReason; store?: ReviewStore; marker?: string }> = [];
 		let memorySucceeded = true; let memoryFailed = false;
 		try {
@@ -631,7 +633,7 @@ export class ChangesController implements
 				try { await this.context.workspaceState.update(UNDO_KEY, []); await this.context.workspaceState.update(STATUS_KEY, {}); await this.context.workspaceState.update(LEGACY_REVIEWED_KEY, []); this.undoStack.splice(0); }
 				catch { memorySucceeded = false; memoryFailed = true; }
 			} else { memorySucceeded = false; }
-			this.reasonCache.clear(); this.requestCache.clear(); this.commandToolUses.clear(); this.metaAttempts.clear(); this.pendingMetadata.clear(); this.blobCache.clear(); this.viewCache.clear(); this.summaryCache.clear(); this.comparisonTexts.clear(); this.lastOperationResults.clear(); this.stateText.clear();
+			this.meta.clear(); this.blobCache.clear(); this.viewCache.clear(); this.summaryCache.clear(); this.comparisonTexts.clear(); this.lastOperationResults.clear(); this.stateText.clear();
 			clearTranscriptMetadataForRoots(folders.filter((folder) => folder.uri.scheme === 'file').map((folder) => sessionsDir(folder.uri.fsPath)));
 			for (const run of runs) {
 				try {
@@ -659,7 +661,7 @@ export class ChangesController implements
 			const saved = this.context.workspaceState.get<unknown>(UNDO_KEY, []); if (!Array.isArray(saved)) { return { undoCount: null, cacheCount: null, complete: false }; }
 			const undoCount = saved.length + [...this.stores.values()].reduce((count, store) => count + store.get().undo.filter((item) => item.phase !== 'consumed').length, 0);
 			const roots = (vscode.workspace.workspaceFolders ?? []).filter((folder) => folder.uri.scheme === 'file').map((folder) => sessionsDir(folder.uri.fsPath));
-			return { undoCount, cacheCount: this.reasonCache.size + this.requestCache.size + this.commandToolUses.size + this.pendingMetadata.size + this.blobCache.size + this.viewCache.size + this.summaryCache.size + this.comparisonTexts.size + this.lastOperationResults.size + this.stateText.size + transcriptMetadataCacheCount(roots), complete: true };
+			return { undoCount, cacheCount: this.meta.size + this.blobCache.size + this.viewCache.size + this.summaryCache.size + this.comparisonTexts.size + this.lastOperationResults.size + this.stateText.size + transcriptMetadataCacheCount(roots), complete: true };
 		} catch { return { undoCount: null, cacheCount: null, complete: false }; }
 	}
 	private forgetCapture(folder: vscode.WorkspaceFolder): void { const key = folder.uri.toString(); this.captureEvidence.delete(key); this.captureHealthStates.delete(key); this.captureWarnings.delete(key); this.runtimeWarnings.delete(key); }
@@ -752,14 +754,14 @@ export class ChangesController implements
 
 	/** Arquivos pendentes em que todas as mudanças vieram deste pedido; os que misturam outros pedidos ficam de fora. */
 	private requestGroups(requestId: string | undefined): RawEntry[][] {
-		const ids = new Set(this.entries.filter((entry) => requestId && this.requestCache.get(entry.id)?.id === requestId && !this.status.has(entry.id)).map((entry) => entry.id));
+		const ids = new Set(this.entries.filter((entry) => requestId && this.meta.requestCache.get(entry.id)?.id === requestId && !this.status.has(entry.id)).map((entry) => entry.id));
 		if (!ids.size) { return []; }
 		return this.pendingGroups().filter((list) => list.some((entry) => ids.has(entry.id)) && this.getSharedReview(list[0].file)?.ids.every((id) => ids.has(id)));
 	}
 
 	/** Mantém tudo o que o Claude mudou para atender um pedido. */
 	private async acceptRequest(requestId: string | undefined): Promise<void> {
-		const pending = this.entries.some((entry) => requestId && this.requestCache.get(entry.id)?.id === requestId && !this.status.has(entry.id));
+		const pending = this.entries.some((entry) => requestId && this.meta.requestCache.get(entry.id)?.id === requestId && !this.status.has(entry.id));
 		if (!pending) { return; }
 		const groups = this.requestGroups(requestId);
 		if (!groups.length) { void vscode.window.showInformationMessage(t('Os arquivos deste pedido também têm mudanças de outros pedidos. Aceite-os um a um.')); return; }
@@ -780,7 +782,7 @@ export class ChangesController implements
 		const entries = this.visibleEntries().slice(0, MAX_HISTORY).reverse();
 		if (!entries.length) { void vscode.window.showInformationMessage(t('Não há mudanças para resumir.')); return; }
 		const markdown = changesSummary(entries.map((entry) => {
-			const view = this.viewOf(entry), request = this.requestCache.get(entry.id);
+			const view = this.viewOf(entry), request = this.meta.requestCache.get(entry.id);
 			return { file: view.file, dir: view.dir, action: view.action, added: view.added + view.modified, removed: view.removed + view.modified,
 				status: this.status.get(entry.id) ?? null, requestId: request?.id ?? null, request: request?.text ?? null, reason: this.reasonOf(entry) };
 		}));
@@ -792,14 +794,14 @@ export class ChangesController implements
 	/** Recusa tudo o que o Claude mudou para atender um pedido. */
 	private async rejectRequest(requestId: string | undefined): Promise<void> {
 		const entries = this.entries.filter(
-			(entry) => this.requestCache.get(entry.id)?.id === requestId && !this.status.has(entry.id),
+			(entry) => this.meta.requestCache.get(entry.id)?.id === requestId && !this.status.has(entry.id),
 		);
 		if (!requestId || entries.length === 0) {
 			return;
 		}
 		const requestIds = new Set(entries.map((entry) => entry.id));
 		const groups = this.pendingGroups().filter((list) => list.some((entry) => requestIds.has(entry.id)) && this.getSharedReview(list[0].file)?.ids.every((id) => requestIds.has(id)));
-		const text = this.requestCache.get(entries[0].id)?.text ?? '';
+		const text = this.meta.requestCache.get(entries[0].id)?.text ?? '';
 		const ok = await confirm(
 			t('Desfazer o pedido "{0}"?', text),
 			plural(groups.length, '{0} arquivo volta a ser como era antes deste pedido. Arquivos mudados depois dele ficam como estão. Dá para desfazer logo depois.',
@@ -831,92 +833,11 @@ export class ChangesController implements
 			return results;
 	}
 
-		private report(results: readonly ReviewItemResult[]): void {
-			if (this.disposed || !results.length) { return; }
-			const summary = summarizeReviewResults(results);
-			const details = () => {
-				if (this.disposed) { return; }
-				return vscode.window.showQuickPick(results.map((result) => ({ label: basename(result.file), description: result.reason,
-					detail: formatReviewItemResult(result) })), { title: t('Resultado da revisão por arquivo'), placeHolder: t('Confira o conteúdo, o registro e a próxima ação de cada item.') });
-			};
-			const complete = results.every((result) => result.outcome === 'complete');
-			const undoLabel = t('Desfazer'), detailsLabel = t('Detalhes');
-			if (complete) {
-				const undo = results.every((result) => result.action === 'reject');
-				void vscode.window.showInformationMessage(summary.message, ...(undo ? [undoLabel, detailsLabel] : [detailsLabel])).then((choice) => {
-					if (this.disposed) { return; }
-					if (choice === undoLabel) { void this.undoReject(); } else if (choice === detailsLabel) { void details(); }
-				});
-			} else { void vscode.window.showWarningMessage(summary.message, detailsLabel).then((choice) => { if (!this.disposed && choice === detailsLabel) { void details(); } }); }
+	private report(results: readonly ReviewItemResult[]): void {
+		showReviewReport(results, { isDisposed: () => this.disposed, undo: () => this.undoReject() });
 	}
 
-
-	private resourceAdapter(store: ReviewStore): ResourceAdapter {
-		return { read: (file) => this.observeResource(file, store.root, true), readPersisted: (file) => this.observeResource(file, store.root, false), write: (file, target, expected) => this.writeResource(file, store.root, target, expected) };
-	}
-	private async observeResource(file: string, root: string, buffer: boolean): Promise<ReviewContent> {
-		const scope = await assessResourceScope(file, root); if (!scope.allowed) { throw new ReviewError(scope.code || 'resourceOutsideScope'); }
-		const uri = vscode.Uri.file(file);
-		let disk: ReviewContent;
-		try {
-			const stat = await nodeFs.promises.lstat(file); if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 8 * 1024 * 1024) { throw new ReviewError('unsupportedResource'); }
-			const bytes = await nodeFs.promises.readFile(file);
-			disk = { kind: 'text', text: new Utf8Decoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes) };
-		} catch (error) { if ((error as { code?: string }).code === 'ENOENT') { disk = { kind: 'absent' }; } else { throw error; } }
-		if (buffer) {
-			const open = vscode.workspace.textDocuments.find((doc) => !doc.isClosed && doc.uri.toString() === uri.toString());
-			if (open && !(disk.kind === 'absent' && !open.isDirty)) { const text = open.getText(); return { kind: 'text', text: disk.kind === 'text' && disk.text.startsWith('\uFEFF') && !text.startsWith('\uFEFF') ? '\uFEFF' + text : text }; }
-		}
-		return disk;
-	}
-	private async writeResource(file: string, root: string, target: ReviewContent, expected: ReviewContent): Promise<void> {
-		if (this.disposed) { throw new ReviewError('cancelledBeforeEffect'); }
-		const purge = await safeReadText(nodePath.join(root, ...LOG_DIR, PURGE_STATE_FILE), root, 4096);
-		if (purge.kind !== 'absent') { throw new ReviewError('purgeNeedsRecovery'); }
-		if (!sameContent(await this.observeResource(file, root, true), expected)) { throw new ReviewError('externalChange'); }
-		const uri = vscode.Uri.file(file);
-		if (file.toLowerCase().endsWith('.ipynb') || vscode.workspace.notebookDocuments.some((doc) => doc.uri.toString() === uri.toString())) { throw new ReviewError('unsupportedNotebook'); }
-		if (target.kind === 'unavailable') { throw new ReviewError('unknownSnapshot'); }
-		if (target.kind === 'absent') {
-			const open = vscode.workspace.textDocuments.find((doc) => doc.uri.toString() === uri.toString());
-			if (open?.isDirty) { throw new ReviewError('dirtyDocument'); }
-			if (expected.kind === 'absent') { return; }
-			if (this.disposed) { throw new ReviewError('cancelledBeforeEffect'); }
-			try { await vscode.workspace.fs.delete(uri, { useTrash: true }); } catch (error) { if (isTrashUnavailable(error)) { throw new ReviewError('trashUnavailable'); } throw error; }
-			if (this.disposed) { throw new ReviewError('cancelledAfterEffect'); } return;
-		}
-		if (expected.kind === 'absent') {
-			await nodeFs.promises.mkdir(nodePath.dirname(file), { recursive: true });
-			const scope = await assessResourceScope(file, root); if (!scope.allowed) { throw new ReviewError('resourceOutsideScope'); }
-			if (this.disposed) { throw new ReviewError('cancelledBeforeEffect'); }
-			// Arquivo do projeto, não dado privado da revisão: nasce com a permissão padrão do sistema (umask).
-			await nodeFs.promises.writeFile(file, target.text, { flag: 'wx' }); if (this.disposed) { throw new ReviewError('cancelledAfterEffect'); } return;
-		}
-		const document = await vscode.workspace.openTextDocument(uri);
-		if (this.disposed) { throw new ReviewError('cancelledBeforeEffect'); }
-		const current = await this.observeResource(file, root, true);
-		if (!sameContent(current, expected)) { throw new ReviewError('externalChange'); }
-		const disk = await this.observeResource(file, root, false);
-		if (disk.kind !== 'text' || disk.text.startsWith('\uFEFF') !== target.text.startsWith('\uFEFF')) { throw new ReviewError('unsupportedEncoding'); }
-		const text = target.text.replace(/^\uFEFF/, '');
-		if (document.getText() !== text) {
-			const version = document.version;
-			const edit = new vscode.WorkspaceEdit();
-			const clean = text.replace(/\r\n/g, '\n');
-			const eol = text.includes('\r\n') ? vscode.EndOfLine.CRLF : vscode.EndOfLine.LF;
-			edit.set(uri, [vscode.TextEdit.replace(document.validateRange(new vscode.Range(0, 0, document.lineCount, 0)), clean), vscode.TextEdit.setEndOfLine(eol)]);
-			if (this.disposed) { throw new ReviewError('cancelledBeforeEffect'); }
-			if (document.version !== version) { throw new ReviewError('externalChange'); }
-			if (!(await vscode.workspace.applyEdit(edit))) { throw new ReviewError('applyFailed'); }
-		}
-		if (this.disposed) { throw new ReviewError('cancelledAfterEffect'); }
-		// A human edit may arrive while applyEdit is in flight. Keep that buffer
-		// dirty instead of implicitly saving text that was not part of this plan.
-		if (document.getText() !== text) { throw new ReviewError('externalChange'); }
-		const saved = await document.save();
-		if (this.disposed) { throw new ReviewError('cancelledAfterEffect'); }
-		if (!saved) { throw new ReviewError('saveReturnedFalse'); }
-	}
+	private resourceAdapter(store: ReviewStore): ResourceAdapter { return reviewResourceAdapter(store.root, () => this.disposed); }
 
 	// ---- Estado ---------------------------------------------------------------------
 
@@ -1050,7 +971,7 @@ export class ChangesController implements
 				if (this.disposed) { return; }
 				const live = new Set(this.entries.map((entry) => entry.id));
 				for (const id of this.viewCache.keys()) { if (!live.has(id)) { this.viewCache.delete(id); } }
-				this.summaryCache.clear(); this.publish(); void this.fillMeta().catch(() => undefined); this.refreshShellActivity(0);
+				this.summaryCache.clear(); this.publish(); void this.meta.fill().catch(() => undefined); this.refreshShellActivity(0);
 				// Depois de publicar: a coleta não muda o que o painel mostra e não deve atrasá-lo.
 				await this.applyHousekeeping();
 			} while (this.refreshAgain && !this.disposed);
@@ -1153,7 +1074,7 @@ export class ChangesController implements
 		const visibleWhenScoped = (entry: RawEntry): boolean => inFocus(entry) || unclaimedPending(entry);
 		const inChat = (entry: RawEntry): boolean => !scoped || visibleWhenScoped(entry);
 		const history: ViewEntry[] = this.entries.filter(inChat).slice(0, MAX_HISTORY).map((entry) => {
-			const request = this.requestCache.get(entry.id);
+			const request = this.meta.requestCache.get(entry.id);
 				const context = this.entryFolder.get(entry.id), store = context ? this.stores.get(context) : undefined;
 				const segment = context ? states.get(context)?.reviews[entry.file]?.find((review) => review.ids.includes(entry.id)) : undefined;
 				const active = this.getSharedReview(entry.file);
@@ -1208,7 +1129,7 @@ export class ChangesController implements
 	}
 
 	private reasonOf(entry: RawEntry): string | null {
-		return (entry.reason || this.reasonCache.get(entry.id) || '').trim() || null;
+		return (entry.reason || this.meta.reasonCache.get(entry.id) || '').trim() || null;
 	}
 
 	/**
@@ -1297,7 +1218,7 @@ export class ChangesController implements
 				if (this.entryFolder.has(entry.id) && this.entryFolder.get(entry.id) !== key) { collisions.add(entry.id); continue; }
 				this.entryFolder.set(entry.id, key); this.ordinals.set(entry.id, ordinal); all.push(entry);
 			}
-			this.applySavedMeta(await this.readState(vscode.Uri.joinPath(folder.uri, ...META_PATH)));
+			this.meta.applySaved(await this.readState(vscode.Uri.joinPath(folder.uri, ...META_PATH)));
 			await this.loadCaptureHealth(folder);
 
 			let purging = false;
@@ -1421,158 +1342,6 @@ export class ChangesController implements
 	}
 
 
-	/** Edições cuja explicação e pedido valem a pena buscar: as do histórico e as pendentes. */
-	private metaTargets(): RawEntry[] {
-		const shown = new Set(this.entries.slice(0, MAX_HISTORY).map((entry) => entry.id));
-		return this.entries.filter((entry) => shown.has(entry.id) || !this.status.has(entry.id));
-	}
-
-	private hasMeta(entry: RawEntry): boolean {
-			const pending = this.pendingMetadata.get(entry.id);
-			return (Boolean(entry.reason) || this.reasonCache.has(entry.id) || Boolean(pending?.reason)) && (this.requestCache.has(entry.id) || Boolean(pending?.request));
-	}
-		private async metadataPolicyContexts(entry: RawEntry): Promise<MetadataPolicyContext[] | undefined> {
-			try {
-				const folder = vscode.workspace.workspaceFolders?.find((candidate) => candidate.uri.toString() === this.entryFolder.get(entry.id))
-					?? vscode.workspace.getWorkspaceFolder(vscode.Uri.file(entry.file));
-				if (!folder || folder.uri.scheme !== 'file' || !this.stores.get(folder.uri.toString())?.writable || await this.readPurgeState(folder)) { return undefined; }
-				const root = await nodeFs.promises.realpath(folder.uri.fsPath), file = await canonicalResource(entry.file, folder.uri.fsPath);
-				if (!file) { return undefined; }
-				const diskPolicy = await this.capture.readCapturePolicy(folder);
-				const config = vscode.workspace.getConfiguration('claudeCodeLauncher');
-				// Absence has the same recognized legacy default as capture; an invalid
-				// or unreadable policy above never falls back to that default.
-				const legacy = diskPolicy ?? makeCapturePolicy({ generation: 'legacy-default' });
-				const settings = makeCapturePolicy({ generation: 'metadata-settings', excludedPatterns: excludedPatterns(config),
-					maxStorageMB: config.get<number>('historyMaxStorageMB', 128), retentionDays: config.get<number>('historyRetentionDays', 30) });
-				return [legacy, settings].map((policy) => ({ policy, canonicalRoot: root, canonicalFile: file, scopeVerified: true }));
-			} catch { return undefined; }
-		}
-		private async metadataPermits(entry: RawEntry): Promise<MetadataPermit[] | undefined> {
-			const contexts = await this.metadataPolicyContexts(entry); if (!contexts) { return undefined; }
-			const permits: MetadataPermit[] = [];
-			for (const context of contexts) { const decision = evaluateMetadataPolicy(context); if (!decision.allowed) { return undefined; } permits.push(decision.permit); }
-			return permits;
-		}
-		private async metadataPermitsCurrent(entry: RawEntry, permits: readonly MetadataPermit[], epoch: number): Promise<boolean> {
-			if (this.disposed || this.maintenance || epoch !== this.metaEpoch) { return false; }
-			const contexts = await this.metadataPolicyContexts(entry);
-			return !this.disposed && !this.maintenance && epoch === this.metaEpoch && contexts?.length === permits.length
-				&& contexts.every((context, index) => revalidateMetadataPermit(permits[index], context).allowed);
-		}
-
-	// O hook não lê o transcript (o Claude espera por ele, e o texto da edição
-	// pode nem estar gravado ainda). Aqui a explicação e o pedido são buscados;
-	// enquanto faltarem, tenta outra vez em alguns segundos, até
-	// MAX_META_ATTEMPTS vezes por edição. O que for achado vai para meta.json.
-	private async fillMeta(): Promise<void> {
-		if (this.disposed || this.maintenance) { return; }
-		if (this.metaRunning) {
-			this.metaAgain = true;
-			return;
-		}
-		this.metaRunning = true;
-		const epoch = this.metaEpoch;
-		try {
-			const byTranscript = new Map<string, RawEntry[]>();
-				const permissions = new Map<string, MetadataPermit[]>();
-			for (const entry of this.metaTargets()) {
-				if (!entry.transcript || this.hasMeta(entry) || !(await transcriptAllowed(entry.transcript, (vscode.workspace.workspaceFolders ?? []).filter((folder) => folder.uri.scheme === 'file').map((folder) => sessionsDir(folder.uri.fsPath))))) {
-					continue;
-				}
-				if (!(await this.metaToolUseId(entry))) {
-					continue;
-				}
-				if ((this.metaAttempts.get(entry.id) ?? 0) >= MAX_META_ATTEMPTS) {
-					continue;
-				}
-					const permits = await this.metadataPermits(entry);
-					if (!permits || !(await this.metadataPermitsCurrent(entry, permits, epoch))) { continue; }
-					permissions.set(entry.id, permits);
-				const list = byTranscript.get(entry.transcript) ?? [];
-				list.push(entry);
-				byTranscript.set(entry.transcript, list);
-			}
-			let found = false;
-			let missing = false;
-			for (const [transcript, list] of byTranscript) {
-					const permitted: RawEntry[] = [];
-					for (const entry of list) { const permits = permissions.get(entry.id); if (permits && await this.metadataPermitsCurrent(entry, permits, epoch)) { permitted.push(entry); } }
-					if (!permitted.length) { continue; }
-					if (permitted.length > 256) { missing = true; }
-					const selected = permitted.slice(0, 256);
-					const meta = await readTranscriptMeta(transcript, { toolUseIds: [...new Set(selected.map((entry) => this.toolUseOf(entry) as string))], cache: false });
-				if (epoch !== this.metaEpoch || this.maintenance || this.disposed) { return; }
-					for (const entry of selected) {
-						const permits = permissions.get(entry.id)!;
-						if (!(await this.metadataPermitsCurrent(entry, permits, epoch))) { continue; }
-					const toolUseId = this.toolUseOf(entry) as string;
-					const reason = meta.reasons.get(toolUseId);
-					const request = meta.requests.get(toolUseId);
-						if (reason !== undefined && !this.reasonCache.has(entry.id) || request && !this.requestCache.has(entry.id)) {
-							this.pendingMetadata.set(entry.id, { reason: this.reasonCache.has(entry.id) ? undefined : reason,
-								request: this.requestCache.has(entry.id) ? undefined : request, permits, epoch }); found = true;
-						}
-					if (!this.hasMeta(entry)) {
-						const attempts = (this.metaAttempts.get(entry.id) ?? 0) + 1;
-						this.metaAttempts.set(entry.id, attempts);
-						missing = missing || attempts < MAX_META_ATTEMPTS;
-					}
-				}
-			}
-			if (found) {
-				this.queueStateWrite();
-			}
-			if (missing) {
-				clearTimeout(this.metaTimer);
-				this.metaTimer = setTimeout(() => {
-					void this.fillMeta();
-				}, 3000);
-			}
-		} finally {
-			this.metaRunning = false;
-			if (this.metaAgain && !this.disposed && !this.maintenance) {
-				this.metaAgain = false;
-				void this.fillMeta();
-			}
-		}
-	}
-
-	private toolUseOf(entry: RawEntry): string | undefined {
-		return entry.toolUseId || this.commandToolUses.get(entry.id);
-	}
-
-	/**
-	 * Mudanças por comando (captura do turno) não têm chamada de ferramenta própria: o pedido e a
-	 * explicação vêm da última chamada (de preferência de terminal) do mesmo turno no transcript.
-	 */
-	private async metaToolUseId(entry: RawEntry): Promise<string | undefined> {
-		const known = this.toolUseOf(entry);
-		if (known || entry.tool !== 'Command' || !entry.transcript) { return known; }
-		const found = await findTurnToolUse(entry.transcript, entry.time);
-		if (found) {
-			this.commandToolUses.set(entry.id, found);
-			if (this.commandToolUses.size > MAX_STATUS) { this.commandToolUses.delete(this.commandToolUses.keys().next().value as string); }
-		}
-		return found;
-	}
-
-	private applySavedMeta(saved: Record<string, unknown> | undefined): void {
-		for (const [id, value] of Object.entries(validateSavedMeta(saved))) {
-			const item = value as { reason?: unknown; request?: { id?: unknown; text?: unknown } } | null;
-			if (!item || typeof item !== 'object') {
-				continue;
-			}
-			if (typeof item.reason === 'string' && !this.reasonCache.has(id)) {
-				this.reasonCache.set(id, item.reason);
-			}
-			const request = item.request;
-			if (request && typeof request.id === 'string' && typeof request.text === 'string' && !this.requestCache.has(id)) {
-				this.requestCache.set(id, { id: request.id, text: request.text });
-			}
-		}
-	}
-
 	// ---- Estado gravado: status.json, meta.json, undo -------------------------------
 
 	private async readState(uri: vscode.Uri): Promise<Record<string, unknown> | undefined> {
@@ -1609,7 +1378,7 @@ export class ChangesController implements
 			// Enrichment is not a cleanup operation: an incremental log cursor may
 			// not have loaded every legacy ID yet. Preserve all admitted old fields.
 			Object.assign(meta, prior);
-			const staged = new Map<string, NonNullable<ReturnType<typeof this.pendingMetadata.get>>>();
+			const staged = new Map<string, NonNullable<ReturnType<typeof this.meta.pendingMetadata.get>>>();
 			let count = 0;
 			for (const [id, owner] of this.entryFolder) {
 				if (owner !== folderKey) {
@@ -1621,9 +1390,9 @@ export class ChangesController implements
 					status[id] = value;
 				}
 				if (prior[id]) { meta[id] = prior[id]; }
-				const candidate = this.pendingMetadata.get(id), entry = this.entries.find((entry) => entry.id === id);
+				const candidate = this.meta.pendingMetadata.get(id), entry = this.entries.find((entry) => entry.id === id);
 				if (!candidate || !entry) { continue; }
-				if (!(await this.metadataPermitsCurrent(entry, candidate.permits, candidate.epoch))) { this.pendingMetadata.delete(id); continue; }
+				if (!(await this.meta.permitsCurrent(entry, candidate.permits, candidate.epoch))) { this.meta.pendingMetadata.delete(id); continue; }
 				meta[id] = { reason: candidate.reason ?? prior[id]?.reason ?? null, request: candidate.request ?? prior[id]?.request ?? null };
 				staged.set(id, candidate);
 			}
@@ -1635,15 +1404,15 @@ export class ChangesController implements
 			const assertPermits = async () => {
 				for (const [id, candidate] of staged) {
 					const entry = this.entries.find((entry) => entry.id === id);
-					if (!entry || this.pendingMetadata.get(id) !== candidate || !(await this.metadataPermitsCurrent(entry, candidate.permits, candidate.epoch))) { throw new ReviewError('metadataPolicyChanged'); }
+					if (!entry || this.meta.pendingMetadata.get(id) !== candidate || !(await this.meta.permitsCurrent(entry, candidate.permits, candidate.epoch))) { throw new ReviewError('metadataPolicyChanged'); }
 				}
 			};
 			await this.writeIfChanged(vscode.Uri.joinPath(folder.uri, ...META_PATH), meta, assertPermits);
 			for (const [id, candidate] of staged) {
-				if (this.pendingMetadata.get(id) !== candidate) { continue; }
-				if (candidate.reason !== undefined) { this.reasonCache.set(id, candidate.reason); }
-				if (candidate.request) { this.requestCache.set(id, candidate.request); }
-				this.pendingMetadata.delete(id);
+				if (this.meta.pendingMetadata.get(id) !== candidate) { continue; }
+				if (candidate.reason !== undefined) { this.meta.reasonCache.set(id, candidate.reason); }
+				if (candidate.request) { this.meta.requestCache.set(id, candidate.request); }
+				this.meta.pendingMetadata.delete(id);
 			}
 		}
 		if (!this.disposed) { this.publish(); }
@@ -1685,7 +1454,8 @@ export class ChangesController implements
 		this.captureHealthStates.set(key, health);
 		this.captureWarnings.delete(key);
 		const latest = diagnostics.latestObservation;
-		if (latest && !['capturePrepared', 'captureRecorded', 'excludedByPolicy'].includes(latest.code)) {
+		// Edições fora do projeto são ignoradas de propósito pelo hook; não indicam captura quebrada.
+		if (latest && !['capturePrepared', 'captureRecorded', 'excludedByPolicy', 'resourceOutsideScope'].includes(latest.code)) {
 			this.captureWarnings.set(key, health.observation?.guidance || t('Captura não confirmada; confira o diagnóstico local.'));
 		}
 	}
@@ -1725,6 +1495,8 @@ export class ChangesController implements
 	private html(webview: vscode.Webview): string {
 		const nonce = createNonce();
 		const script = webview.asWebviewUri(vscode.Uri.joinPath(this.mediaUri(), 'changes.js'));
+		const timeScript = webview.asWebviewUri(vscode.Uri.joinPath(this.mediaUri(), 'changes-time.js'));
+		const diffScript = webview.asWebviewUri(vscode.Uri.joinPath(this.mediaUri(), 'changes-diff.js'));
 		const l10n = webview.asWebviewUri(vscode.Uri.joinPath(this.mediaUri(), 'l10n.js'));
 		const style = webview.asWebviewUri(vscode.Uri.joinPath(this.mediaUri(), 'changes.css'));
 		const base = webview.asWebviewUri(vscode.Uri.joinPath(this.mediaUri(), 'base.css'));
@@ -1744,6 +1516,8 @@ export class ChangesController implements
 	<div id="root"><p class="loading muted"><span class="codicon codicon-loading codicon-modifier-spin"></span> ${t('Carregando…')}</p></div>
 	${webviewDictionaryScript()}
 	<script nonce="${nonce}" src="${l10n}"></script>
+	<script nonce="${nonce}" src="${timeScript}"></script>
+	<script nonce="${nonce}" src="${diffScript}"></script>
 	<script nonce="${nonce}" src="${script}"></script>
 </body>
 </html>`;

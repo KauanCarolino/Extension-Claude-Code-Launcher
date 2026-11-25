@@ -1,208 +1,229 @@
 # Changelog
 
-O projeto segue [Versionamento Semântico](https://semver.org/lang/pt-BR/) a partir da 1.0.0.
+The project follows [Semantic Versioning](https://semver.org/) from 1.0.0 on. [Versão em português](https://github.com/KauanCarolino/Extension-Claude-Code-Launcher/blob/main/CHANGELOG.pt-BR.md).
+
+## 1.3.0 — 2026-11-25
+
+### Added
+
+- Setting `claudeCodeLauncher.showStatusBarItem` (on by default) to hide the **Claude** item in the status bar.
+- Changelog, reference and verification in English (`CHANGELOG.md`, `docs/REFERENCE.md` and `docs/VERIFICATION.md`). The Portuguese versions are in `CHANGELOG.pt-BR.md`, `docs/REFERENCIA.md` and `docs/VERIFICACAO.md`.
+
+### Changed
+
+- **Command capture:** the `.gitignore` files of every folder in the project now apply, not only the root one, with git's rules: negations (`!`), character classes (`[abc]`), folder-only patterns (`dir/`) and the last matching rule deciding. In monorepos, the build output of subprojects no longer shows up as changed by a command or uses up the 5,000-file limit. A pattern like `dist/` now applies only to folders, as in git; before, it also ignored a file named `dist`.
+- The extension ships as a single file (`dist/extension.js`, built by esbuild) instead of one module per source file, which shortens activation. The VSIX no longer carries the 36 modules of `out/`.
+- The list of conversations used to recognize the focused chat tab is reused across tab switches until a transcript changes (or for at most 30 s), instead of being read again on every switch.
+
+### Internal
+
+- `change-metadata.ts` (explanation and request read from the transcript), `review-resource.ts` (reading and writing the reviewed files) and `review-report.ts` (the notification with a decision's result) were split out of `ChangesController`. `changes-time.js` (dates) and `changes-diff.js` (diff lines) were split out of `media/changes.js`.
+- `extension.ts`: one tab-change listener instead of two, and comments back on the functions they describe.
+- Two timing-dependent tests sometimes failed on a loaded machine: the exit-with-error-after-the-report case (`host-runner.test.js`), whose grace period equaled the exit delay, and the tab switch (`catalogs.test.js`), which waited 300 ms for a 250 ms refresh plus disk reads. They now have headroom and wait for the condition.
+- New tests for the `.gitignore` rules and for nested `.gitignore` files in `hook-turn.test.js`.
+- The `lifecycle` contract instantiates the controller and the launcher view from the installed bundle (`dist/extension.js`) instead of the `out/` modules, which no longer ship.
 
 ## 1.2.9 — 2026-11-22
 
-### Adicionado
+### Added
 
-- **Captura por comando.** O que comandos de terminal, ferramentas MCP e geradores mudam entra na revisão como **Mudou por comando** (ou **Criou por comando**), com antes e depois, e pode ser aceito, recusado e desfeito como qualquer edição. Com o registro ativo, o launcher instala também handlers em `UserPromptSubmit`, que anota o estado do projeto e guarda cópias dos arquivos de texto, e em `Stop`, que compara e grava o que mudou e não foi explicado por uma edição capturada. Pedido e explicação vêm da última chamada de terminal do turno no transcript. Ficam de fora `.git`, `node_modules`, `.claude`, o `.gitignore` da raiz, as exclusões de privacidade e binários. Há limites de 5.000 arquivos, 4 s de percurso e 200 mudanças por turno, e as cópias ocupam no máximo metade do orçamento e 2.000 arquivos. Configuração nova `claudeCodeLauncher.captureCommandChanges` (padrão ligado); instalações com o registro ativo ganham os handlers novos no reparo automático. Com a captura configurada, o aviso de comandos de terminal deixa de aparecer.
-- **Abas Permissões e Hooks.** Permissões lista as regras `allow`/`ask`/`deny` dos `settings.json` local, do projeto, do usuário e da organização, com o `defaultMode` e a regra encoberta por um tipo mais forte; cria e remove regras nos três primeiros. Hooks lista cada handler com evento, matcher, tipo e comando sem segredos aparentes, e marca os do próprio launcher. Comandos **Mostrar permissões** e **Mostrar hooks**.
-- **Aceitar ou recusar o trecho no cursor**, com `Alt+Shift+Y` e `Alt+Shift+N` (`Ctrl+Alt+Y` e `Ctrl+Alt+N` no macOS).
-- **Aceitar pedido**, ao lado de **Desfazer pedido**, para os arquivos cujas mudanças vieram todas daquele pedido.
-- **Copiar resumo das mudanças**: markdown das mudanças visíveis, agrupadas por pedido, com arquivo, ação, linhas, estado e a explicação do Claude, pronto para a descrição de um PR.
-- Screenshots e GIF no README, gerados das páginas reais das views por `scripts/screenshots.cjs`.
+- **Command capture.** What terminal commands, MCP tools and generators change enters the review as **Changed by a command** (or **Created by a command**), with before and after, and can be accepted, rejected and undone like any edit. With the change log on, the launcher also installs handlers on `UserPromptSubmit`, which notes the project state and keeps copies of the text files, and on `Stop`, which compares and records what changed and was not explained by a captured edit. The request and the explanation come from the turn's last terminal call in the transcript. Left out: `.git`, `node_modules`, `.claude`, the root `.gitignore`, the privacy exclusions and binaries. Limits are 5,000 files, 4 s of walking and 200 changes per turn, and the copies use at most half of the budget and 2,000 files. New setting `claudeCodeLauncher.captureCommandChanges` (on by default); installations with the change log on get the new handlers through the automatic repair. With the capture configured, the terminal command notice no longer appears.
+- **Permissions and Hooks tabs.** Permissions lists the `allow`/`ask`/`deny` rules from the local, project, user and organization `settings.json`, with the `defaultMode` and the rule overridden by a stronger type; it creates and removes rules in the first three. Hooks lists each handler with event, matcher, type and command without apparent secrets, and marks the launcher's own. Commands **Show Permissions** and **Show Hooks**.
+- **Accept or reject the hunk at the cursor**, with `Alt+Shift+Y` and `Alt+Shift+N` (`Ctrl+Alt+Y` and `Ctrl+Alt+N` on macOS).
+- **Accept request**, next to **Undo request**, for the files whose changes all came from that request.
+- **Copy changes summary**: Markdown of the visible changes, grouped by request, with file, action, lines, state and Claude's explanation, ready for a PR description.
+- Screenshots and GIF in the README, generated from the real view pages by `scripts/screenshots.cjs`.
 
-### Mudado
+### Changed
 
-- **Janelas remotas.** O manifesto declara `extensionKind: ["workspace"]`, o mesmo lugar onde roda a extensão oficial. Numa janela remota, **Mostrar no sistema** revela no Explorer ou copia o caminho, o diagnóstico de captura informa o ambiente, e a falta de lixeira (comum em contêineres) para a recusa de um arquivo criado com o motivo `trashUnavailable`, sem apagar em definitivo. O comportamento remoto está documentado em `docs/REFERENCIA.md`; WSL, SSH e dev containers não têm teste automatizado.
-- A barra de abas da view do launcher ficou mais compacta para caber sete abas na lateral estreita.
+- **Remote windows.** The manifest declares `extensionKind: ["workspace"]`, the same place the official extension runs. In a remote window, **Reveal in file manager** reveals in the Explorer or copies the path, the capture diagnostics report the environment, and the lack of a trash (common in containers) stops the rejection of a created file with the reason `trashUnavailable`, without deleting permanently. The remote behavior is documented in `docs/REFERENCIA.md`; WSL, SSH and dev containers have no automated test.
+- The tab bar of the launcher view became more compact so that seven tabs fit in the narrow sidebar.
 
-### Corrigido
+### Fixed
 
-- O rótulo do trecho no diff ("linhas 3–9 (7 linhas)") continuava em português com a interface em inglês.
-- **Cursor: o chat abria dentro do Explorer.** O Cursor recusa contêineres de barra lateral secundária, e a view de barra lateral da extensão oficial vai parar no Explorer, junto de Estrutura e Linha do tempo. O item **Claude** da barra de status e o comando **Abrir chat na barra lateral** chamavam essa barra lateral e ainda gravavam `claudeCode.preferredLocation: "sidebar"`, de modo que o botão **✻ Claude Code** da oficial também passava a abrir no Explorer. Quando a view da barra lateral existe mas o contêiner dela não, o launcher mostra a aba de chat já aberta ou abre uma nova, e não altera a preferência. No VS Code, e em versões anteriores à 1.106 (em que a oficial usa a Activity Bar), nada muda.
+- The hunk label in the diff ("linhas 3–9 (7 linhas)") stayed in Portuguese with the interface in English.
+- **Cursor: the chat opened inside the Explorer.** Cursor rejects secondary sidebar containers, and the official extension's sidebar view ends up in the Explorer, next to Outline and Timeline. The **Claude** status bar item and the **Open chat in sidebar** command called that sidebar and also wrote `claudeCode.preferredLocation: "sidebar"`, so the official **✻ Claude Code** button also started opening in the Explorer. When the sidebar view exists but its container does not, the launcher shows the chat tab already open or opens a new one, and does not change the preference. In VS Code, and in versions before 1.106 (where the official extension uses the Activity Bar), nothing changes.
 
-### Interno
+### Internal
 
-- Hook: `runTurn` (fases `turn-start` e `turn-end`), `putBlob` compartilhado com a captura por edição e globs pré-compilados. O hook não escreve na saída, porque a do `UserPromptSubmit` iria para o Claude.
-- `hooks.ts` descreve os handlers por evento, fase e matcher; `inspectHookConfiguration` informa também `turn`. A limpeza completa reconhece `turns/` e `turn-blobs/`, e a manutenção recolhe manifestos de turno com mais de 7 dias.
-- Módulos novos: `settings-catalog.ts` (permissões e hooks, sem dependência do editor) e `remote.ts`.
-- Testes novos: `hook-turn.test.js`, `turn-capture.test.js`, `review-conveniences.test.js`, `remote.test.js`, configuração dos handlers de turno em `hooks-config.test.js`, permissões e hooks em `catalogs.test.js` e o atalho do cursor em `inline.test.js`. A suíte também passou num contêiner `node:22-bookworm-slim` com usuário sem privilégios.
+- Hook: `runTurn` (phases `turn-start` and `turn-end`), `putBlob` shared with the per-edit capture, and precompiled globs. The hook writes nothing to its output, because `UserPromptSubmit` output would go to Claude.
+- `hooks.ts` describes the handlers by event, phase and matcher; `inspectHookConfiguration` also reports `turn`. The full cleanup recognizes `turns/` and `turn-blobs/`, and maintenance collects turn manifests older than 7 days.
+- New modules: `settings-catalog.ts` (permissions and hooks, with no editor dependency) and `remote.ts`.
+- New tests: `hook-turn.test.js`, `turn-capture.test.js`, `review-conveniences.test.js`, `remote.test.js`, turn handler configuration in `hooks-config.test.js`, permissions and hooks in `catalogs.test.js` and the cursor shortcut in `inline.test.js`. The suite also passed in a `node:22-bookworm-slim` container with an unprivileged user.
 
 ## 1.2.0 — 2026-11-22
 
-### Adicionado
+### Added
 
-- **Interface em inglês.** A interface segue o idioma do editor: português quando ele está em português, inglês nos demais. A opção nova `claudeCodeLauncher.language` (`auto`, `en`, `pt-br`) fixa o idioma; com o editor em inglês, use `pt-br` para manter a interface como antes. Títulos de comandos e configurações vêm de `package.nls.json` (inglês) e `package.nls.pt-br.json`.
-- **Passo a passo de primeiros passos** (walkthrough), com cinco etapas que se marcam sozinhas: instalar o Claude Code, abrir a pasta, ativar o registro, começar uma conversa nova e revisar. Comando **Abrir o passo a passo**, também no menu `…` da view do launcher e no convite para ativar o registro.
-- Com o registro ativo e nenhum evento do hook observado, o painel **Mudanças** mostra **Registro ativado: falta uma conversa nova**, com o botão **Nova conversa**, em vez de "Nenhuma mudança ainda".
-- **Aviso de comandos de terminal.** O painel lê do transcript os comandos Bash e PowerShell que o Claude pediu na conversa em foco (ou nas conversas com pendências) e avisa quando algum pode ter alterado arquivos fora da captura, com o nome dos programas e o atalho **Conferir no controle de código-fonte**. Comandos só de leitura reconhecidos não contam. Nada novo é instalado nos hooks e o texto dos comandos não é mostrado.
-- **Workspaces com várias pastas** nas abas **Skills**, **Regras**, **Agentes** e **MCP**: as origens do projeto são lidas de cada pasta local, cada item mostra a pasta, e criar no projeto pergunta em qual pasta. Aprovar ou recusar um servidor do `.mcp.json` grava na pasta dele. Com uma pasta só, nada muda.
-- Workflow semanal **Compatibility with latest editor and Claude Code** (`.github/workflows/compat.yml`): instala o VSIX e roda a jornada do hook e o contrato `official` no VS Code estável mais recente, com a versão atual da extensão oficial (`scripts/install-official-extension.cjs`).
+- **English interface.** The interface follows the editor's language: Portuguese when the editor is in Portuguese, English otherwise. The new setting `claudeCodeLauncher.language` (`auto`, `en`, `pt-br`) pins the language; with the editor in English, use `pt-br` to keep the interface as before. Command and setting titles come from `package.nls.json` (English) and `package.nls.pt-br.json`.
+- **Getting started walkthrough**, with five steps that check themselves off: install Claude Code, open the folder, turn on the change log, start a new conversation and review. Command **Open the Walkthrough**, also in the `…` menu of the launcher view and in the invitation to turn on the change log.
+- With the change log on and no hook event observed, the **Changes** panel shows **Change log on: start a new conversation**, with a **New conversation** button, instead of "No changes yet".
+- **Terminal command notice.** The panel reads from the transcript the Bash and PowerShell commands Claude ran in the focused conversation (or in the conversations with pending changes) and warns when one of them may have changed files outside the capture, with the program names and a **Check in source control** shortcut. Recognized read-only commands do not count. Nothing new is installed in the hooks and the command text is not shown.
+- **Multi-root workspaces** in the **Skills**, **Rules**, **Agents** and **MCP** tabs: the project sources are read from each local folder, each item shows its folder, and creating in the project asks which folder. Approving or rejecting a server from `.mcp.json` writes to its folder. With a single folder, nothing changes.
+- Weekly workflow **Compatibility with latest editor and Claude Code** (`.github/workflows/compat.yml`): installs the VSIX and runs the hook journey and the `official` contract on the latest stable VS Code, with the current version of the official extension (`scripts/install-official-extension.cjs`).
 
-### Mudado
+### Changed
 
-- README curto, em inglês, para a página do Marketplace, com a versão em português em `README.pt-BR.md`. O detalhe completo foi para `docs/REFERENCIA.md`.
+- Short README, in English, for the Marketplace page, with the Portuguese version in `README.pt-BR.md`. The full detail moved to `docs/REFERENCIA.md`.
 
-### Interno
+### Internal
 
-- `typecheck` passa a conferir o hook (`tsconfig.hooks.json`) e as páginas das views (`tsconfig.webview.json`), e `lint` cobre `hooks/` e `media/`. Um caminho do hook que o TypeScript não via como retorno ganhou `return` explícito, sem mudança de comportamento.
-- Do `ChangesController` saíram `capture-setup.ts` (script, política e handlers da captura), `housekeeping.ts` (retenção e coleta) e `owned-file.ts` (escrita atômica dos dados próprios).
-- Tradução: `src/i18n.ts` e `media/l10n.js`, dicionário em `l10n/en.json` e `scripts/l10n-check.cjs`, que lista frases sem tradução. A página recebe `actionKind` para não depender do rótulo traduzido da ação.
-- Testes novos: `test/l10n.test.js`, `test/shell-activity.test.js`, multi-root em `catalogs.test.js` e `skills.test.js`, e o painel renderizado em inglês em `review-ui.test.js`.
+- `typecheck` now also checks the hook (`tsconfig.hooks.json`) and the view pages (`tsconfig.webview.json`), and `lint` covers `hooks/` and `media/`. A hook path that TypeScript did not see as a return got an explicit `return`, with no behavior change.
+- `capture-setup.ts` (capture script, policy and handlers), `housekeeping.ts` (retention and collection) and `owned-file.ts` (atomic writes of the launcher's own data) were split out of `ChangesController`.
+- Translation: `src/i18n.ts` and `media/l10n.js`, a dictionary in `l10n/en.json` and `scripts/l10n-check.cjs`, which lists untranslated phrases. The page receives `actionKind` so it does not depend on the translated action label.
+- New tests: `test/l10n.test.js`, `test/shell-activity.test.js`, multi-root in `catalogs.test.js` and `skills.test.js`, and the panel rendered in English in `review-ui.test.js`.
 
 ## 1.1.0 — 2026-11-21
 
-### Adicionado
+### Added
 
-- Abas **Regras**, **Agentes** e **MCP** na view do launcher, no formato da aba **Skills**: busca, filtros por origem, criação e ações em cada linha.
-  - **Regras:** `CLAUDE.md`, `.claude/CLAUDE.md`, `CLAUDE.local.md`, `.claude/rules/**/*.md` do projeto e os equivalentes globais, além do `CLAUDE.md` gerenciado pela organização (somente leitura). Mostra os globs de `paths`, ativa e desativa por `.md.disabled`, cria regras com `paths` opcional e exclui para a lixeira.
-  - **Agentes:** `.claude/agents/` do projeto e global, inclusive em subpastas. Mostra `name`, descrição e `model`, marca o agente global encoberto por um do projeto de mesmo nome, e ativa, desativa, cria e exclui como as regras.
-  - **MCP:** servidores locais, do projeto (`.mcp.json`), do usuário e da organização, com transporte, comando ou URL sem segredos aparentes, estado (ativo, pendente, recusado, desativado pelo `/mcp`, com erro) e prioridade entre escopos. Para servidores do projeto, aprova ou recusa no `.claude/settings.local.json`, cria e remove no `.mcp.json`. O `~/.claude.json` só é lido, nunca gravado.
-- Comandos **Mostrar regras**, **Mostrar agentes** e **Mostrar servidores MCP**.
+- **Rules**, **Agents** and **MCP** tabs in the launcher view, in the format of the **Skills** tab: search, source filters, creation and actions on each row.
+  - **Rules:** `CLAUDE.md`, `.claude/CLAUDE.md`, `CLAUDE.local.md`, `.claude/rules/**/*.md` in the project and the global equivalents, plus the organization-managed `CLAUDE.md` (read-only). Shows the `paths` globs, enables and disables through `.md.disabled`, creates rules with optional `paths` and deletes to the trash.
+  - **Agents:** `.claude/agents/` in the project and global, including subfolders. Shows `name`, description and `model`, marks a global agent overridden by a project agent with the same name, and enables, disables, creates and deletes like rules.
+  - **MCP:** local, project (`.mcp.json`), user and organization servers, with transport, command or URL without apparent secrets, state (active, pending, rejected, disabled through `/mcp`, with error) and priority between scopes. For project servers, approves or rejects in `.claude/settings.local.json`, creates and removes in `.mcp.json`. `~/.claude.json` is only read, never written.
+- Commands **Show Rules**, **Show Agents** and **Show MCP Servers**.
 
-### Corrigido
+### Fixed
 
-- Os comandos **Mostrar skills** e **Mostrar conversas e mudanças**, pela paleta, só escondiam ou mostravam a view **Mudanças**: a view do launcher continuava na aba anterior. Agora ela também troca de aba.
-- **Skills:** o nome da skill aparecia centralizado na linha e um nome longo não era cortado com reticências.
+- The **Show Skills** and **Show Conversations and Changes** commands, from the palette, only hid or showed the **Changes** view: the launcher view stayed on the previous tab. Now it switches tabs too.
+- **Skills:** the skill name was centered in the row and a long name was not truncated with an ellipsis.
 
-### Interno
+### Internal
 
-- O frontmatter passou para `src/frontmatter.ts`, compartilhado por skills, regras e agentes; `parseFrontmatter` continua exportado por `skills.ts` com o mesmo comportamento.
-- A troca de abas (contexto `claudeCodeLauncher.panel`) saiu de `skills-view.ts` para `catalog-view.ts`. A view **Mudanças** fica visível com o contexto ausente ou igual a `chats`.
-- Contrato `multi-window` no macOS: o relatório passava, mas o runner mandava SIGTERM 500 ms depois, quando o VS Code ainda fechava sozinho (o driver executa `workbench.action.quit`), e o Electron abortava com SIGABRT. O runner agora espera até 10 s pela saída do próprio editor antes de encerrá-lo. Saídas por SIGABRT continuam reprovando. Teste em `host-runner.test.js` reproduz a falha com a espera antiga.
-- 18 testes novos em `test/catalogs.test.js`, cobrindo leitura, escrita condicional, os formatos de `paths`, a ocultação de segredos e o controlador da view com o editor simulado.
+- Frontmatter moved to `src/frontmatter.ts`, shared by skills, rules and agents; `parseFrontmatter` is still exported by `skills.ts` with the same behavior.
+- Tab switching (context `claudeCodeLauncher.panel`) moved from `skills-view.ts` to `catalog-view.ts`. The **Changes** view is visible when the context is absent or equal to `chats`.
+- `multi-window` contract on macOS: the report passed, but the runner sent SIGTERM 500 ms later, while VS Code was still quitting by itself (the driver runs `workbench.action.quit`), and Electron aborted with SIGABRT. The runner now waits up to 10 s for the editor's own exit before terminating it. SIGABRT exits still fail. A test in `host-runner.test.js` reproduces the failure with the old wait.
+- 18 new tests in `test/catalogs.test.js`, covering reading, conditional writing, the `paths` formats, secret hiding and the view controller with a simulated editor.
 
 ## 1.0.0 — 2026-11-20
 
-Primeira versão estável. Não há funcionalidade nova em relação à 0.13.1: esta versão fecha o que já existia, corrige os problemas encontrados na revisão e define o que passa a ser compatível dentro da série 1.x.
+First stable version. There is no new functionality compared with 0.13.1: this version closes what already existed, fixes the problems found in review and defines what is compatible within the 1.x series.
 
-### Compromisso de compatibilidade (1.x)
+### Compatibility commitment (1.x)
 
-Dentro da série 1.x, uma versão nova não remove nem muda o significado de:
+Within the 1.x series, a new version does not remove or change the meaning of:
 
-- os IDs de comandos `claude-code-launcher.*` e os atalhos documentados;
-- as configurações `claudeCodeLauncher.*`, seus valores aceitos e padrões;
-- os formatos versionados em `.claude/launcher-changes/` (`review-state.v1.json`, `review-blobs/v1/`, `purge-state.v1.json`, `capture-diagnostics/v2/`, `log.jsonl`, `meta.json` e `status.json`). Uma versão 1.x lê os dados gravados por qualquer versão 1.x anterior. Quando um formato precisar mudar, a versão nova migra os dados e guarda backup em `review-migration-backups/`, e o CHANGELOG informa se o downgrade continua possível;
-- a convenção `SKILL.md.disabled` usada para desativar skills.
+- the `claude-code-launcher.*` command IDs and the documented shortcuts;
+- the `claudeCodeLauncher.*` settings, their accepted values and defaults;
+- the versioned formats in `.claude/launcher-changes/` (`review-state.v1.json`, `review-blobs/v1/`, `purge-state.v1.json`, `capture-diagnostics/v2/`, `log.jsonl`, `meta.json` and `status.json`). A 1.x version reads the data written by any earlier 1.x version. When a format has to change, the new version migrates the data and keeps a backup in `review-migration-backups/`, and the changelog says whether downgrading is still possible;
+- the `SKILL.md.disabled` convention used to disable skills.
 
-Mudanças incompatíveis nesses pontos só entram numa versão 2.0.0. A aparência dos painéis, os textos das mensagens e os arquivos internos sem versão (`active/`, `pending/`, `completed/`, locks) não fazem parte do compromisso.
+Incompatible changes to these points only come in a 2.0.0 version. The look of the panels, the message texts and the unversioned internal files (`active/`, `pending/`, `completed/`, locks) are not part of the commitment.
 
-### Mudança de identificador: leia antes de atualizar
+### Identifier change: read before updating
 
-A extensão passou a se chamar **Launcher for Claude Code**, com o identificador `KauanDeveloper.launcher-for-claude-code`. O nome `claude-code-launcher` (e o nome de exibição "Claude Code Launcher") já pertence a outra extensão no Visual Studio Marketplace, sem relação com esta. O publisher também mudou, de `kauan` para `KauanDeveloper`. O editor trata a 1.0.0 como uma extensão **diferente** da 0.x:
+The extension is now called **Launcher for Claude Code**, with the identifier `KauanDeveloper.launcher-for-claude-code`. The name `claude-code-launcher` (and the display name "Claude Code Launcher") already belongs to another, unrelated extension on the Visual Studio Marketplace. The publisher also changed, from `kauan` to `KauanDeveloper`. The editor treats 1.0.0 as a **different** extension from 0.x:
 
-- Desinstale a versão anterior antes de instalar a 1.0.0: `kauan.claude-code-launcher` (até a 0.13.0) ou `KauanDeveloper.claude-code-launcher` (pacote local da 0.13.1). Duas versões escrevendo no mesmo projeto não são suportadas.
-- Os comandos, as configurações, o contêiner e a view mantêm os IDs `claude-code-launcher.*` e `claudeCodeLauncher.*`; só o nome exibido muda para **Launcher for Claude Code**, inclusive a categoria dos comandos na paleta.
-- Os dados em `.claude/launcher-changes/`, os hooks e as configurações `claudeCodeLauncher.*` continuam valendo, porque não dependem do identificador. Um hook legado gravado no `globalStorage` do identificador antigo continua reconhecido como do launcher.
-- Não passam para a 1.0.0, porque o editor os guarda por identificador: a pilha de **Desfazer a última recusa** e o registro das preferências de abertura definidas pela gestão de grupos. Antes de atualizar, conclua os desfazer pendentes e, se `claudeCodeLauncher.manageEditorGroups` estiver ligado, desligue-o na versão antiga, para ela restaurar suas preferências originais.
+- Uninstall the previous version before installing 1.0.0: `kauan.claude-code-launcher` (up to 0.13.0) or `KauanDeveloper.claude-code-launcher` (local 0.13.1 package). Two versions writing to the same project are not supported.
+- Commands, settings, the container and the view keep the IDs `claude-code-launcher.*` and `claudeCodeLauncher.*`; only the displayed name changes to **Launcher for Claude Code**, including the command category in the palette.
+- The data in `.claude/launcher-changes/`, the hooks and the `claudeCodeLauncher.*` settings still apply, because they do not depend on the identifier. A legacy hook written to the old identifier's `globalStorage` is still recognized as the launcher's.
+- Not carried over to 1.0.0, because the editor stores them per identifier: the **Undo last rejection** stack and the record of opening preferences set by editor group management. Before updating, finish pending undos and, if `claudeCodeLauncher.manageEditorGroups` is on, turn it off in the old version so it restores your original preferences.
 
-### Corrigido
+### Fixed
 
-- Os testes de host procuravam a extensão pelo identificador antigo e falhavam em todos os sistemas depois da troca de publisher. Agora leem o identificador do `package.json`.
-- **Skills:** uma descrição com barra invertida gerava um `SKILL.md` com YAML inválido (por exemplo, `C:\temp` virava a sequência de escape `\t`). Barras invertidas, aspas e caracteres de controle agora são escapados ou substituídos.
-- **Skills:** um `SKILL.md` salvo com BOM tinha o nome e a descrição ignorados.
-- **Skills:** a pasta global ignorava `CLAUDE_CONFIG_DIR`, que a lista de conversas já respeitava. Com a variável definida, as skills globais passam a vir de `$CLAUDE_CONFIG_DIR/skills`.
-- **Skills:** ativar ou desativar uma skill alterada fora do launcher mostrava um erro de sistema genérico. Agora explica o motivo. As skills do claude.ai também são recusadas na camada de disco, não só na interface.
-- **Mudanças por conversa:** o painel podia esconder as mudanças da conversa em uso. Três casos foram reproduzidos com o código real:
-  - A aba oficial mostra o título gerado antes de o transcript gravá-lo. Quando esse título curto coincidia com o de uma conversa antiga, o painel filtrava pela antiga e escondia a atual.
-  - No chat da barra lateral, que não é aba, o foco ficava preso na última aba usada e as mudanças da lateral sumiam.
-  - Títulos com mais de 25 caracteres, que a aba corta em 24 + "…", nunca eram reconhecidos, e o filtro ficava desligado sem aviso.
+- The host tests looked for the extension by the old identifier and failed on every system after the publisher change. They now read the identifier from `package.json`.
+- **Skills:** a description with a backslash produced a `SKILL.md` with invalid YAML (for example, `C:\temp` became the escape sequence `\t`). Backslashes, quotes and control characters are now escaped or replaced.
+- **Skills:** a `SKILL.md` saved with a BOM had its name and description ignored.
+- **Skills:** the global folder ignored `CLAUDE_CONFIG_DIR`, which the conversation list already honored. With the variable set, global skills come from `$CLAUDE_CONFIG_DIR/skills`.
+- **Skills:** enabling or disabling a skill changed outside the launcher showed a generic system error. It now explains the reason. claude.ai skills are also refused at the disk layer, not only in the interface.
+- **Changes per conversation:** the panel could hide the changes of the conversation in use. Three cases were reproduced with the real code:
+  - The official tab shows the generated title before the transcript records it. When that short title matched an old conversation's, the panel filtered by the old one and hid the current one.
+  - In the sidebar chat, which is not a tab, the focus stayed stuck on the last tab used and the sidebar's changes disappeared.
+  - Titles longer than 25 characters, which the tab truncates to 24 + "…", were never recognized, and the filter turned off without notice.
 
-  Agora a conversa é comparada com todos os títulos que já teve, inclusive a primeira mensagem, levando em conta o corte da aba, e é reidentificada quando o transcript muda. Com o filtro ligado, só ficam ocultas as mudanças de conversas que outra aba aberta identificou. As pendentes sem dono continuam visíveis, com aviso, e sem nenhuma aba de chat o painel mostra tudo.
-- **Mudanças por conversa:** com duas ou mais conversas de mesmo título, o painel escolhia a mais recente e escondia as mudanças das outras. Agora mostra as de todas e avisa no topo quantas conversas têm aquele título.
-- **Conversas:** a marca de conversa aberta usava a mesma comparação exata de título e falhava em títulos cortados pela aba.
-- O link do README para `docs/VERIFICACAO.md` apontava para um arquivo ignorado pelo Git, que não chegava ao repositório. O arquivo passa a ser versionado; o resto de `docs/` continua local.
+  Now the conversation is compared with every title it has had, including the first message, taking the tab's truncation into account, and is identified again when the transcript changes. With the filter on, only changes from conversations that another open tab identified stay hidden. Pending changes without an owner stay visible, with a notice, and with no chat tab the panel shows everything.
+- **Changes per conversation:** with two or more conversations with the same title, the panel picked the most recent and hid the others' changes. It now shows all of them and says at the top how many conversations have that title.
+- **Conversations:** the open-conversation mark used the same exact title comparison and failed for titles truncated by the tab.
+- The README link to `docs/VERIFICACAO.md` pointed to a file ignored by Git, which never reached the repository. The file is now versioned; the rest of `docs/` stays local.
 
-### Adicionado
+### Added
 
-- Verificação em Linux registrada em `docs/VERIFICACAO.md`: teste de host no VS Code 1.147.0 e no Cursor 3.30.14, e contratos `multi-window`, `lifecycle` e `official` (Claude Code 2.1.329).
-- Workflow de release (`.github/workflows/release.yml`): ao enviar uma tag `vX.Y.Z`, confere se a tag bate com o `package.json` e o CHANGELOG, repete as validações e o teste de host, gera e verifica o VSIX e o publica no Visual Studio Marketplace e no Open VSX (quando os segredos `VSCE_PAT` e `OVSX_PAT` existem) e numa release do GitHub.
-- Manifesto com `homepage`, `bugs` e `galleryBanner` para a página do Marketplace.
+- Linux verification recorded in `docs/VERIFICACAO.md`: host test on VS Code 1.147.0 and Cursor 3.30.14, and the `multi-window`, `lifecycle` and `official` contracts (Claude Code 2.1.329).
+- Release workflow (`.github/workflows/release.yml`): when a `vX.Y.Z` tag is pushed, checks that the tag matches `package.json` and the changelog, repeats the validations and the host test, builds and verifies the VSIX, and publishes it to the Visual Studio Marketplace and Open VSX (when the `VSCE_PAT` and `OVSX_PAT` secrets exist) and to a GitHub release.
+- Manifest with `homepage`, `bugs` and `galleryBanner` for the Marketplace page.
 
-### Interno
+### Internal
 
-- Testes de skills ampliados de 1 para 15, cobrindo o controlador da view com o editor simulado: ids que não vieram da listagem são ignorados, skills do claude.ai não são alternadas nem excluídas, excluir exige confirmação e usa a lixeira, criar respeita o escopo e nunca sobrescreve.
-- Os testes de host no Windows falhavam depois de aprovados: o runner encerra só o processo principal do editor, e os processos auxiliares do Electron mantinham o diretório temporário travado (`EBUSY`). A remoção agora tenta de novo com espera crescente e, se o diretório continuar travado, avisa qual pasta ficou sem alterar o resultado do teste.
-- Teste do controlador real para o hook legado no `globalStorage` do identificador antigo; sem a correção, **Ativar registro** ficava bloqueado com `ambiguousHookOwnership`.
-- Teste de ponta a ponta do filtro por conversa (`test/chat-scope.test.js`): `extension.js` e `ChangesController` reais, com abas e transcripts simulados conforme o comportamento da extensão oficial 2.1.329.
-- A associação entre aba e conversa saiu de `extension.ts` para `matchChatSessions` em `logic.ts`, com testes próprios, e o aviso do painel ganhou teste de interface.
+- Skills tests expanded from 1 to 15, covering the view controller with a simulated editor: ids that did not come from the listing are ignored, claude.ai skills are not toggled or deleted, deleting requires confirmation and uses the trash, creating respects the scope and never overwrites.
+- The host tests on Windows failed after passing: the runner terminates only the editor's main process, and Electron's helper processes kept the temporary directory locked (`EBUSY`). Removal now retries with increasing waits and, if the directory stays locked, says which folder was left without changing the test result.
+- Test of the real controller for the legacy hook in the old identifier's `globalStorage`; without the fix, **Turn On Change Log** stayed blocked with `ambiguousHookOwnership`.
+- End-to-end test of the per-conversation filter (`test/chat-scope.test.js`): real `extension.js` and `ChangesController`, with tabs and transcripts simulated according to the behavior of the official extension 2.1.329.
+- Matching between tab and conversation moved from `extension.ts` to `matchChatSessions` in `logic.ts`, with its own tests, and the panel notice got an interface test.
 
 ## 0.13.1 — 2026-11-20
 
-### Alterado
+### Changed
 
-- Novo ícone: balão de chat na cor terracota com o prompt `>_` e uma faísca, em versão colorida (marketplace) e monocromática (barra lateral).
-- A categoria da extensão passou a incluir **AI**.
-- O README ganhou um resumo e um passo a passo no início. Os detalhes de verificação foram para `docs/VERIFICACAO.md`.
-- Constantes e utilitários independentes do controlador de mudanças foram movidos para `changes-support.ts`, sem alteração de comportamento.
+- New icon: a terracotta chat bubble with the `>_` prompt and a spark, in a color version (marketplace) and a monochrome one (sidebar).
+- The extension's categories now include **AI**.
+- The README got a summary and a step-by-step guide at the top. The verification details moved to `docs/VERIFICACAO.md`.
+- Constants and utilities independent of the changes controller moved to `changes-support.ts`, with no behavior change.
 
 ## 0.13.0 — 2026-11-20
 
-### Adicionado
+### Added
 
-- O painel **Mudanças** agora mostra só os arquivos da conversa em foco. Ao trocar de conversa, a lista acompanha. Um aviso no topo indica qual conversa está sendo mostrada, e **Ver todas** mostra também as de outras conversas. Sem conversa identificada (por exemplo, uma conversa nova ainda sem mensagens), o painel mostra tudo.
+- The **Changes** panel now shows only the files of the focused conversation. When you switch conversations, the list follows. A notice at the top says which conversation is shown, and **See all** also shows the other conversations'. With no identified conversation (for example, a new conversation still without messages), the panel shows everything.
 
 ## 0.12.5 — 2026-11-20
 
-As versões intermediárias 0.12.x, como a 0.12.1 do commit da view de skills, não foram distribuídas; o resultado está consolidado nesta entrada.
+The intermediate 0.12.x versions, such as 0.12.1 from the skills view commit, were not distributed; the result is consolidated in this entry.
 
-### Adicionado
+### Added
 
-- Lista de skills no painel do launcher, alternando com Conversas e Mudanças por uma barra de abas no topo do painel, com busca e filtros **Projeto**, **Global** e **claude.ai**. Permite abrir o `SKILL.md`, ativar ou desativar, criar e excluir (para a lixeira) skills do projeto e globais. As skills sincronizadas do claude.ai são somente leitura.
+- Skills list in the launcher panel, alternating with Conversations and Changes through a tab bar at the top of the panel, with search and **Project**, **Global** and **claude.ai** filters. Lets you open `SKILL.md`, enable or disable, create and delete (to the trash) project and global skills. Skills synced from claude.ai are read-only.
 
-### Alterado
+### Changed
 
-- A view do launcher passou a se chamar **Claude Code Launcher** e a view separada de skills deixou de existir. Os comandos **Mostrar skills** e **Mostrar conversas e mudanças** alternam as abas; **Mudanças** fica oculta na aba Skills. O comando **Abrir lista de skills** foi removido.
+- The launcher view is now called **Claude Code Launcher** and the separate skills view no longer exists. The **Show Skills** and **Show Conversations and Changes** commands switch tabs; **Changes** is hidden on the Skills tab. The **Open Skills List** command was removed.
 
 ## 0.11.0 — 2026-11-19
 
-### Corrigido
+### Fixed
 
-- A captura parava depois de cerca de dez mil edições: cada edição deixava um marcador em `completed/` que nada removia, até a pasta passar do orçamento de inventário do hook. A janela dona da revisão agora recolhe marcadores e preparações com mais de 24 horas e as cópias de `review-blobs/v1/` sem referência, ao abrir, a cada seis horas e em **Limpar histórico revisado**.
-- Um hook interrompido no meio da execução deixava um registro em `active/` que bloqueava para sempre a retenção, **Limpar histórico revisado** e **Apagar todos os dados locais de revisão**. A manutenção agora remove registros comprovadamente órfãos.
-- Ao fechar ou recarregar a janela, a extensão espera a liberação da posse da revisão. Antes, a próxima janela podia abrir a revisão só para leitura.
-- Desfazer a recusa de um arquivo criado pelo Claude o recriava com permissão `0600`. O arquivo agora nasce com a permissão padrão do sistema.
-- Mensagens ao usuário mostravam códigos internos, como `execArgumentsNotConfirmed`. Agora explicam o motivo.
-- **Apagar todos os dados locais de revisão** e **Recuperar revisão bloqueada** tratavam pastas de providers virtuais como caminhos de disco.
+- Capture stopped after about ten thousand edits: each edit left a marker in `completed/` that nothing removed, until the folder exceeded the hook's inventory budget. The window that owns the review now collects markers and preparations older than 24 hours and unreferenced copies in `review-blobs/v1/`, on opening, every six hours and in **Clear Reviewed History**.
+- A hook interrupted mid-run left a record in `active/` that blocked retention, **Clear Reviewed History** and **Delete All Local Review Data** forever. Maintenance now removes records proven to be orphaned.
+- When closing or reloading the window, the extension waits for the review ownership to be released. Before, the next window could open the review read-only.
+- Undoing the rejection of a file created by Claude recreated it with permission `0600`. The file now gets the system's default permission.
+- Messages to the user showed internal codes, such as `execArgumentsNotConfirmed`. They now explain the reason.
+- **Delete All Local Review Data** and **Recover Blocked Review** treated folders from virtual providers as disk paths.
 
-### Alterado
+### Changed
 
-- Aceitar e recusar bloqueiam menos o editor: o estado da revisão deixou de reler todas as cópias de conteúdo a cada gravação e de regravar o estado quando nada mudou.
-- O script do hook copiado para o projeto é conferido a cada atualização do painel e restaurado quando difere do distribuído pela extensão.
-- O painel avisa quando o registro está configurado e o comando `node` não é encontrado no `PATH`.
-- `claudeCodeLauncher.hookExecutionMode` passou a ser uma opção da máquina; o `settings.json` de um projeto não a altera mais.
-- No macOS, os atalhos de navegação entre trechos passaram a `Ctrl+Alt+]` e `Ctrl+Alt+[`, porque `Option+]` e `Option+[` digitam caracteres.
-- O manifesto declara suporte limitado a workspaces virtuais: revisão e registro exigem pastas no disco local.
-- O painel é republicado uma vez por rajada de digitação em um arquivo sob revisão.
-- Uma janela que encontra a posse da revisão deixada por um processo que não existe mais oferece **Recuperar revisão**, em vez de depender de o usuário achar o comando. A posse continua não sendo assumida sozinha.
-- Os padrões de `claudeCodeLauncher.historyExcludedPatterns` definidos no `settings.json` de um projeto passam a somar-se aos do usuário; não os substituem mais.
-- O contêiner da barra de atividades chama-se **Claude Code Launcher** e a view de conversas, **Conversas**, para não se confundirem com a extensão oficial. A extensão ganhou ícone de listagem e a descrição informa que é independente da Anthropic.
+- Accepting and rejecting block the editor less: the review state no longer re-reads every content copy on each write or rewrites the state when nothing changed.
+- The hook script copied to the project is checked on each panel refresh and restored when it differs from the one the extension ships.
+- The panel warns when the change log is configured and the `node` command is not found on the `PATH`.
+- `claudeCodeLauncher.hookExecutionMode` became a machine setting; a project's `settings.json` no longer changes it.
+- On macOS, the hunk navigation shortcuts became `Ctrl+Alt+]` and `Ctrl+Alt+[`, because `Option+]` and `Option+[` type characters.
+- The manifest declares limited support for virtual workspaces: review and change log require folders on the local disk.
+- The panel is republished once per burst of typing in a file under review.
+- A window that finds the review ownership left by a process that no longer exists offers **Recover review**, instead of relying on the user to find the command. Ownership is still never taken automatically.
+- `claudeCodeLauncher.historyExcludedPatterns` patterns set in a project's `settings.json` now add to the user's; they no longer replace them.
+- The activity bar container is called **Claude Code Launcher** and the conversations view **Conversations**, so they are not confused with the official extension. The extension got a listing icon, and the description says it is independent from Anthropic.
 
-### Interno
+### Internal
 
-- O código passou a usar os tipos do Node (`@types/node`) no lugar de `require` sem tipo, o que revelou três caminhos possivelmente indefinidos, agora tratados.
-- ESLint com regras de correção (promessas soltas, igualdade estrita, `switch` exaustivo) entrou no projeto e na CI.
-- `noUnusedLocals`, `noImplicitReturns` e `noFallthroughCasesInSwitch` ligados; código morto removido.
-- A apresentação das mudanças saiu de `changes.ts` para `changes-view.ts`, sem dependência do editor.
+- The code now uses the Node types (`@types/node`) instead of untyped `require`, which revealed three possibly undefined paths, now handled.
+- ESLint with correctness rules (floating promises, strict equality, exhaustive `switch`) joined the project and CI.
+- `noUnusedLocals`, `noImplicitReturns` and `noFallthroughCasesInSwitch` turned on; dead code removed.
+- The presentation of changes moved from `changes.ts` to `changes-view.ts`, with no editor dependency.
 
 ## 0.10.0
 
-- Resultados de revisão por arquivo, contratos de privacidade e de recuperação.
+- Per-file review results, privacy and recovery contracts.
 
 ## 0.9.0
 
-- Diagnóstico de captura e teste de integração do VSIX instalado.
+- Capture diagnostics and an integration test of the installed VSIX.
 
 ## 0.8.0
 
-- Correção da captura de mudanças no Windows e nova interface do painel.
+- Fix for change capture on Windows and a new panel interface.
 
 ## 0.7.0
 
-- Histórico em blobs, revisão compartilhada entre editores e suporte a várias pastas.
+- History in blobs, review shared between editors and multi-folder support.
 
 ## 0.6.0
 
-- Revisão de mudanças com pendentes, desfazer, navegação e testes.
+- Change review with pending changes, undo, navigation and tests.

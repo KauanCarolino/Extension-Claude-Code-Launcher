@@ -41,7 +41,7 @@ O passo a passo (**Launcher for Claude Code: Abrir o passo a passo**) abre na in
 
 - Tudo fica no seu disco. Nada é enviado a serviço externo.
 - O registro adiciona hooks ao `.claude/settings.local.json` do projeto e guarda as cópias em `.claude/launcher-changes/`, que ganha um `.gitignore` próprio. O hook só observa: ele nunca aprova nem bloqueia uma ferramenta, e nunca executa nada do seu projeto.
-- Para capturar o que os comandos mudaram, o hook anota o estado do projeto quando você envia o pedido e guarda cópias dos arquivos de texto, dentro de metade do orçamento de armazenamento e até 2.000 arquivos. `.git`, `node_modules`, `.claude` e o que o `.gitignore` da raiz lista ficam de fora. Para desligar: `claudeCodeLauncher.captureCommandChanges`.
+- Para capturar o que os comandos mudaram, o hook anota o estado do projeto quando você envia o pedido e guarda cópias dos arquivos de texto, dentro de metade do orçamento de armazenamento e até 2.000 arquivos. `.git`, `node_modules`, `.claude` e o que os `.gitignore` do projeto listam (em qualquer pasta, com negações `!`) ficam de fora. Para desligar: `claudeCodeLauncher.captureCommandChanges`.
 - Arquivos `.env`, chaves privadas, certificados e arquivos de credenciais nunca são copiados (`claudeCodeLauncher.historyExcludedPatterns`). O histórico revisado é limpo depois de 30 dias.
 - Mudanças feitas fora do Claude (por você ou por outros programas) não são capturadas.
 
@@ -67,12 +67,13 @@ O launcher roda onde o workspace está, como a extensão oficial: no WSL, por SS
 | `claudeCodeLauncher.historyRetentionDays` | `30` | Dias de histórico revisado; `0` mantém tudo |
 | `claudeCodeLauncher.historyMaxStorageMB` | `128` | Orçamento de armazenamento; ao atingi-lo, novas capturas pausam |
 | `claudeCodeLauncher.manageEditorGroups` | `false` | Deixa o launcher tirar abas de arquivo do grupo do chat |
+| `claudeCodeLauncher.showStatusBarItem` | `true` | Mostra o item **Claude** na barra de status |
 | `claudeCodeLauncher.hookExecutionMode` | `auto` | Como o hook é registrado; `disabled` desliga |
 
 ## Mais detalhes
 
 - [Referência completa](https://github.com/KauanCarolino/Extension-Claude-Code-Launcher/blob/main/docs/REFERENCIA.md): semântica da revisão, captura por comando, diagnóstico de captura, dados locais, janelas remotas, recuperação e desenvolvimento.
 - [O que os testes comprovam](https://github.com/KauanCarolino/Extension-Claude-Code-Launcher/blob/main/docs/VERIFICACAO.md).
-- [Changelog](https://github.com/KauanCarolino/Extension-Claude-Code-Launcher/blob/main/CHANGELOG.md).
+- [Changelog](https://github.com/KauanCarolino/Extension-Claude-Code-Launcher/blob/main/CHANGELOG.pt-BR.md).
 
 Licença MIT.

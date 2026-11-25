@@ -49,15 +49,18 @@ test('package compila uma árvore limpa e exclui documentos locais e testes', as
   assert.equal(report.runtimeMatchesSource, true);
   assert(report.entries.every(entry => !/\/(docs|scripts|test|node_modules)\//.test(entry.name)));
   assert(report.entries.some(entry => entry.name === 'extension/changelog.md'));
-  assert.match(await fs.readFile(path.join(directory, 'out/extension.js'), 'utf8'), /fresh-package-sentinel/);
+  assert.match(await fs.readFile(path.join(directory, 'dist/extension.js'), 'utf8'), /fresh-package-sentinel/);
+  assert(!report.entries.some(entry => entry.name.startsWith('extension/out/')), 'o pacote leva só o bundle, não os módulos do tsc');
 });
 
 test('package substitui saída antiga e não aprova artefato após erro de compilação', async t => {
   const directory = await fixture(t);
   const artifact = path.join(directory, 'candidate.vsix');
-  await fs.mkdir(path.join(directory, 'out'));
-  await fs.writeFile(path.join(directory, 'out/extension.js'), 'module.exports = "obsolete";');
-  await fs.writeFile(path.join(directory, 'out/removed-module.js'), 'module.exports = "stale";');
+  for (const output of ['out', 'dist']) {
+    await fs.mkdir(path.join(directory, output));
+    await fs.writeFile(path.join(directory, output, 'extension.js'), 'module.exports = "obsolete";');
+    await fs.writeFile(path.join(directory, output, 'removed-module.js'), 'module.exports = "stale";');
+  }
   let result = pack(directory, artifact);
   assert.equal(result.status, 0, result.stdout + result.stderr);
   const report = await verifyPackage(artifact, directory);

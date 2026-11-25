@@ -159,20 +159,20 @@ test('excluded metadata causes no new transcript read, cache or metadata write a
   const f = fixture(t, { sessions: { async readTranscriptMeta() { reads++; return metadataFor(['tool-excluded']); } } });
   const item = metadataEntry(f, 'excluded', 'secret.txt'); f.policy({ excludedPatterns: ['secret.txt'] });
   const old = JSON.stringify({ excluded: { reason: 'Already saved', request: null } }) + '\n', file = path.join(f.dir, 'meta.json'); fs.writeFileSync(file, old);
-  await seed(f, [item]); await f.controller.fillMeta(); await f.controller.writeChain;
-  assert.equal(reads, 0); assert.equal(f.controller.reasonCache.get('excluded'), 'Already saved'); assert.equal(f.controller.requestCache.size, 0);
-  assert.equal(f.controller.pendingMetadata.size, 0); assert.equal(fs.readFileSync(file, 'utf8'), old);
+  await seed(f, [item]); await f.controller.meta.fill(); await f.controller.writeChain;
+  assert.equal(reads, 0); assert.equal(f.controller.meta.reasonCache.get('excluded'), 'Already saved'); assert.equal(f.controller.meta.requestCache.size, 0);
+  assert.equal(f.controller.meta.pendingMetadata.size, 0); assert.equal(fs.readFileSync(file, 'utf8'), old);
 });
 
 test('an exclusion introduced while transcript IO awaits prevents new metadata from being cached or persisted', async t => {
   const entered = gate(), release = gate(); let reads = 0;
   const f = fixture(t, { sessions: { async readTranscriptMeta() { reads++; entered.release(); await release.promise; return metadataFor(['tool-race']); } } });
-  const item = metadataEntry(f, 'race'); f.policy(); await seed(f, [item]); const filling = f.controller.fillMeta();
+  const item = metadataEntry(f, 'race'); f.policy(); await seed(f, [item]); const filling = f.controller.meta.fill();
   try { await bounded(entered.promise); f.policy({ generation: 'changed-generation', excludedPatterns: ['race.txt'] }); }
   finally { release.release(); }
   await filling; await f.controller.writeChain;
-  assert.equal(reads, 1); assert.equal(f.controller.reasonCache.size, 0); assert.equal(f.controller.requestCache.size, 0);
-  assert.equal(f.controller.pendingMetadata.size, 0); assert.equal(fs.existsSync(path.join(f.dir, 'meta.json')), false);
+  assert.equal(reads, 1); assert.equal(f.controller.meta.reasonCache.size, 0); assert.equal(f.controller.meta.requestCache.size, 0);
+  assert.equal(f.controller.meta.pendingMetadata.size, 0); assert.equal(fs.existsSync(path.join(f.dir, 'meta.json')), false);
 });
 
 test('an exclusion introduced after metadata temp creation is rechecked before rename and before cache publication', async t => {
@@ -186,11 +186,11 @@ test('an exclusion introduced after metadata temp creation is rechecked before r
     } });
   } } };
   f = fixture(t, { nodeFs, sessions: { async readTranscriptMeta() { return metadataFor(['tool-temp']); } } });
-  const item = metadataEntry(f, 'temp'); f.policy(); await seed(f, [item]); await f.controller.fillMeta();
+  const item = metadataEntry(f, 'temp'); f.policy(); await seed(f, [item]); await f.controller.meta.fill();
   try { await bounded(entered.promise); f.settings.set('claudeCodeLauncher.historyExcludedPatterns', ['temp.txt']); }
   finally { release.release(); }
   await f.controller.writeChain;
-  assert.equal(fs.existsSync(path.join(f.dir, 'meta.json')), false); assert.equal(f.controller.reasonCache.size, 0); assert.equal(f.controller.requestCache.size, 0);
+  assert.equal(fs.existsSync(path.join(f.dir, 'meta.json')), false); assert.equal(f.controller.meta.reasonCache.size, 0); assert.equal(f.controller.meta.requestCache.size, 0);
   assert.equal(fs.readdirSync(f.dir).some(name => name.startsWith('meta.json.') && name.endsWith('.tmp')), false);
 });
 
@@ -210,8 +210,8 @@ test('failed owned metadata temp IO cleans only the newly created file and prese
     } } };
     const f = fixture(sub, { nodeFs, sessions: { async readTranscriptMeta() { return metadataFor(['tool-io']); } } }), item = metadataEntry(f, 'io'); f.policy();
     const original = JSON.stringify({ io: { reason: 'Already saved', request: null } }) + '\n'; fs.writeFileSync(path.join(f.dir, 'meta.json'), original);
-    await seed(f, [item]); await f.controller.fillMeta(); await f.controller.writeChain;
-    assert(temporary); assert.equal(fs.readFileSync(path.join(f.dir, 'meta.json'), 'utf8'), original); assert.equal(f.controller.requestCache.size, 0);
+    await seed(f, [item]); await f.controller.meta.fill(); await f.controller.writeChain;
+    assert(temporary); assert.equal(fs.readFileSync(path.join(f.dir, 'meta.json'), 'utf8'), original); assert.equal(f.controller.meta.requestCache.size, 0);
     if (mode === 'partial-write') { assert.equal(fs.existsSync(temporary), false); assert.equal(closes, 1); }
     else { assert.equal(fs.readFileSync(temporary, 'utf8'), 'PREEXISTING SYNTHETIC DATA'); assert.equal(closes, 0); }
   });
@@ -228,12 +228,12 @@ test('a shared transcript is read only for permitted tool IDs without using or r
   f.policy({ excludedPatterns: ['secret.txt'] });
   const legacy = { reason: 'Already saved legacy metadata', request: { id: 'legacy-request', text: 'Already saved request' } };
   fs.writeFileSync(path.join(f.dir, 'meta.json'), JSON.stringify({ 'legacy-not-in-current-log-page': legacy }) + '\n');
-  await seed(f, [allowed, excluded]); await f.controller.fillMeta(); await f.controller.writeChain;
+  await seed(f, [allowed, excluded]); await f.controller.meta.fill(); await f.controller.writeChain;
   assert.equal(calls.length, 1); assert.deepEqual(calls[0].options.toolUseIds, ['tool-allowed']); assert.equal(calls[0].options.cache, false);
   const saved = JSON.parse(fs.readFileSync(path.join(f.dir, 'meta.json'), 'utf8'));
   assert.equal(saved.allowed.reason, 'Synthetic reason'); assert.equal(saved.excluded, undefined);
   assert.deepEqual(saved['legacy-not-in-current-log-page'], legacy, 'new permitted enrichment must not purge valid legacy metadata outside the loaded log page');
-  assert.equal(f.controller.reasonCache.has('excluded'), false); assert.equal(f.controller.requestCache.has('excluded'), false);
+  assert.equal(f.controller.meta.reasonCache.has('excluded'), false); assert.equal(f.controller.meta.requestCache.has('excluded'), false);
   assert.equal(sessions.transcriptMetadataCacheCount([path.join(f.root, 'sessions')]), 0);
 });
 

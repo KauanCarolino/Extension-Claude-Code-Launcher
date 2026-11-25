@@ -163,7 +163,34 @@ test('como processo, o hook do turno não escreve nada na saída (o UserPromptSu
 	assert.equal(fs.readdirSync(path.join(dir(root), 'turns')).length, 2, 'manifesto da conversa e índice');
 });
 
-test('o .gitignore da raiz vira globs simples, sem negações nem classes', () => {
-	const store = { root: '/p', read: () => 'dist/\n/build\na/b/\n*.log\n!x.log\n[ab].txt\n# c\n../fora\n' };
-	assert.deepEqual(hook.gitignoreGlobs(store), ['**/dist', '**/dist/**', 'build', 'build/**', 'a/b', 'a/b/**', '**/*.log', '**/*.log/**']);
+test('as regras do .gitignore seguem o git: âncoras, só pastas, negação, classes, ** e escapes', () => {
+	const rules = hook.gitignoreRules('dist/\n/build\na/b\n*.log\n!x.log\n[ab].txt\nfoo[!0-9]\ndocs/**/*.tmp\n\\#literal\n\\!bang\ntrail \\ \n# c\n../fora\n\n');
+	const layers = [{ base: '', rules }];
+	const ignored = (relative, isDirectory = false) => hook.gitignored(relative, isDirectory, layers);
+	assert.equal(rules.length, 11, 'comentário, linha vazia e ../ ficam de fora');
+	assert.equal(ignored('dist', true), true); assert.equal(ignored('dist'), false, 'dist/ vale só para pastas');
+	assert.equal(ignored('sub/dist', true), true, 'sem barra no meio, vale em qualquer nível');
+	assert.equal(ignored('build'), true); assert.equal(ignored('sub/build'), false, '/build só na pasta do .gitignore');
+	assert.equal(ignored('a/b'), true); assert.equal(ignored('x/a/b'), false, 'barra no meio prende à pasta');
+	assert.equal(ignored('logs/run.log'), true); assert.equal(ignored('x.log'), false, 'a negação depois reinclui');
+	assert.equal(ignored('a.txt'), true); assert.equal(ignored('c.txt'), false);
+	assert.equal(ignored('foox'), true); assert.equal(ignored('foo1'), false);
+	assert.equal(ignored('docs/a.tmp'), true); assert.equal(ignored('docs/x/y/a.tmp'), true); assert.equal(ignored('a.tmp'), false);
+	assert.equal(ignored('#literal'), true); assert.equal(ignored('!bang'), true); assert.equal(ignored('trail  '), true);
+	assert.deepEqual(hook.gitignoreRules('[sem-fim\n'), hook.gitignoreRules('\\[sem-fim\n'), 'colchete sem fim é literal');
+});
+
+test('cada pasta usa o próprio .gitignore, e o mais fundo decide (inclusive reincluindo)', (t) => {
+	const root = project(t);
+	write(root, '.gitignore', '*.gen.ts\ncache/\n');
+	write(root, 'packages/web/.gitignore', '.next/\n!keep.gen.ts\n/local.txt\n');
+	const paths = ['a.gen.ts', 'packages/web/.next/out.js', 'packages/web/keep.gen.ts', 'packages/web/other.gen.ts',
+		'packages/web/local.txt', 'packages/web/src/local.txt', 'packages/api/.next/out.js', 'packages/api/cache/x.txt', 'keep.txt'];
+	for (const relative of paths) { write(root, relative, 'v1\n'); }
+	turn(root, 'turn-start');
+	const time = later(5);
+	for (const relative of paths) { write(root, relative, 'v2\n', time); }
+	turn(root, 'turn-end');
+	assert.deepEqual(log(root).map((entry) => path.relative(root, entry.file).split(path.sep).join('/')).sort(),
+		['keep.txt', 'packages/api/.next/out.js', 'packages/web/keep.gen.ts', 'packages/web/src/local.txt']);
 });

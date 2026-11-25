@@ -1,5 +1,6 @@
-# Código-fonte e configs de build (o pacote usa só out/)
+# Código-fonte e configs de build (o pacote usa só dist/, o bundle da extensão)
 src/**
+out/**
 test/**
 scripts/**
 docs/**
@@ -21,8 +22,9 @@ node_modules/**
 .gitignore
 .gitattributes
 
-# README em português: a página do Marketplace usa o README.md, que aponta para ele
+# README e CHANGELOG em português: a página do Marketplace usa os em inglês, que apontam para eles
 README.pt-BR.md
+CHANGELOG.pt-BR.md
 
 # Pacotes antigos e logs
 **/*.vsix

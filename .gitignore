@@ -3,6 +3,7 @@ node_modules/
 
 # Saída da compilação (gerada por `npm run compile`)
 out/
+dist/
 *.map
 
 # Pacotes gerados pelo vsce
@@ -24,4 +25,6 @@ desktop.ini
 /docs/*
 !/docs/VERIFICACAO.md
 !/docs/REFERENCIA.md
+!/docs/REFERENCE.md
+!/docs/VERIFICATION.md
 !/docs/images/

@@ -18,6 +18,9 @@ test('every reason the hook planner, the store and maintenance can report has a 
     ...codesIn('maintenance.js', /ReviewError\('([A-Za-z]+)'/g),
     ...codesIn('review-store.js', /ReviewError\('([A-Za-z]+)'/g),
     ...codesIn('changes.js', /ReviewError\('([A-Za-z]+)'/g),
+    // Partes extraídas do controlador.
+    ...codesIn('review-resource.js', /ReviewError\('([A-Za-z]+)'/g),
+    ...codesIn('change-metadata.js', /ReviewError\('([A-Za-z]+)'/g),
     // Guarded reads in history.js; its log-rejection codes are counted, never shown.
     'readBudgetOrType', 'readBudgetExceeded', 'readFailed', 'storageOutsideScope', 'storageIdentityUnavailable', 'unsafeStorage',
     'EACCES', 'EPERM', 'EROFS', 'ENOSPC',

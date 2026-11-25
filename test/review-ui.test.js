@@ -32,7 +32,7 @@ function webview(saved = {}, dictionary) {
 		document, window, setInterval() {}, acquireVsCodeApi: () => ({ getState: () => saved, setState: state => states.push(state), postMessage: message => messages.push(message) })
 	});
 	// Mesma ordem da página: o dicionário (l10n.js) antes do painel.
-	for (const name of ['l10n.js', 'changes.js']) { vm.runInContext(fs.readFileSync(path.resolve(__dirname, '../media', name), 'utf8'), context); }
+	for (const name of ['l10n.js', 'changes-time.js', 'changes-diff.js', 'changes.js']) { vm.runInContext(fs.readFileSync(path.resolve(__dirname, '../media', name), 'utf8'), context); }
 	return { root, body, document, messages, states, render: state => listener({ data: { type: 'state', hasFolder: true, enabled: true, entries: [], files: [], ...state } }),
 		find: key => root.querySelectorAll('[data-focus-key]').find(node => node.dataset.focusKey === key),
 		click(node) { assert(node); assert.notEqual(node.disabled, true); node.events.click({ preventDefault() {}, stopPropagation() {} }); } };

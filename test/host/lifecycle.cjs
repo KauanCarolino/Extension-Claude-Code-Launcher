@@ -27,7 +27,7 @@ exports.run = async () => {
   const report = { scenario: 'owned-component-lifecycle', editor: vscode.env.appName, vscode: vscode.version,
     node: process.version, platform: process.platform, arch: process.arch,
     artifactSha256: process.env.LAUNCHER_HOST_ARTIFACT_SHA256, checks: [], cycles: [], homeCycles: [],
-    method: 'Verified installed component source, observational CommonJS loader, real ExtensionContext and forwarded real editor/fs APIs. The private home class is exposed by one appended test-only export in the VM; production bytes are unchanged. Counts cover these component instances, not all editor handles. Heap deltas are noisy process observations, not GC-retained size or proof of leak.' };
+    method: 'Verified installed component source, observational CommonJS loader, real ExtensionContext and forwarded real editor/fs APIs. The private controller and home classes are exposed from the installed bundle by appended test-only exports in the VM; production bytes are unchanged. Counts cover these component instances, not all editor handles. Heap deltas are noisy process observations, not GC-retained size or proof of leak.' };
   try {
     const extension = vscode.extensions.getExtension(LAUNCHER_ID); assert(extension);
     report.extensionVersion = extension.packageJSON.version;
@@ -47,8 +47,9 @@ exports.run = async () => {
     const extra = path.join(path.dirname(process.env.LAUNCHER_HOST_WORKSPACE), 'second-root');
     await fs.mkdir(extra, { recursive: true });
     for (let index = 0; index < 5; index++) {
-      const observer = observeRuntime(vscode, path.join(extension.extensionPath, 'out'));
-      const { ChangesController } = observer.load(path.join(extension.extensionPath, 'out/changes.js'));
+      // The package ships one bundle (dist/extension.js); the controller class is exposed from it.
+      const observer = observeRuntime(vscode, path.join(extension.extensionPath, 'dist'));
+      const { __testChangesController: ChangesController } = observer.load(path.join(extension.extensionPath, 'dist/extension.js'), { __testChangesController: 'ChangesController' });
       const beforeHeap = process.memoryUsage().heapUsed;
       let controller;
       const initialization = await measure(async () => { controller = new ChangesController(componentContext); await controller.refresh(); }, observer);
@@ -85,8 +86,8 @@ exports.run = async () => {
       await fs.writeFile(path.join(sessionDirectory, id + '.jsonl'), JSON.stringify({ type: 'user', message: { content: 'Synthetic lifecycle conversation ' + index } }) + '\n');
     }
     for (let index = 0; index < 5; index++) {
-      const observer = observeRuntime(vscode, path.join(extension.extensionPath, 'out'));
-      const { __testHomeProvider: Home } = observer.load(path.join(extension.extensionPath, 'out/extension.js'), true);
+      const observer = observeRuntime(vscode, path.join(extension.extensionPath, 'dist'));
+      const { __testHomeProvider: Home } = observer.load(path.join(extension.extensionPath, 'dist/extension.js'), { __testHomeProvider: 'LauncherViewProvider' });
       const provider = new Home(componentContext); let wrapped;
       const viewId = 'launcher-contract-driver.home' + index;
       const registration = vscode.window.registerWebviewViewProvider(viewId, { resolveWebviewView(view) {

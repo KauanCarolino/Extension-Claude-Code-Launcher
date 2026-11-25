@@ -31,8 +31,8 @@ test('aceitar um pedido mantém só os arquivos cujas mudanças vieram todas del
 	items[3].before = { exists: true, text: 'after', large: false };
 	for (const item of items) { fs.writeFileSync(item.file, 'after'); }
 	writeLog(f, items); await f.store(); f.controller.entries = await f.controller.loadEntries();
-	for (const id of ['one', 'two', 'mixed-new']) { f.controller.requestCache.set(id, { id: 'r1', text: 'Pedido um' }); }
-	f.controller.requestCache.set('mixed-old', { id: 'r0', text: 'Pedido antigo' });
+	for (const id of ['one', 'two', 'mixed-new']) { f.controller.meta.requestCache.set(id, { id: 'r1', text: 'Pedido um' }); }
+	f.controller.meta.requestCache.set('mixed-old', { id: 'r0', text: 'Pedido antigo' });
 	await f.controller.handleMessage({ command: 'acceptRequest', request: 'r1' }, { postMessage: async () => undefined }, false);
 	assert.equal(f.controller.status.get('one'), 'accepted'); assert.equal(f.controller.status.get('two'), 'accepted');
 	assert.equal(f.controller.status.has('mixed-new'), false, 'mixed.txt tem mudança de outro pedido e fica pendente');

@@ -24,4 +24,17 @@ interface Window {
 	renderSkills(host: HTMLElement, state: any, send: WebviewSend): void;
 	/** catalog.js */
 	renderCatalog(host: HTMLElement, kind: string, state: any, send: WebviewSend): void;
+	/** changes-time.js */
+	launcherTime: {
+		shortTime(iso: string | undefined): string;
+		relativeLabel(iso: string | undefined): string;
+		exactLabel(iso: string | undefined): string;
+		dayLabel(iso: string | undefined): string;
+	};
+	/** changes-diff.js */
+	launcherDiff: {
+		renderLine(line: any): HTMLElement;
+		renderSplitRow(pair: any[]): HTMLElement;
+		splitRows(lines: any[]): any[][];
+	};
 }
