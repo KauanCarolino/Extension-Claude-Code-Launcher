@@ -14,7 +14,7 @@ export interface ViewEntry extends Partial<ReturnType<typeof projectReview>> {
 	/** Rótulo traduzido da ação ("Criou", "Editou"…). */
 	action: string;
 	/** Tipo estável da ação, para a página escolher cor e etiqueta sem depender do idioma. */
-	actionKind: 'created' | 'rewrote' | 'edited';
+	actionKind: 'created' | 'rewrote' | 'edited' | 'command';
 	file: string;
 	dir: string;
 	summary: string;
@@ -46,6 +46,56 @@ export interface FileSummary extends Partial<ReturnType<typeof projectReview>> {
 }
 
 export type BaseView = Omit<ViewEntry, 'status' | 'requestId' | 'request'>;
+
+export interface SummaryItem {
+	file: string;
+	dir: string;
+	action: string;
+	added: number;
+	removed: number;
+	status: ReviewResolution | null;
+	requestId: string | null;
+	request: string | null;
+	reason: string | null;
+}
+
+/** Uma linha, sem quebras e com limite, para caber num título ou numa citação. */
+function oneLine(text: string, max: number): string {
+	const line = text.replace(/\s+/g, ' ').trim();
+	return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+}
+
+/**
+ * Resumo em markdown das mudanças, agrupado pelo pedido, para colar na descrição de um PR.
+ * `items` vem em ordem cronológica; os arquivos repetidos num pedido aparecem uma vez, com os números somados.
+ */
+export function changesSummary(items: readonly SummaryItem[]): string {
+	const groups = new Map<string, { request: string | null; files: Map<string, SummaryItem & { count: number }>; reasons: string[] }>();
+	for (const item of items) {
+		const key = item.requestId ?? '';
+		const group = groups.get(key) ?? { request: item.request, files: new Map<string, SummaryItem & { count: number }>(), reasons: [] as string[] };
+		groups.set(key, group);
+		const path = (item.dir ? `${item.dir}/` : '') + item.file;
+		const prior = group.files.get(path);
+		group.files.set(path, prior
+			? { ...prior, action: item.action, added: prior.added + item.added, removed: prior.removed + item.removed, status: item.status, count: prior.count + 1 }
+			: { ...item, count: 1 });
+		const reason = item.reason ? oneLine(item.reason.split(/\n\s*\n/)[0] ?? '', 280) : '';
+		if (reason && !group.reasons.includes(reason)) { group.reasons.push(reason); }
+	}
+	const status = (value: ReviewResolution | null) => value === 'accepted' ? t('aceita') : value === 'rejected' ? t('recusada') : value === 'mixed' ? t('em partes') : t('pendente');
+	const lines = [`## ${t('Mudanças do Claude')}`, ''];
+	for (const group of groups.values()) {
+		lines.push(`### ${group.request ? t('Pedido: {0}', oneLine(group.request, 160)) : t('Outras mudanças')}`, '');
+		for (const [path, file] of group.files) {
+			const counts = [file.added ? `+${file.added}` : '', file.removed ? `−${file.removed}` : ''].filter(Boolean).join(' ');
+			lines.push(`- \`${path.replace(/`/g, "'")}\` — ${[file.count > 1 ? t('{0} ({1} edições)', file.action, file.count) : file.action, counts, status(file.status)].filter(Boolean).join(' · ')}`);
+		}
+		if (group.reasons.length) { lines.push(''); for (const reason of group.reasons.slice(0, 5)) { lines.push(`> ${reason}`); } }
+		lines.push('');
+	}
+	return lines.join('\n').trimEnd() + '\n';
+}
 /** `relativePath` é o caminho como o editor o mostra; este módulo não depende do editor. */
 export function toViewEntry(entry: RawEntry, relativePath: string): BaseView {
 	const relative = relativePath.replace(/\\/g, '/');
@@ -59,7 +109,7 @@ export function toViewEntry(entry: RawEntry, relativePath: string): BaseView {
 		id: entry.id,
 		time: entry.time,
 		action: actionLabel(entry.tool, created),
-		actionKind: created ? 'created' as const : entry.tool === 'Write' ? 'rewrote' as const : 'edited' as const,
+		actionKind: entry.tool === 'Command' ? 'command' as const : created ? 'created' as const : entry.tool === 'Write' ? 'rewrote' as const : 'edited' as const,
 		file: slash >= 0 ? relative.slice(slash + 1) : relative,
 		dir: slash >= 0 ? relative.slice(0, slash) : '',
 		summary: '',
@@ -83,7 +133,9 @@ export function toViewEntry(entry: RawEntry, relativePath: string): BaseView {
 		return {
 			...base,
 			summary: t('Não foi possível capturar o conteúdo de antes desta edição.'),
-			note: t('Isso acontece quando o registro foi ativado no meio de uma conversa.'),
+			note: entry.tool === 'Command'
+				? t('A captura do turno não guardou a cópia de antes: o projeto passou do limite de cópias, ou o arquivo não era texto.')
+				: t('Isso acontece quando o registro foi ativado no meio de uma conversa.'),
 		};
 	}
 
@@ -105,6 +157,9 @@ export function toViewEntry(entry: RawEntry, relativePath: string): BaseView {
 }
 
 export function actionLabel(tool: string | null | undefined, created: boolean): string {
+	if (tool === 'Command') {
+		return created ? t('Criou por comando') : t('Mudou por comando');
+	}
 	if (created) {
 		return t('Criou');
 	}

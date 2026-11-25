@@ -38,12 +38,15 @@ const control = new Set(['.gitignore', 'capture-policy.json', 'launcher-record-c
 const rootFiles: Record<string, PurgeCategory> = { 'log.jsonl': 'history', 'status.json': 'projection', 'meta.json': 'metadata',
 	'capture-status.json': 'capture', 'review-state.v1.json': 'canonical', 'review-state.v1.json.prev': 'canonical' };
 const rootDirectories: Record<string, PurgeCategory> = { blobs: 'blobs', 'review-blobs': 'blobs', pending: 'capture', completed: 'capture',
-	'capture-diagnostics': 'capture', 'review-migration-backups': 'backups', 'settings-backups': 'backups' };
+	'capture-diagnostics': 'capture', 'review-migration-backups': 'backups', 'settings-backups': 'backups', turns: 'capture', 'turn-blobs': 'blobs' };
 function own(value: object, key: string): boolean { return Object.hasOwn(value, key); }
 function rule(relative: string): { category: PurgeCategory; kind: PurgeItem['kind'] } | undefined {
 	if (own(rootFiles, relative)) { return { category: rootFiles[relative], kind: 'file' }; }
 	if (own(rootDirectories, relative)) { return { category: rootDirectories[relative], kind: 'directory' }; }
 	if (/^blobs\/[a-f0-9]{40}\.txt$/.test(relative)) { return { category: 'blobs', kind: 'file' }; }
+	// Captura do turno: manifestos por conversa, o índice, temporários da troca atômica e as cópias do início do turno.
+	if (/^turns\/(?:[a-f0-9]{32}|index)\.json(?:\.\d+-[a-f0-9]{12}\.tmp)?$/.test(relative)) { return { category: 'capture', kind: 'file' }; }
+	if (/^turn-blobs\/[a-f0-9]{40}\.txt$/.test(relative)) { return { category: 'blobs', kind: 'file' }; }
 	if (relative === 'review-blobs/v1') { return { category: 'blobs', kind: 'directory' }; }
 	if (/^review-blobs\/v1\/[a-f0-9]{64}\.txt$/.test(relative)) { return { category: 'blobs', kind: 'file' }; }
 	if (/^(?:pending\/[a-f0-9]{32}\.(?:json|post)|completed\/[a-f0-9]{32}\.json)$/.test(relative)) { return { category: 'capture', kind: 'file' }; }

@@ -105,7 +105,8 @@ export class CaptureSetup {
 	}
 
 	async prepareHookPlan(folder: vscode.WorkspaceFolder, enable: boolean): Promise<HookPlan> {
-		return planHooks({ read: await this.readSettings(folder), scriptPath: this.scriptPath(folder), knownScriptPaths: this.knownHookPaths(), enable, capability: await this.hookCapability() });
+		const turnCapture = vscode.workspace.getConfiguration('claudeCodeLauncher').get<boolean>('captureCommandChanges', true) !== false;
+		return planHooks({ read: await this.readSettings(folder), scriptPath: this.scriptPath(folder), knownScriptPaths: this.knownHookPaths(), enable, capability: await this.hookCapability(), turnCapture });
 	}
 
 	async writeHooks(folder: vscode.WorkspaceFolder, enable: boolean, prepared?: HookPlan): Promise<void> {

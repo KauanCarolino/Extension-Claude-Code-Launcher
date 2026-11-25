@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { DiffLine, diffLines, groupsOf, groupSignature } from './diff';
+import { DiffLine, diffLines, Group, groupsOf, groupSignature } from './diff';
 import { DROP_REVIEW_COMMAND } from './changes';
 import { fileKey, RawEntry, Status } from './logic';
 import { ReviewDecisionRequest, SharedReview } from './review';
@@ -72,6 +72,8 @@ export function registerInline(context: vscode.ExtensionContext, source: EntrySo
 			'claude-code-launcher.rejectChange',
 			(uri: string, index: number, signature: string, revision?: number) => inline.reject(uri, index, signature, revision),
 		),
+		vscode.commands.registerCommand('claude-code-launcher.acceptChangeAtCursor', () => inline.decideAtCursor('accept')),
+		vscode.commands.registerCommand('claude-code-launcher.rejectChangeAtCursor', () => inline.decideAtCursor('reject')),
 		vscode.commands.registerCommand('claude-code-launcher.acceptAllChanges', (uri?: string, revision?: number) => inline.acceptAll(uri, revision)),
 		vscode.commands.registerCommand('claude-code-launcher.rejectAllChanges', (uri?: string, revision?: number) => inline.rejectAll(uri, revision)),
 	);
@@ -239,6 +241,25 @@ class InlineChanges implements vscode.CodeLensProvider, vscode.Disposable {
 			};
 			void vscode.window.showWarningMessage(formatReviewItemResult(result));
 		}
+	}
+
+	/**
+	 * Aceita ou recusa o trecho do Claude em que está o cursor, com a mesma assinatura que a lente usa.
+	 * Fora de um trecho não decide nada: o atalho nunca escolhe um trecho que a pessoa não está vendo.
+	 */
+	async decideAtCursor(action: 'accept' | 'reject'): Promise<void> {
+		const editor = vscode.window.activeTextEditor;
+		const review = editor && editor.document.uri.scheme === 'file' ? this.evaluate(editor.document) : undefined;
+		if (!editor || !review) { void vscode.window.showInformationMessage(t('Não há trecho do Claude para revisar neste arquivo.')); return; }
+		const last = Math.max(0, editor.document.lineCount - 1);
+		const line = editor.selection.active.line;
+		const span = (group: Group) => {
+			const start = Math.min(group.newStart, last);
+			return { start, end: Math.min(start + Math.max(group.newLines.length, 1) - 1, last) };
+		};
+		const group = groupsOf(diffLines(review.base, review.current).lines).find((item) => { const { start, end } = span(item); return line >= start && line <= end; });
+		if (!group) { void vscode.window.showInformationMessage(t('Coloque o cursor num trecho do Claude. Alt+] e Alt+[ vão para o próximo e o anterior.')); return; }
+		await this.decide(editor.document.uri.toString(), { action, index: group.index, signature: groupSignature(group), revision: review.revision });
 	}
 
 	/** Only invalidate local presentation; never discard shared decisions. */

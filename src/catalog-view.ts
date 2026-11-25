@@ -7,12 +7,17 @@ import {
 	PROJECT_MCP_FILE, validServerName, type McpServer,
 } from './mcp';
 import { createRule, MEMORY_FILE, parsePathsInput, PROJECT_MEMORY, RULES_DIR, scanMemory, scanRules, type RuleInfo } from './rules';
+import {
+	loadHooks, loadPermissions, permissionKindLabel, PERMISSION_KINDS, planAddPermission, planRemovePermission, settingsSources, validPermissionRule,
+	type HookHandlerInfo, type PermissionKind, type PermissionRule, type SettingsSource,
+} from './settings-catalog';
 import { m, t } from './i18n';
+import { deleteToTrash, revealPath } from './remote';
 
 /** Abas da view do launcher. Só a de conversas mostra o painel de Mudanças. */
-export const PANELS = ['chats', 'skills', 'rules', 'agents', 'mcp'] as const;
+export const PANELS = ['chats', 'skills', 'rules', 'agents', 'mcp', 'permissions', 'hooks'] as const;
 export type Panel = typeof PANELS[number];
-export type CatalogKind = 'rules' | 'agents' | 'mcp';
+export type CatalogKind = 'rules' | 'agents' | 'mcp' | 'permissions' | 'hooks';
 
 interface Item { id: string; name: string; scope: string; state: string; folder?: string; projectRoot?: string }
 
@@ -58,13 +63,13 @@ async function pickProjectFolder(): Promise<ProjectFolder | undefined> {
 }
 const openFile = (file: string, line?: { line: number; character: number }) => vscode.window.showTextDocument(vscode.Uri.file(file),
 	line ? { selection: new vscode.Range(line.line, line.character, line.line, line.character) } : undefined);
-const reveal = (file: string) => vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(file));
+const reveal = (file: string) => revealPath(file);
 
 async function confirmTrash(label: string, file: string): Promise<boolean> {
 	const remove = t('Excluir');
 	const ok = await vscode.window.showWarningMessage(t('Excluir {0}? O arquivo vai para a lixeira.', label), { modal: true, detail: file }, remove);
 	if (ok !== remove) { return false; }
-	await vscode.workspace.fs.delete(vscode.Uri.file(file), { useTrash: true });
+	await deleteToTrash(vscode.Uri.file(file));
 	return true;
 }
 
@@ -298,6 +303,94 @@ export const mcpSource: Source<McpServer & Item> = {
 	},
 };
 
+// ---- Permissões e hooks ---------------------------------------------------------------
+
+/** Arquivos de configurações de cada pasta (local e projeto) e os de usuário e organização, uma vez só. */
+function allSettingsSources(): Array<SettingsSource & { folder?: ProjectFolder }> {
+	const folders = projectFolders(), shared = { configDir: configDir(), managedDir: managedDir() };
+	const own = folders.flatMap((folder) => settingsSources({ ...shared, project: folder.root })
+		.filter((source) => source.scope === 'local' || source.scope === 'project').map((source) => ({ ...source, folder })));
+	return [...own, ...settingsSources(shared)];
+}
+
+/** Itens de uma fonte de configurações ganham a pasta (com várias pastas) e um id único entre elas. */
+function located<T extends Item & { file: string }>(items: T[], sources: ReturnType<typeof allSettingsSources>): T[] {
+	const folders = projectFolders();
+	return items.map((item) => {
+		const source = sources.find((candidate) => candidate.file === item.file);
+		const position = source?.folder ? folders.findIndex((folder) => folder.root === source.folder?.root) : 0;
+		return source?.folder ? { ...fromFolder([item], source.folder, Math.max(0, position), folders.length)[0] } : item;
+	});
+}
+
+const SCOPE_FILE: Record<string, string> = { local: '.claude/settings.local.json', project: '.claude/settings.json' };
+
+export const permissionsSource: Source<PermissionRule & Item> = {
+	kind: 'permissions', title: m('Permissões'),
+	async load() {
+		const sources = allSettingsSources();
+		const listing = await loadPermissions(sources);
+		const scopes: Record<string, string> = { local: t('Local'), project: t('Projeto'), user: t('Usuário'), managed: t('Organização') };
+		return { items: located(listing.items, sources), extra: { problems: listing.problems,
+			notes: [t('Negar vence perguntar, que vence permitir. As regras da organização (managed-settings.json) valem acima das demais.'),
+				...listing.modes.map(({ scope, mode }) => t('Modo padrão ({0}): {1}', scopes[scope] ?? scope, mode))] } };
+	},
+	view: ({ id, name, scope, state, kind, note, shadowedBy }) => ({
+		id, name, scope, state, note, shadowed: Boolean(shadowedBy), canToggle: false, canDelete: scope !== 'managed',
+		tags: [{ text: permissionKindLabel(kind), tone: kind === 'deny' ? 'broken' : kind === 'ask' ? 'off' : '' }],
+	}),
+	open: async (rule) => { await openMcpEntry(rule.file, rule.keyPath); },
+	reveal: async (rule) => { await reveal(rule.file); },
+	async remove(rule) {
+		if (rule.scope === 'managed') { return; }
+		const label = SCOPE_FILE[rule.scope] ?? path.basename(rule.file);
+		const removeLabel = t('Remover');
+		const ok = await vscode.window.showWarningMessage(t('Remover a regra "{0}" de {1}?', rule.name, label), { modal: true, detail: rule.file }, removeLabel);
+		if (ok === removeLabel) { await editJson(rule.file, (text) => planRemovePermission(text, label, rule.kind, rule.name)); }
+	},
+	async create(scope) {
+		if (scope !== 'local' && scope !== 'project' && scope !== 'user') { return; }
+		const folder = scope === 'user' ? undefined : await pickProjectFolder();
+		if (scope !== 'user' && !folder) { return; }
+		const file = folder ? path.join(folder.root, '.claude', scope === 'local' ? 'settings.local.json' : 'settings.json') : path.join(configDir(), 'settings.json');
+		const label = SCOPE_FILE[scope] ?? t('settings.json do usuário');
+		const kinds: Array<vscode.QuickPickItem & { permission: PermissionKind }> = PERMISSION_KINDS.map((kind) => ({ permission: kind, label: permissionKindLabel(kind), description: kind,
+			detail: kind === 'allow' ? t('O Claude usa sem perguntar.') : kind === 'ask' ? t('O Claude pede confirmação antes.') : t('O Claude não pode usar.') }));
+		const picked = await vscode.window.showQuickPick(kinds, { placeHolder: t('Que tipo de regra?') });
+		if (!picked) { return; }
+		const rule = await vscode.window.showInputBox({ prompt: t('Regra no formato do Claude Code'), placeHolder: 'Bash(npm test:*)   Read(./src/**)   WebFetch(domain:example.com)',
+			validateInput: (value) => validPermissionRule(value.trim()) ? undefined : t('Use o formato do Claude Code, por exemplo Bash(npm test:*) ou Read(./src/**).') });
+		if (!rule) { return; }
+		await editJson(file, (text) => planAddPermission(text, label, picked.permission, rule.trim()));
+		await openMcpEntry(file, ['permissions', picked.permission]);
+	},
+	watch() {
+		return [
+			{ base: configDir(), pattern: 'settings.json' },
+			{ base: managedDir(), pattern: 'managed-settings.json' },
+			...projectFolders().map((folder) => ({ base: folder.root, pattern: '.claude/{settings.json,settings.local.json}' })),
+		];
+	},
+};
+
+export const hooksSource: Source<HookHandlerInfo & Item> = {
+	kind: 'hooks', title: m('Hooks'),
+	async load() {
+		const sources = allSettingsSources();
+		const listing = await loadHooks(sources);
+		return { items: located(listing.items, sources), extra: { problems: listing.problems,
+			notes: [t('Hooks rodam comandos a cada evento do Claude Code, com as suas permissões. Abra o arquivo para mudar um hook.')] } };
+	},
+	view: ({ id, name, scope, state, event, matcher, type, note, launcher }) => ({
+		id, name, scope, state, note, canToggle: false, canDelete: false,
+		tags: [{ text: event, tone: '' }, ...(matcher ? [{ text: matcher, tone: 'off' }] : []), ...(type !== 'command' ? [{ text: type, tone: 'off' }] : []),
+			...(launcher ? [{ text: t('launcher'), tone: 'accent' }] : [])],
+	}),
+	open: async (hook) => { await openMcpEntry(hook.file, hook.keyPath); },
+	reveal: async (hook) => { await reveal(hook.file); },
+	watch() { return permissionsSource.watch(); },
+};
+
 // ---- Registro ------------------------------------------------------------------------
 
 export interface Catalogs {
@@ -307,8 +400,10 @@ export interface Catalogs {
 }
 
 export function registerCatalogs(context: vscode.ExtensionContext, postToView: (message: unknown) => void): Catalogs {
-	const controllers: Array<CatalogController<RuleInfo & Item> | CatalogController<AgentInfo & Item> | CatalogController<McpServer & Item>> = [
+	const controllers: Array<CatalogController<RuleInfo & Item> | CatalogController<AgentInfo & Item> | CatalogController<McpServer & Item>
+		| CatalogController<PermissionRule & Item> | CatalogController<HookHandlerInfo & Item>> = [
 		new CatalogController(rulesSource, postToView), new CatalogController(agentsSource, postToView), new CatalogController(mcpSource, postToView),
+		new CatalogController(permissionsSource, postToView), new CatalogController(hooksSource, postToView),
 	];
 	let watchers: vscode.Disposable[] = [];
 	const rewatch = () => {
@@ -329,7 +424,7 @@ export function registerCatalogs(context: vscode.ExtensionContext, postToView: (
 		if (!fromView) { postToView({ type: 'tab', tab: panel }); }
 	};
 	void setPanel('chats', true);
-	const titles: Record<Panel, string> = { chats: 'Chats', skills: 'Skills', rules: 'Rules', agents: 'Agents', mcp: 'Mcp' };
+	const titles: Record<Panel, string> = { chats: 'Chats', skills: 'Skills', rules: 'Rules', agents: 'Agents', mcp: 'Mcp', permissions: 'Permissions', hooks: 'Hooks' };
 	context.subscriptions.push(...controllers, { dispose: () => watchers.forEach((w) => w.dispose()) },
 		vscode.workspace.onDidChangeWorkspaceFolders(() => { rewatch(); controllers.forEach((c) => c.refresh(0)); }),
 		...PANELS.map((panel) => vscode.commands.registerCommand(`claude-code-launcher.show${titles[panel]}`, () => setPanel(panel, false))),

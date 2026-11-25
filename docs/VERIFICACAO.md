@@ -14,6 +14,21 @@ A validação comum fixa o VS Code 1.94.0, a versão mínima declarada. Toda sem
 
 Os testes de Node também carregam as páginas das views em português e com o dicionário em inglês, e `test/l10n.test.js` reprova quando uma frase marcada no código não tem tradução ou quando o manifesto usa uma chave ausente em `package.nls.json` ou `package.nls.pt-br.json`.
 
+## Ambientes remotos
+
+O launcher e a extensão oficial são extensões de workspace: numa janela remota, os dois rodam no host do workspace, e o hook usa o `node` e o `~/.claude` desse host. Isso decorre do manifesto (`extensionKind: ["workspace"]` no launcher; a oficial não declara `extensionKind` e, por rodar código, fica no workspace) e não foi exercitado numa janela remota real: WSL, Remote-SSH, Dev Containers e Codespaces **não têm teste automatizado**.
+
+O que foi verificado em 22/11/2026, na 1.2.9:
+
+- a suíte de testes Node inteira (407 testes, inclusive o hook por edição, a captura do turno executada como processo e o controlador com o editor simulado) passou num contêiner `node:22-bookworm-slim` (Debian 12, Node 22.23.5), com usuário sem privilégios, `HOME` temporário e sem lixeira no sistema;
+- os testes cobrem, com o editor simulado, as duas diferenças de uma janela remota: revelar no Explorer ou copiar o caminho em vez de abrir o gerenciador de arquivos local, e a recusa de um arquivo criado que para com o motivo quando a lixeira não existe, sem apagar em definitivo.
+
+Para conferir num ambiente remoto real, siga a lista em [REFERENCIA.md](REFERENCIA.md#janelas-remotas-wsl-e-contêineres).
+
+## Captura por comando
+
+`test/hook-turn.test.js` exercita o hook do turno com arquivos reais: criação, mudança e exclusão por comando com antes e depois revisáveis, um segundo `Stop` no mesmo turno, edições do Edit/Write que não se repetem e um formatador depois delas, as exclusões (`.git`, `node_modules`, `.gitignore` da raiz, privacidade, binários), captura pausada, manutenção, manifesto adulterado, orçamento das cópias, coleta das cópias antigas e a saída vazia do processo. `test/turn-capture.test.js` liga o resultado ao painel: o rótulo, o pedido e a explicação tirados do transcript e o aviso de terminal dispensado. O contrato `official` com o Claude Code real continua cobrindo só o formato dos hooks no evento Setup; uma conversa real com `UserPromptSubmit` e `Stop` não é automatizada.
+
 ## Compatibilidade de hooks
 
 A compatibilidade de hooks é verificada separadamente. O modo automático exige que o schema da extensão oficial selecionada declare `command` com `args` separados. Não se presume uma versão mínima do Claude a partir dessa capacidade. Consulte o [contrato oficial dos hooks](https://code.claude.com/docs/en/hooks#command-hook-fields).

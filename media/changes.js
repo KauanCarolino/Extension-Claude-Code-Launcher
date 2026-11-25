@@ -22,7 +22,7 @@
 	/** Outra janela é a dona da revisão (ou o estado não abriu): nada que mude a revisão funciona. */
 	let readOnly = false;
 	const MUTATIONS = new Set(['enable', 'disable', 'clear', 'purge', 'clearAllReviewData',
-		'acceptAll', 'rejectAll', 'acceptFile', 'rejectFile', 'rejectRequest', 'undoReject']);
+		'acceptAll', 'rejectAll', 'acceptFile', 'rejectFile', 'rejectRequest', 'acceptRequest', 'undoReject']);
 
 	window.addEventListener('message', (event) => {
 		if (event.data && event.data.type === 'state') {
@@ -189,6 +189,7 @@
 		box.append(el('p', null, health.configurationLabel));
 		box.append(el('p', null, health.capabilityLabel + (health.version ? ' ' + t('Versão: {0}.', health.version) : '')));
 		box.append(el('p', null, health.evidenceLabel));
+		if (health.environmentLabel) { box.append(el('p', null, health.environmentLabel)); }
 		const event = (label, value) => {
 			box.append(el('p', null, value ? label + ': ' + value.at + ' · ' + value.label : t('{0}: sem evidência conhecida.', label)));
 			if (value) { box.append(el('p', null, value.guidance)); box.append(el('p', null, value.content)); }
@@ -505,6 +506,7 @@
 		}
 		if (state.entries.length > 0) {
 			actions.append(renderLayoutSwitch());
+			actions.append(button({ className: 'icon-btn', icon: 'copy', command: 'copySummary', title: t('Copiar resumo das mudanças (markdown)'), ariaLabel: t('Copiar resumo das mudanças'), focusKey: 'copySummary' }));
 		}
 		actions.append(button({ className: 'icon-btn', icon: 'refresh', command: 'refresh', title: t('Atualizar'), ariaLabel: t('Atualizar'), focusKey: 'refresh' }));
 		if (state.entries.length > 0) {
@@ -716,6 +718,18 @@
 
 		const meta = el('div', 'request-meta');
 		// Só aparece ao passar o mouse ou focar: é uma ação rara, não precisa ocupar a tela.
+		if (!readOnly && same.some((item) => !item.status)) {
+			meta.append(button({
+				className: compact ? 'icon-btn request-accept' : 'btn-ghost btn-sm request-accept',
+				icon: 'check',
+				label: compact ? null : t('Aceitar pedido'),
+				command: 'acceptRequest',
+				extra: { request: entry.requestId },
+				title: t('Aceitar pedido: mantém o que o Claude mudou para atender este pedido'),
+				ariaLabel: t('Aceitar pedido'),
+				focusKey: 'request-accept:' + entry.requestId,
+			}));
+		}
 		if (!readOnly && same.some((item) => item.status !== 'rejected')) {
 			meta.append(button({
 				className: compact ? 'icon-btn request-undo' : 'btn-ghost btn-sm request-undo',

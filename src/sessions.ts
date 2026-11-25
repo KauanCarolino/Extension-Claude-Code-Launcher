@@ -423,6 +423,40 @@ export function findRequestsInTranscript(transcriptPath: string): Map<string, Re
 }
 
 const MAX_REQUEST = 160;
+const TURN_SHELL_TOOLS = new Set(['Bash', 'PowerShell']);
+
+/**
+ * Chamada de ferramenta que representa o turno terminado em `at`: a última de terminal (ou, sem
+ * nenhuma, a última de qualquer ferramenta) depois da mensagem do usuário que abriu o turno.
+ * Usada pelas mudanças da captura do turno, que não têm chamada própria.
+ */
+export async function findTurnToolUse(transcriptPath: string, at: string): Promise<string | undefined> {
+	const limit = Date.parse(at);
+	if (!Number.isFinite(limit) || typeof transcriptPath !== 'string' || !transcriptPath || transcriptPath.length > 8192 || /[\u0000-\u001f\u007f]/.test(transcriptPath)) { return undefined; }
+	let text: string;
+	let handle: fs.promises.FileHandle | undefined;
+	try {
+		const { size } = await fs.promises.stat(transcriptPath);
+		handle = await fs.promises.open(transcriptPath, 'r');
+		const start = Math.max(0, size - REASON_TAIL_BYTES);
+		const buffer = ByteBuffer.alloc(size - start);
+		const { bytesRead } = await handle.read(buffer, 0, buffer.length, start);
+		text = buffer.toString('utf8', 0, bytesRead);
+	} catch { return undefined; } finally { await handle?.close().catch(() => undefined); }
+	let shell: string | undefined, any: string | undefined;
+	for (const entry of parseLines(text)) {
+		const time = typeof entry.timestamp === 'string' ? Date.parse(entry.timestamp) : NaN;
+		if (Number.isFinite(time) && time > limit) { break; }
+		if (entry.type === 'user' && !entry.isMeta && entry.message && promptText(entry.message.content)) { shell = undefined; any = undefined; continue; }
+		if (entry.type !== 'assistant' || !Array.isArray(entry.message?.content)) { continue; }
+		for (const block of entry.message.content) {
+			if (block?.type !== 'tool_use' || typeof block.id !== 'string' || !/^[^\u0000-\u001f\u007f]{1,256}$/.test(block.id)) { continue; }
+			any = block.id;
+			if (TURN_SHELL_TOOLS.has(block.name)) { shell = block.id; }
+		}
+	}
+	return shell ?? any;
+}
 
 function promptText(content: unknown): string | null {
 	const blocks: any[] = typeof content === 'string' ? [{ type: 'text', text: content }] : Array.isArray(content) ? content : [];

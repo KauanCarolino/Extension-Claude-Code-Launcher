@@ -27,6 +27,30 @@
 			},
 			creatable: ['project'], open: t('Abrir a configuração na entrada do servidor'),
 		},
+		permissions: {
+			count: (n) => plural(n, '{0} regra de permissão', '{0} regras de permissão'), search: t('Buscar permissões…'), all: t('Todas'), add: t('+ Nova'),
+			disabled: t('desativada'), empty: t('Nenhuma regra de permissão configurada.'),
+			scopes: { local: t('Local'), project: t('Projeto'), user: t('Usuário'), managed: t('Organização') },
+			hints: {
+				local: t('.claude/settings.local.json: só você, neste projeto.'),
+				project: t('.claude/settings.json: compartilhado pelo repositório.'),
+				user: t('settings.json do usuário: todos os seus projetos.'),
+				managed: t('managed-settings.json: definido pela organização; vale acima dos outros.'),
+			},
+			creatable: ['local', 'project', 'user'], open: t('Abrir no arquivo de configurações'),
+		},
+		hooks: {
+			count: (n) => plural(n, '{0} hook', '{0} hooks'), search: t('Buscar hooks…'), all: t('Todos'), add: t('+ Novo'),
+			disabled: t('desligado'), empty: t('Nenhum hook configurado.'),
+			scopes: { local: t('Local'), project: t('Projeto'), user: t('Usuário'), managed: t('Organização') },
+			hints: {
+				local: t('.claude/settings.local.json: só você, neste projeto.'),
+				project: t('.claude/settings.json: compartilhado pelo repositório.'),
+				user: t('settings.json do usuário: todos os seus projetos.'),
+				managed: t('managed-settings.json: definido pela organização; vale acima dos outros.'),
+			},
+			creatable: [], open: t('Abrir no arquivo de configurações'),
+		},
 	};
 	const ui = {};
 
@@ -105,6 +129,7 @@
 				box.append(icon, el('span', null, problem));
 				list.appendChild(box);
 			}
+			for (const note of state.notes || []) { list.appendChild(el('p', 'sk-note', note)); }
 			if (state.managedPolicy) {
 				list.appendChild(el('p', 'sk-note', t('Há um managed-mcp.json: a política da organização pode limitar os outros servidores.')));
 			}
@@ -151,6 +176,9 @@
 				f.title = t('Pasta do workspace');
 				head.appendChild(f);
 			}
+			for (const tag of Array.isArray(item.tags) ? item.tags : []) {
+				if (tag && tag.text) { head.appendChild(el('span', 'sk-badge' + (tag.tone ? ' ' + tag.tone : ''), tag.text)); }
+			}
 			if (item.model) { head.appendChild(el('span', 'sk-badge', item.model)); }
 			if (item.transport) { head.appendChild(el('span', 'sk-badge', item.transport)); }
 			r.appendChild(head);
@@ -161,7 +189,7 @@
 				r.appendChild(meta);
 			}
 			if (item.target) { r.appendChild(el('p', 'sk-meta', item.target)); }
-			if (kind === 'mcp' && item.note && item.state !== 'active') { r.appendChild(el('p', 'sk-desc', item.note)); }
+			if ((kind === 'mcp' && item.state !== 'active' || kind === 'permissions' || kind === 'hooks') && item.note) { r.appendChild(el('p', 'sk-desc', item.note)); }
 			const actions = el('div', 'sk-actions');
 			actions.appendChild(iconBtn('folder-opened', t('Mostrar no sistema'), () => send(kind + '.reveal', { id: item.id })));
 			if (item.canToggle) {
@@ -170,7 +198,7 @@
 				actions.appendChild(iconBtn(on ? 'circle-slash' : 'check', label, () => send(kind + '.toggle', { id: item.id })));
 			}
 			if (item.canDelete) {
-				actions.appendChild(iconBtn('trash', kind === 'mcp' ? t('Remover do .mcp.json') : t('Excluir'), () => send(kind + '.delete', { id: item.id })));
+				actions.appendChild(iconBtn('trash', kind === 'mcp' ? t('Remover do .mcp.json') : kind === 'permissions' ? t('Remover regra') : t('Excluir'), () => send(kind + '.delete', { id: item.id })));
 			}
 			r.appendChild(actions);
 			return r;

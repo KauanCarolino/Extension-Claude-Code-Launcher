@@ -9,7 +9,7 @@ export const REVIEW_REASONS = ['completed', 'previousOperationRecovered', 'saveR
 	'unsupportedNotebook', 'unsupportedStore', 'unsupportedSchema', 'invalidSnapshot', 'invalidReviewState',
 	'resourceOutsideScope', 'resourceIdentityUnavailable', 'dirtyDocument', 'undoCapacity', 'storeBudgetExceeded',
 	'storeDepthExceeded', 'missingReview', 'missingUndo', 'reviewUnavailable', 'maintenanceInProgress',
-	'cancelledBeforeEffect', 'cancelledAfterEffect', 'permissionDenied', 'storageFull', 'purgeNeedsRecovery'] as const;
+	'cancelledBeforeEffect', 'cancelledAfterEffect', 'permissionDenied', 'storageFull', 'purgeNeedsRecovery', 'trashUnavailable'] as const;
 export type ReviewResultReason = typeof REVIEW_REASONS[number];
 export type ReviewAction = 'accept' | 'reject' | 'undo';
 export interface ReviewItemResult {
@@ -65,6 +65,7 @@ const reasonText: Partial<Record<ReviewResultReason, string>> = {
 	storageFull: m('Não há espaço disponível para concluir a operação.'), undoCapacity: m('Não há capacidade para preservar a recuperação necessária.'),
 	legacyWriterConflict: m('Outro escritor alterou os dados de compatibilidade.'), legacyProjectionPending: m('A decisão canônica foi registrada; a projeção de compatibilidade continua pendente.'),
 	purgeNeedsRecovery: m('Uma limpeza interrompida precisa de recuperação antes de continuar a revisão.'),
+	trashUnavailable: m('A lixeira não está disponível neste ambiente, e o launcher nunca apaga em definitivo. Apague o arquivo à mão para concluir a recusa.'),
 };
 function guidance(result: ReviewItemResult): string {
 	if (result.reason === 'purgeNeedsRecovery') { return t('Use Apagar todos os dados locais de revisão para concluir a limpeza; não remova o marcador manualmente.'); }

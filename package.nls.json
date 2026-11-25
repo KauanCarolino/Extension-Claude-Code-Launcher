@@ -66,5 +66,11 @@
   "walkthrough.newChat.media": "media/walkthrough/en/chat.md",
   "walkthrough.review.title": "Review what Claude changed",
   "walkthrough.review.description": "Accept or reject each file or hunk, in the panel or right in the editor.\n[Open Changes](command:claude-code-launcher.showChanges)",
-  "walkthrough.review.media": "media/walkthrough/en/review.md"
+  "walkthrough.review.media": "media/walkthrough/en/review.md",
+  "config.captureCommandChanges": "With the change log on, also records what terminal commands, MCP tools and generators changed, at the end of each Claude reply. The project state is noted when you send a request, with copies of text files within the storage budget; .git, node_modules and the root .gitignore are skipped.",
+  "command.acceptChangeAtCursor": "Accept Claude's Hunk at Cursor",
+  "command.rejectChangeAtCursor": "Reject Claude's Hunk at Cursor",
+  "command.copyChangesSummary": "Copy Changes Summary (Markdown)",
+  "command.showPermissions": "Show Permissions",
+  "command.showHooks": "Show Hooks"
 }

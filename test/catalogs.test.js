@@ -272,6 +272,13 @@ test('a localização no JSON acha a chave certa mesmo com o mesmo nome em outro
 
 // ---- Controlador da view -----------------------------------------------------------
 
+/** Módulo de out/ carregado com o editor simulado, como o próprio controlador o vê. */
+function withVscode(name, vscode) {
+  const file = path.join(OUT, name), loaded = { exports: {} };
+  vm.runInNewContext(fs.readFileSync(file, 'utf8'), { module: loaded, exports: loaded.exports, require: (id) => id === 'vscode' ? vscode : id.startsWith('.') ? require(path.join(OUT, id)) : require(id) }, { filename: file });
+  return loaded.exports;
+}
+
 function controllerFixture(t, { project, projects, config, answers = {} }) {
   const previous = process.env.CLAUDE_CONFIG_DIR;
   process.env.CLAUDE_CONFIG_DIR = config;
@@ -289,6 +296,7 @@ function controllerFixture(t, { project, projects, config, answers = {} }) {
       showErrorMessage: async (message) => { errors.push(message); },
       showInputBox: async (options) => answers.input?.shift()?.(options),
       showWorkspaceFolderPick: async () => answers.folder?.(),
+      showQuickPick: async (items) => answers.pick?.(items),
     },
     workspace: {
       workspaceFolders: projects ? projects.map((root, index) => ({ uri: Uri.file(root), name: path.basename(root), index }))
@@ -311,7 +319,7 @@ function controllerFixture(t, { project, projects, config, answers = {} }) {
   const filename = path.join(OUT, 'catalog-view.js'), module = { exports: {} };
   vm.runInNewContext(fs.readFileSync(filename, 'utf8'), {
     module, exports: module.exports, setTimeout, clearTimeout, process, Error,
-    require: (id) => id === 'vscode' ? vscode : id.startsWith('.') ? require(path.join(OUT, id)) : require(id),
+    require: (id) => id === 'vscode' ? vscode : id === './remote' ? withVscode('remote.js', vscode) : id.startsWith('.') ? require(path.join(OUT, id)) : require(id),
   }, { filename });
   const context = { subscriptions: [] };
   const catalogs = module.exports.registerCatalogs(context, (message) => posted.push(JSON.parse(JSON.stringify(message))));
@@ -459,5 +467,78 @@ test('com várias pastas, cada uma traz suas regras, agentes e servidores, e a c
   assert.equal(fs.existsSync(path.join(roots.project, '.claude', 'settings.local.json')), false);
   await c.catalogs.handle('rules.create', undefined, 'project');
   assert.equal(fs.existsSync(path.join(second, '.claude', 'rules', 'nova-regra.md')), true);
+  assert.deepEqual(c.errors, []);
+});
+
+// ---- Permissões e hooks -------------------------------------------------------------------
+
+const settings = require(path.join(OUT, 'settings-catalog.js'));
+
+function settingsRoots(t) {
+  const base = tempRoot(t), config = path.join(base, 'config'), project = path.join(base, 'projeto'), managed = path.join(base, 'org');
+  write(path.join(project, '.claude', 'settings.local.json'), JSON.stringify({ permissions: { allow: ['Bash(npm test:*)', 'Read(./src/**)'] }, other: true }));
+  write(path.join(project, '.claude', 'settings.json'), JSON.stringify({ permissions: { deny: ['Bash(npm test:*)'], defaultMode: 'acceptEdits' },
+    hooks: { PostToolUse: [{ matcher: 'Edit', hooks: [{ type: 'command', command: 'prettier', args: ['--write', '--token=SEGREDO123'] }] }],
+      Stop: [{ hooks: [{ type: 'command', command: 'node', args: [path.join(project, '.claude/launcher-changes/launcher-record-change.js'), 'turn-end'] }] }] } }));
+  write(path.join(config, 'settings.json'), '{ quebrado');
+  write(path.join(managed, 'managed-settings.json'), JSON.stringify({ disableAllHooks: true, permissions: { ask: ['WebFetch'] } }));
+  return { base, config, project, managed, sources: settings.settingsSources({ project, configDir: config, managedDir: managed }) };
+}
+
+test('permissões vêm de cada escopo, com o tipo, o modo padrão e a regra encoberta por um tipo mais forte', async (t) => {
+  const roots = settingsRoots(t);
+  const listing = await settings.loadPermissions(roots.sources);
+  assert.deepEqual(listing.items.map((item) => [item.scope, item.kind, item.name, item.shadowedBy ?? null]), [
+    ['local', 'allow', 'Bash(npm test:*)', 'deny'], ['local', 'allow', 'Read(./src/**)', null], ['project', 'deny', 'Bash(npm test:*)', null], ['managed', 'ask', 'WebFetch', null],
+  ]);
+  assert.match(listing.items[0].note, /negar/);
+  assert.deepEqual(listing.modes, [{ scope: 'project', mode: 'acceptEdits' }]);
+  assert.deepEqual(listing.problems, ['settings.json do usuário não é um JSON válido.']);
+});
+
+test('criar e remover regras preserva o resto do arquivo e recusa duplicata ou formato inválido', () => {
+  const source = JSON.stringify({ model: 'opus', permissions: { allow: ['Read'], defaultMode: 'plan' } });
+  const added = JSON.parse(settings.planAddPermission(source, 'x.json', 'deny', 'Bash(rm:*)'));
+  assert.deepEqual(added, { model: 'opus', permissions: { allow: ['Read'], defaultMode: 'plan', deny: ['Bash(rm:*)'] } });
+  assert.throws(() => settings.planAddPermission(JSON.stringify(added), 'x.json', 'deny', 'Bash(rm:*)'), /já está/);
+  assert.throws(() => settings.planAddPermission(source, 'x.json', 'allow', 'rm -rf /'), /formato do Claude Code/);
+  assert.throws(() => settings.planAddPermission('{', 'x.json', 'allow', 'Read'), /não é um JSON válido/);
+  assert.throws(() => settings.planAddPermission(JSON.stringify({ permissions: { allow: 'Read' } }), 'x.json', 'allow', 'Edit'), /não é uma lista/);
+  const removed = JSON.parse(settings.planRemovePermission(JSON.stringify(added), 'x.json', 'deny', 'Bash(rm:*)'));
+  assert.deepEqual(removed, { model: 'opus', permissions: { allow: ['Read'], defaultMode: 'plan' } });
+  assert.deepEqual(JSON.parse(settings.planRemovePermission(JSON.stringify({ a: 1, permissions: { ask: ['X'] } }), 'x.json', 'ask', 'X')), { a: 1 });
+  assert.throws(() => settings.planRemovePermission(JSON.stringify(removed), 'x.json', 'deny', 'Bash(rm:*)'), /não está mais/);
+  for (const rule of ['Bash', 'Bash(npm run test:*)', 'mcp__github__*', 'WebFetch(domain:example.com)', 'Read(~/.zshrc)']) { assert.equal(settings.validPermissionRule(rule), true, rule); }
+  for (const rule of ['', ' Bash', 'Bash()', '1Bash', 'Bash(x)\n']) { assert.equal(settings.validPermissionRule(rule), false, JSON.stringify(rule)); }
+});
+
+test('hooks mostram evento, matcher e comando sem segredos, e reconhecem os do próprio launcher', async (t) => {
+  const roots = settingsRoots(t);
+  const listing = await settings.loadHooks(roots.sources);
+  assert.deepEqual(listing.items.map((item) => [item.scope, item.event, item.matcher, item.name, item.launcher]), [
+    ['project', 'PostToolUse', 'Edit', 'prettier --write --token=•••', false],
+    ['project', 'Stop', '', 'node ' + path.join(roots.project, '.claude/launcher-changes/launcher-record-change.js') + ' turn-end', true],
+  ]);
+  assert.equal(JSON.stringify(listing).includes('SEGREDO123'), false);
+  assert.ok(listing.problems.includes('managed-settings.json desliga todos os hooks (disableAllHooks).'));
+  assert.equal(settings.isLauncherHook({ type: 'command', command: 'node "/p/.claude/launcher-changes/launcher-record-change.js" pre' }), true);
+  assert.equal(settings.isLauncherHook({ type: 'command', command: 'node', args: ['/p/outro.js', 'pre'] }), false);
+});
+
+test('pela view, criar uma regra pergunta tipo e texto e grava no arquivo do escopo; remover pede confirmação', async (t) => {
+  const roots = catalogRoots(t);
+  const answers = { pick: (items) => items.find((item) => item.permission === 'ask'), input: [() => 'Bash(git push:*)'], warning: () => 'Remover' };
+  const c = controllerFixture(t, { ...roots, answers });
+  await c.catalogs.handle('permissions.create', undefined, 'local');
+  const file = path.join(roots.project, '.claude', 'settings.local.json');
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { permissions: { ask: ['Bash(git push:*)'] } });
+  const listed = c.last('permissions');
+  assert.deepEqual(listed.items.map((item) => [item.id, item.tags[0].text, item.canDelete]), [['local:ask:Bash(git push:*)', 'perguntar', true]]);
+  assert.ok(listed.notes[0].startsWith('Negar vence perguntar'));
+  assert.equal(JSON.stringify(c.posted).includes(roots.base), false, 'nenhum caminho absoluto chega à página');
+  await c.catalogs.handle('permissions.delete', 'local:ask:Bash(git push:*)');
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), {});
+  await c.catalogs.handle('hooks.refresh');
+  assert.deepEqual(c.last('hooks').items, []);
   assert.deepEqual(c.errors, []);
 });

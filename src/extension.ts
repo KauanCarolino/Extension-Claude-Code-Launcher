@@ -77,7 +77,7 @@ class LauncherViewProvider implements vscode.WebviewViewProvider, vscode.Disposa
 						await skills?.handle(message.command, message.id, message.key);
 						return;
 					default:
-						if (/^(rules|agents|mcp)\./.test(message.command)) {
+						if (/^(rules|agents|mcp|permissions|hooks)\./.test(message.command)) {
 							await catalogs?.handle(message.command, message.id, message.key);
 							return;
 						}
@@ -367,7 +367,7 @@ async function openClaude(target: OpenTarget, sessionId?: string): Promise<void>
 }
 
 // A barra lateral é uma view, não um grupo de editor: nela não entram abas de arquivo.
-// Por isso este caminho nunca abre o chat como aba, nem como fallback.
+// Por isso este caminho só abre o chat como aba quando a "barra lateral" seria o Explorer.
 const SIDEBAR_FALLBACKS = [
 	SIDEBAR_COMMAND,
 	'claudeVSCodeSidebarSecondary.focus',
@@ -375,8 +375,38 @@ const SIDEBAR_FALLBACKS = [
 	'claudeVSCodeSidebar.focus',
 ];
 
+/**
+ * O Cursor recusa contêineres em `secondarySidebar`, e o editor põe no Explorer as views de um
+ * contêiner que não existe. A extensão oficial usa a view `claudeVSCodeSidebarSecondary` a partir
+ * da API 1.106, então nesse editor "abrir na barra lateral" mistura o chat às views do Explorer.
+ * Sinal: a view está registrada, mas o comando do contêiner dela não.
+ */
+function sidebarLandsInExplorer(available: ReadonlySet<string>): boolean {
+	const [major = 0, minor = 0] = vscode.version.split('.').map(Number);
+	const officialUsesSecondary = major > 1 || major === 1 && minor >= 106;
+	return officialUsesSecondary && available.has('claudeVSCodeSidebarSecondary.focus')
+		&& !available.has('workbench.view.extension.claude-sidebar-secondary');
+}
+
+/** Sem barra lateral própria, mostra a aba de chat já aberta (a ativa no grupo, se houver) ou abre uma. */
+async function showClaudeTab(): Promise<void> {
+	const open = claudeTabs();
+	const current = open.find(({ tab }) => tab.isActive) ?? open[0];
+	if (current) {
+		await focusClaudeTab(current.key);
+		return;
+	}
+	await openClaudeTab();
+}
+
 async function openClaudeSidebar(): Promise<void> {
 	const available = new Set(await vscode.commands.getCommands(true));
+	// `claude-vscode.sidebar.open` também grava `claudeCode.preferredLocation: "sidebar"`, e o botão
+	// "✻ Claude Code" da oficial passaria a abrir no Explorer. Nesse caso o chat fica em aba.
+	if (sidebarLandsInExplorer(available)) {
+		await showClaudeTab();
+		return;
+	}
 	for (const command of SIDEBAR_FALLBACKS) {
 		if (available.has(command)) {
 			await bounded(vscode.commands.executeCommand(command), 10000, 'commandTimeout');

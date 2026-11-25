@@ -18,6 +18,8 @@ export const BLOB_GRACE_MS = 10 * 60 * 1000;
  * depois disso: nenhuma chamada de ferramenta fica aberta por tanto tempo.
  */
 export const PENDING_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+/** Manifestos da captura do turno sem uso há tanto tempo saem; o índice (index.json) fica. */
+export const TURN_MANIFEST_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 /** Acima disso, o log perde as edições revisadas mais antigas. */
 export const MAX_LOG_ENTRIES = 400;
 
@@ -66,11 +68,13 @@ export async function pruneReviewedLog(store: ReviewStore, options: { clear: boo
 export async function housekeep(store: ReviewStore, cancelled: Cancelled): Promise<void> {
 	await removeAged(store, 'completed', PENDING_MAX_AGE_MS, cancelled);
 	await removeAged(store, 'pending', PENDING_MAX_AGE_MS, cancelled);
+	// Manifesto de uma conversa que nunca chegou ao Stop (janela fechada, Claude interrompido).
+	await removeAged(store, 'turns', TURN_MANIFEST_MAX_AGE_MS, cancelled);
 	if (cancelled() || !store.writable) { return; }
 	await store.collectUnreferencedBlobs(BLOB_GRACE_MS);
 }
 
-export async function removeAged(store: ReviewStore, name: 'completed' | 'pending', maxAgeMs: number, cancelled: Cancelled): Promise<number> {
+export async function removeAged(store: ReviewStore, name: 'completed' | 'pending' | 'turns', maxAgeMs: number, cancelled: Cancelled): Promise<number> {
 	const directory = nodePath.join(store.directory, name);
 	if (!(await assessStoragePath(directory, store.root)).allowed) { throw new ReviewError('unsafeStorageType'); }
 	let names: string[];

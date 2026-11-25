@@ -44,21 +44,24 @@ function validatePolicy(value) {
 		&& value.maxStorageBytes <= 2 * 1024 * 1024 * 1024
 		&& Number.isSafeInteger(value.retentionDays) && value.retentionDays >= 0 && value.retentionDays <= 3650;
 }
-function excluded(relative, patterns) {
-	const name = relative.replace(/\\/g, '/');
-	return patterns.some((pattern) => {
-		let expression = '';
-		for (let i = 0; i < pattern.length; i += 1) {
-			const char = pattern[i];
-			if (char === '*' && pattern[i + 1] === '*' && pattern[i + 2] === '/') { expression += '(?:.*/)?'; i += 2; }
-			else if (char === '*' && pattern[i + 1] === '*') { expression += '.*'; i += 1; }
-			else if (char === '*') { expression += '[^/]*'; }
-			else if (char === '?') { expression += '[^/]'; }
-			else { expression += char.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
-		}
-		return new RegExp(`^${expression}$`).test(name);
-	});
+function globExpression(pattern) {
+	let expression = '';
+	for (let i = 0; i < pattern.length; i += 1) {
+		const char = pattern[i];
+		if (char === '*' && pattern[i + 1] === '*' && pattern[i + 2] === '/') { expression += '(?:.*/)?'; i += 2; }
+		else if (char === '*' && pattern[i + 1] === '*') { expression += '.*'; i += 1; }
+		else if (char === '*') { expression += '[^/]*'; }
+		else if (char === '?') { expression += '[^/]'; }
+		else { expression += char.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+	}
+	return new RegExp(`^${expression}$`);
 }
+function compileGlobs(patterns) { return patterns.map(globExpression); }
+function matchesGlobs(relative, expressions) {
+	const name = relative.replace(/\\/g, '/');
+	return expressions.some((expression) => expression.test(name));
+}
+function excluded(relative, patterns) { return matchesGlobs(relative, compileGlobs(patterns)); }
 function isMissing(error) { return error && error.code === 'ENOENT'; }
 function inside(root, file) {
 	const relative = path.relative(root, file);
@@ -179,6 +182,26 @@ function rebuildBefore(tool, input, after) {
 	if (occurrences !== 1) { return null; }
 	const text = input.replace_all ? after.text.split(newString).join(oldString) : after.text.replace(newString, () => oldString);
 	return Buffer.byteLength(text, 'utf8') <= MAX_FILE_BYTES ? { exists: true, large: false, text } : null;
+}
+
+/** Guarda `text` em `directory/<sha1>.txt` (conferindo uma cópia que já exista) e renova a data dela para a coleta. */
+function putBlob(store, io, directory, text) {
+	const hash = crypto.createHash('sha1').update(text, 'utf8').digest('hex');
+	const file = path.join(directory, `${hash}.txt`);
+	try { store.writeNew(file, text); }
+	catch (error) {
+		if (!error || error.code !== 'EEXIST') { throw error; }
+		if (store.read(file, MAX_FILE_BYTES) !== text) { throw new Error('blobIntegrityFailed'); }
+	}
+	let fd;
+	try {
+		store.checked(file);
+		// Windows requires write access on the existing handle to update file times.
+		fd = io.openSync(file, fs.constants.O_RDWR | (fs.constants.O_NOFOLLOW || 0));
+		if (!io.fstatSync(fd).isFile()) { throw new Error('unsafeStorageType'); }
+		const now = new Date(); io.futimesSync(fd, now, now);
+	} finally { if (fd !== undefined) { io.closeSync(fd); } }
+	return hash;
 }
 
 function maintenanceExists(store, dir, io) {
@@ -329,22 +352,7 @@ function capture(phase, input, options = {}) {
 			if (!read.exists || read.large || typeof read.text !== 'string') {
 				return { exists: read.exists, text: null, large: read.large };
 			}
-			const hash = crypto.createHash('sha1').update(read.text, 'utf8').digest('hex');
-			const file = path.join(blobDir, `${hash}.txt`);
-			try { store.writeNew(file, read.text); }
-			catch (error) {
-				if (!error || error.code !== 'EEXIST') { throw error; }
-				if (store.read(file, MAX_FILE_BYTES) !== read.text) { throw new Error('blobIntegrityFailed'); }
-			}
-			let fd;
-			try {
-				store.checked(file);
-				// Windows requires write access on the existing handle to update file times.
-				fd = io.openSync(file, fs.constants.O_RDWR | (fs.constants.O_NOFOLLOW || 0));
-				if (!io.fstatSync(fd).isFile()) { throw new Error('unsafeStorageType'); }
-				const now = new Date(); io.futimesSync(fd, now, now);
-			} finally { if (fd !== undefined) { io.closeSync(fd); } }
-			return { exists: true, text: null, large: false, hash };
+			return { exists: true, text: null, large: false, hash: putBlob(store, io, blobDir, read.text) };
 		}
 		if (phase === 'pre') {
 			stage('pending');
@@ -484,6 +492,324 @@ function run(phase, input, options = {}) {
 		if (diagnostic.releaseLease) { try { diagnostic.releaseLease(); } catch { /* Preserve unknown recovery. */ } }
 	}
 }
+// ---- Captura do turno: o que comandos e outras ferramentas mudaram -------------------------
+//
+// Edit, Write, MultiEdit e NotebookEdit são capturados por chamada (pre/post). Um comando de
+// terminal, uma ferramenta MCP ou um gerador mudam arquivos sem passar por eles. Para esses, o
+// UserPromptSubmit ("turn-start") anota o estado do projeto e guarda uma cópia dos arquivos de
+// texto em turn-blobs/; o Stop ("turn-end") compara o projeto com a anotação e grava no log, como
+// tool "Command", o que mudou e não foi explicado por uma edição capturada no mesmo turno.
+// Nunca executa nada do projeto (nem git): só lê arquivos, com limites fixos de quantidade e tempo.
+
+const TURN_PHASES = ['turn-start', 'turn-end'];
+const TURN_DIR = 'turns';
+const TURN_BLOB_DIR = 'turn-blobs';
+const TURN_INDEX = 'index.json';
+/** Nunca percorridos: controle de versão, dependências instaladas e os dados do próprio Claude. */
+const TURN_SKIPPED_NAMES = ['.git', '.hg', '.svn', 'node_modules', '.claude'];
+const TURN_LIMITS = Object.freeze({
+	files: 5000, depth: 24, mirrorFiles: 2000, mirrorBytes: 48 * 1024 * 1024, changes: 200,
+	millis: 4000, manifestBytes: 16 * 1024 * 1024, logBytes: 64 * 1024 * 1024, mirrorGraceMs: 10 * 60 * 1000,
+});
+const SHA1 = /^[a-f0-9]{40}$/;
+
+/** Padrões simples do .gitignore da raiz, como globs. Negações e classes de caracteres ficam de fora. */
+function gitignoreGlobs(store) {
+	let text;
+	try { text = store.read(path.join(store.root, '.gitignore'), 64 * 1024); } catch { return []; }
+	const globs = [];
+	for (const raw of text.split(/\r?\n/)) {
+		const line = raw.trim();
+		if (!line || line.startsWith('#') || line.startsWith('!') || /[[\]\\]/.test(line)) { continue; }
+		const anchored = line.startsWith('/') || line.replace(/\/+$/, '').includes('/');
+		const pattern = line.replace(/^\/+/, '').replace(/\/+$/, '');
+		if (!pattern || pattern.split('/').includes('..')) { continue; }
+		const base = anchored ? pattern : `**/${pattern}`;
+		globs.push(base, `${base}/**`);
+		if (globs.length >= 400) { break; }
+	}
+	return globs;
+}
+
+function validTurnPath(relative) {
+	return typeof relative === 'string' && relative.length > 0 && relative.length <= 4096
+		&& !/[\u0000-\u001f\u007f\\:]/.test(relative) && !relative.startsWith('/')
+		&& relative.split('/').every((part) => part !== '' && part !== '.' && part !== '..');
+}
+function validTurnFile(relative, value) {
+	return validTurnPath(relative) && plain(value) && Number.isSafeInteger(value.size) && value.size >= 0
+		&& Number.isFinite(value.mtimeMs) && (value.hash === null || typeof value.hash === 'string' && SHA1.test(value.hash))
+		&& typeof value.mirrored === 'boolean';
+}
+function validTurnFiles(files) {
+	return plain(files) && Object.keys(files).length <= TURN_LIMITS.files
+		&& Object.entries(files).every(([relative, value]) => validTurnFile(relative, value));
+}
+function validManifest(value, session) {
+	return plain(value) && value.schemaVersion === 1 && value.session === session
+		&& typeof value.turnId === 'string' && /^[a-f0-9]{32}$/.test(value.turnId)
+		&& typeof value.startedAt === 'string' && Number.isFinite(Date.parse(value.startedAt))
+		&& Number.isSafeInteger(value.revision) && value.revision >= 0
+		&& typeof value.complete === 'boolean' && typeof value.limited === 'boolean' && validTurnFiles(value.files);
+}
+
+/** Arquivos comuns do projeto, sem seguir links. `complete` é falso quando um limite cortou o percurso. */
+function walkProject(store, io, globs, deadline, now) {
+	const files = new Map();
+	let complete = true;
+	const stack = [{ dir: store.root, relative: '', depth: 0 }];
+	while (stack.length) {
+		if (now() > deadline) { return { files, complete: false }; }
+		const top = stack.pop();
+		if (!top) { break; }
+		const { dir, relative, depth } = top;
+		let names;
+		try { names = io.readdirSync(dir); } catch { complete = false; continue; }
+		for (const name of names.sort()) {
+			const child = relative ? `${relative}/${name}` : name;
+			if (TURN_SKIPPED_NAMES.includes(name) || !validTurnPath(child) || matchesGlobs(child, globs)) { continue; }
+			const full = path.join(dir, name);
+			let stat;
+			try { stat = io.lstatSync(full); } catch { continue; }
+			if (stat.isSymbolicLink()) { continue; }
+			if (stat.isDirectory()) {
+				if (depth + 1 > TURN_LIMITS.depth) { complete = false; continue; }
+				stack.push({ dir: full, relative: child, depth: depth + 1 });
+			} else if (stat.isFile()) {
+				if (files.size >= TURN_LIMITS.files) { return { files, complete: false }; }
+				files.set(child, { size: stat.size, mtimeMs: stat.mtimeMs });
+			}
+		}
+	}
+	return { files, complete };
+}
+
+/** JSON próprio (manifesto, índice): `undefined` quando ausente, `null` quando ilegível ou grande demais. */
+function readOwnJson(store, file, maximum) {
+	try { return JSON.parse(store.read(file, maximum)); }
+	catch (error) { return isMissing(error) ? undefined : null; }
+}
+/** Troca atômica de um arquivo próprio: temporário exclusivo ao lado e rename. */
+function writeOwnJson(store, io, file, value) {
+	const temp = `${file}.${process.pid}-${crypto.randomBytes(6).toString('hex')}.tmp`;
+	store.writeNew(temp, JSON.stringify(value), true);
+	try { store.checked(file); io.renameSync(temp, file); }
+	catch (error) { try { store.checked(temp); io.unlinkSync(temp); } catch { /* The temp name is unique to this run. */ } throw error; }
+}
+
+function mirrorBlobExists(store, io, ctx, hash) {
+	try { const stat = io.lstatSync(store.checked(path.join(ctx.mirrorDir, `${hash}.txt`))); return stat.isFile(); }
+	catch { return false; }
+}
+
+/** Estado de cada arquivo, reaproveitando o hash do índice quando tamanho e data não mudaram. */
+function snapshotProject(ctx, walk, previous) {
+	const { store, io } = ctx;
+	const files = {};
+	let limited = !walk.complete, mirrorFiles = 0, mirrorBytes = 0;
+	const fits = (size) => mirrorFiles < TURN_LIMITS.mirrorFiles && mirrorBytes + size <= TURN_LIMITS.mirrorBytes
+		&& ctx.used + size <= ctx.policy.maxStorageBytes / 2;
+	for (const [relative, stat] of walk.files) {
+		const cached = previous[relative];
+		let hash = null, mirrored = false;
+		if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs && cached.hash) {
+			hash = cached.hash;
+			mirrored = cached.mirrored && mirrorBlobExists(store, io, ctx, hash);
+		}
+		if (!mirrored && stat.size <= MAX_FILE_BYTES) {
+			if (ctx.now() > ctx.deadline) { limited = true; }
+			else if (hash === null || fits(stat.size)) {
+				const read = readSmall(store.checked(path.join(store.root, ...relative.split('/'))), io);
+				if (read && read.exists && !read.large && typeof read.text === 'string') {
+					if (fits(stat.size)) { hash = putBlob(store, io, ctx.mirrorDir, read.text); mirrored = true; ctx.used += stat.size; }
+					else { hash = crypto.createHash('sha1').update(read.text, 'utf8').digest('hex'); limited = true; }
+				}
+			} else { limited = true; }
+		}
+		if (mirrored) { mirrorFiles += 1; mirrorBytes += stat.size; }
+		files[relative] = { size: stat.size, mtimeMs: stat.mtimeMs, hash, mirrored };
+	}
+	return { files, limited };
+}
+
+/** Apaga cópias de turn-blobs/ que nenhum manifesto nem o índice citam, depois de uma folga. */
+function collectMirror(ctx, keep) {
+	const { store, io } = ctx;
+	for (const name of io.readdirSync(ctx.turnsDir)) {
+		if (!/^[a-f0-9]{32}\.json$/.test(name)) { continue; }
+		const value = readOwnJson(store, path.join(ctx.turnsDir, name), TURN_LIMITS.manifestBytes);
+		if (!plain(value) || !validTurnFiles(value.files)) { return; } // Unknown evidence: keep every copy.
+		for (const item of Object.values(value.files)) { if (item.hash) { keep.add(item.hash); } }
+	}
+	const now = ctx.now();
+	for (const name of io.readdirSync(ctx.mirrorDir).slice(0, 20000)) {
+		if (!/^[a-f0-9]{40}\.txt$/.test(name) || keep.has(name.slice(0, 40)) || maintenanceExists(store, ctx.dir, io)) { continue; }
+		const file = store.checked(path.join(ctx.mirrorDir, name));
+		try { const stat = io.lstatSync(file); if (stat.isFile() && now - stat.mtimeMs > TURN_LIMITS.mirrorGraceMs) { io.unlinkSync(file); } }
+		catch { /* A concurrent producer may own it now. */ }
+	}
+}
+
+function turnStart(ctx) {
+	const { store, io } = ctx;
+	store.directory(ctx.turnsDir); store.directory(ctx.mirrorDir);
+	const walk = walkProject(store, io, ctx.globs, ctx.deadline, ctx.now);
+	const index = readOwnJson(store, path.join(ctx.turnsDir, TURN_INDEX), TURN_LIMITS.manifestBytes);
+	const previous = plain(index) && index.schemaVersion === 1 && validTurnFiles(index.files) ? index.files : {};
+	const state = snapshotProject(ctx, walk, previous);
+	if (maintenanceExists(store, ctx.dir, io)) { return { state: 'paused', code: 'captureMaintenance' }; }
+	const manifest = { schemaVersion: 1, session: ctx.session, turnId: crypto.randomBytes(16).toString('hex'),
+		startedAt: new Date(ctx.now()).toISOString(), revision: 0, complete: walk.complete, limited: state.limited, files: state.files };
+	writeOwnJson(store, io, ctx.manifestFile, manifest);
+	writeOwnJson(store, io, path.join(ctx.turnsDir, TURN_INDEX), { schemaVersion: 1, files: state.files });
+	collectMirror(ctx, new Set(Object.values(state.files).flatMap((item) => item.hash ? [item.hash] : [])));
+	return { state: 'prepared', files: walk.files.size, limited: state.limited };
+}
+
+/** Último "depois" de cada arquivo editado por Edit/Write (ou por um Stop anterior) nesta conversa, desde o início do turno. */
+function editsSince(ctx, startedAt) {
+	const edits = new Map();
+	let text;
+	try { text = ctx.store.read(path.join(ctx.dir, 'log.jsonl'), TURN_LIMITS.logBytes); }
+	catch (error) { if (isMissing(error)) { return edits; } throw error; }
+	const since = Date.parse(startedAt);
+	for (const line of text.split('\n')) {
+		if (!line.includes(ctx.session)) { continue; }
+		let entry;
+		try { entry = JSON.parse(line); } catch { continue; }
+		if (plain(entry) && entry.session === ctx.session && typeof entry.file === 'string' && Date.parse(entry.time) >= since) {
+			edits.set(entry.file, plain(entry.after) ? entry.after : null);
+		}
+	}
+	return edits;
+}
+
+/** O "antes" de um arquivo mudado por comando, a partir do manifesto do início do turno. */
+function turnBefore(ctx, previous, blobDir) {
+	if (!previous) { return { exists: false, text: null, large: false }; }
+	if (previous.hash && previous.mirrored) {
+		try {
+			const text = ctx.store.read(path.join(ctx.mirrorDir, `${previous.hash}.txt`), MAX_FILE_BYTES);
+			if (crypto.createHash('sha1').update(text, 'utf8').digest('hex') === previous.hash) {
+				return { exists: true, text: null, large: false, hash: putBlob(ctx.store, ctx.io, blobDir, text) };
+			}
+		} catch { /* Fall through: content unknown. */ }
+	}
+	return { exists: true, text: null, large: previous.hash === null && previous.size > MAX_FILE_BYTES };
+}
+
+function turnEnd(ctx, input) {
+	const { store, io } = ctx;
+	const manifest = readOwnJson(store, ctx.manifestFile, TURN_LIMITS.manifestBytes);
+	if (manifest === undefined) { return { state: 'ignored' }; }
+	if (!validManifest(manifest, ctx.session)) { return { state: 'blocked', code: 'invalidPending' }; }
+	store.directory(ctx.mirrorDir);
+	if (ctx.used + 2 * MAX_FILE_BYTES + 16384 > ctx.policy.maxStorageBytes) { return { state: 'paused', code: 'quotaExceeded' }; }
+	const walk = walkProject(store, io, ctx.globs, ctx.deadline, ctx.now);
+	const edits = editsSince(ctx, manifest.startedAt);
+	const blobDir = path.join(ctx.dir, 'blobs'); store.directory(blobDir);
+	const time = new Date(ctx.now()).toISOString();
+	const transcript = string(input.transcript_path, 8192) ? input.transcript_path : null;
+	const entries = [], next = { ...manifest.files };
+	let limited = manifest.limited || !walk.complete;
+	const record = (relative, absolute, before, after) => {
+		const id = crypto.createHash('sha256').update(`${ctx.session}|turn|${manifest.turnId}|${manifest.revision}|${absolute}`).digest('hex').slice(0, 32);
+		entries.push({ schemaVersion: 1, id, time, session: ctx.session, tool: 'Command', file: absolute, before, after, reason: null, transcript, toolUseId: null });
+	};
+	for (const [relative, stat] of walk.files) {
+		if (entries.length >= TURN_LIMITS.changes || ctx.now() > ctx.deadline + 2000) { limited = true; break; }
+		const previous = manifest.files[relative];
+		if (previous && previous.size === stat.size && previous.mtimeMs === stat.mtimeMs) { continue; }
+		const absolute = store.checked(path.join(store.root, ...relative.split('/')));
+		const read = readSmall(absolute, io);
+		// Binário, ilegível ou sumido no meio: não há texto para revisar.
+		if (read === null || !read.exists || !read.large && typeof read.text !== 'string') { continue; }
+		const text = read.large ? undefined : read.text;
+		const hash = text === undefined ? null : crypto.createHash('sha1').update(text, 'utf8').digest('hex');
+		const current = { size: stat.size, mtimeMs: stat.mtimeMs, hash, mirrored: false };
+		if (previous && previous.hash && hash === previous.hash) { next[relative] = { ...current, mirrored: previous.mirrored }; continue; }
+		const edit = edits.get(absolute);
+		if (edit && edit.exists && hash && edit.hash === hash) { next[relative] = current; continue; }
+		const before = edits.has(absolute) ? edit : turnBefore(ctx, previous, blobDir);
+		const after = text === undefined ? { exists: true, text: null, large: true } : { exists: true, text: null, large: false, hash: putBlob(store, io, blobDir, text) };
+		if (text !== undefined && ctx.used + stat.size <= ctx.policy.maxStorageBytes / 2) {
+			putBlob(store, io, ctx.mirrorDir, text); current.mirrored = true; ctx.used += stat.size;
+		}
+		record(relative, absolute, before, after);
+		next[relative] = current;
+	}
+	// Só um percurso completo prova que um arquivo do manifesto deixou de existir.
+	if (walk.complete) {
+		for (const [relative, previous] of Object.entries(manifest.files)) {
+			if (walk.files.has(relative) || entries.length >= TURN_LIMITS.changes) { continue; }
+			const absolute = store.checked(path.join(store.root, ...relative.split('/')));
+			try { io.lstatSync(absolute); continue; } catch (error) { if (!isMissing(error)) { continue; } }
+			delete next[relative];
+			const edit = edits.get(absolute);
+			if (edits.has(absolute) && (!edit || edit.exists === false)) { continue; }
+			record(relative, absolute, edits.has(absolute) ? edit : turnBefore(ctx, previous, blobDir), { exists: false, text: null, large: false });
+		}
+	}
+	if (entries.length) {
+		// Same guards as an edit capture: a purge or a new policy generation wins over this turn.
+		try {
+			const latest = JSON.parse(store.read(path.join(ctx.dir, 'capture-policy.json'), 64 * 1024).replace(/^﻿/, ''));
+			if (!validatePolicy(latest) || latest.paused || latest.generation !== ctx.policy.generation) { return { state: 'paused', code: 'captureGenerationChanged' }; }
+		} catch (error) { if (!isMissing(error) || ctx.policy.generation !== 'legacy-default') { throw error; } }
+		if (maintenanceExists(store, ctx.dir, io)) { return { state: 'paused', code: 'captureMaintenance' }; }
+		const log = store.checked(path.join(ctx.dir, 'log.jsonl'));
+		const fd = io.openSync(log, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND
+			| (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0), 0o600);
+		try {
+			if (!io.fstatSync(fd).isFile()) { throw new Error('unsafeStorageType'); }
+			io.writeFileSync(fd, entries.map((entry) => `${JSON.stringify(entry)}\n`).join(''), 'utf8');
+			io.fsyncSync(fd);
+		} finally { io.closeSync(fd); }
+	}
+	// Um segundo Stop no mesmo turno (outro hook pediu para continuar) compara a partir daqui.
+	writeOwnJson(store, io, ctx.manifestFile, { ...manifest, revision: manifest.revision + 1, limited, files: next });
+	return { state: entries.length ? 'recorded' : 'unchanged', changes: entries.length, limited };
+}
+
+function runTurn(phase, input, options = {}) {
+	if (!TURN_PHASES.includes(phase) || !plain(input) || !string(input.session_id, 256)) { return { state: 'ignored' }; }
+	const io = options.fs || fs;
+	const env = options.env || process.env;
+	const now = options.now || Date.now;
+	const requestedRoot = env.CLAUDE_PROJECT_DIR || input.cwd || options.cwd || process.cwd();
+	if (!string(requestedRoot, 8192)) { return { state: 'ignored' }; }
+	let store, lease;
+	try {
+		store = storage(requestedRoot, io);
+		const dir = path.join(store.root, '.claude', 'launcher-changes');
+		store.checked(dir);
+		const sessionKey = crypto.createHash('sha256').update(input.session_id).digest('hex').slice(0, 32);
+		store.directory(dir);
+		const activeDir = path.join(dir, 'active'); store.directory(activeDir);
+		lease = path.join(activeDir, `${process.pid}-${crypto.randomBytes(8).toString('hex')}.json`);
+		store.writeNew(lease, JSON.stringify({ schemaVersion: 1, operation: sessionKey, pid: process.pid }));
+		if (maintenanceExists(store, dir, io)) { return { state: 'paused', code: 'captureMaintenance' }; }
+		let policy = DEFAULT_POLICY;
+		try {
+			const parsed = JSON.parse(store.read(path.join(dir, 'capture-policy.json'), 64 * 1024).replace(/^﻿/, ''));
+			if (!validatePolicy(parsed)) { return { state: 'blocked', code: 'invalidPolicy' }; }
+			policy = parsed;
+		} catch (error) { if (!isMissing(error)) { return { state: 'blocked', code: 'invalidPolicy' }; } }
+		if (policy.paused) { return { state: 'paused', code: 'capturePaused' }; }
+		try { store.writeNew(path.join(dir, '.gitignore'), '*\n'); }
+		catch (error) { if (!error || error.code !== 'EEXIST') { throw error; } }
+		const turnsDir = path.join(dir, TURN_DIR), mirrorDir = path.join(dir, TURN_BLOB_DIR);
+		const ctx = { store, io, dir, turnsDir, mirrorDir, policy, session: input.session_id, now,
+			manifestFile: path.join(turnsDir, `${sessionKey}.json`), deadline: now() + TURN_LIMITS.millis,
+			globs: compileGlobs([...policy.excludedPatterns, ...gitignoreGlobs(store)]), used: storageBytes(dir, io) };
+		return phase === 'turn-start' ? turnStart(ctx) : turnEnd(ctx, input);
+	} catch (error) {
+		return { state: 'blocked', code: diagnosticErrorCode(error) };
+	} finally {
+		if (lease && store) { try { store.checked(lease); io.unlinkSync(lease); } catch { /* Preserve unknown recovery. */ } }
+	}
+}
+
 function main() {
 	let raw = '';
 	let size = 0;
@@ -496,14 +822,18 @@ function main() {
 	});
 	process.stdin.on('end', () => {
 		if (!exceeded) {
-			try { run(process.argv[2], JSON.parse(raw)); } catch { /* No private exception output. */ }
-		} else if (string(process.env.CLAUDE_PROJECT_DIR, 8192)) {
+			// Nothing goes to stdout: UserPromptSubmit output would become context for Claude.
+			try {
+				const phase = process.argv[2] || '', input = JSON.parse(raw);
+				if (TURN_PHASES.includes(phase)) { runTurn(phase, input); } else { run(phase, input); }
+			} catch { /* No private exception output. */ }
+		} else if (string(process.env.CLAUDE_PROJECT_DIR, 8192) && !TURN_PHASES.includes(process.argv[2])) {
 			writeStatus({ tool_input: {} }, { state: 'blocked', code: 'inputBudgetExceeded' }, { phase: process.argv[2] });
 		}
 		process.exitCode = 0;
 	});
 	process.stdin.on('error', () => { process.exitCode = 0; });
 }
-module.exports = { run, validatePolicy, excluded, storage, readSmall, storageBytes, rebuildBefore, DEFAULT_POLICY, MAX_FILE_BYTES, MAX_INPUT_BYTES,
+module.exports = { run, runTurn, TURN_LIMITS, TURN_PHASES, gitignoreGlobs, validatePolicy, excluded, storage, readSmall, storageBytes, rebuildBefore, DEFAULT_POLICY, MAX_FILE_BYTES, MAX_INPUT_BYTES,
 	CAPTURE_MAINTENANCE_FILE, CAPTURE_DIAGNOSTICS_DIR, DIAGNOSTIC_STAGES, DIAGNOSTIC_CODES };
 if (require.main === module) { main(); }

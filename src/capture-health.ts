@@ -54,7 +54,7 @@ export function captureEventView(event: CaptureDiagnosticEvent | null) {
 	} : null;
 }
 
-export function captureHealth(configuration: CaptureConfiguration, capability: HookCapability, diagnostics: CaptureDiagnostics) {
+export function captureHealth(configuration: CaptureConfiguration, capability: HookCapability, diagnostics: CaptureDiagnostics, turnCapture = false, remote?: string) {
 	const configurationLabel = t({
 		configured: m('Handlers próprios configurados'), disabled: m('Registro desligado nas preferências'),
 		notConfigured: m('Handlers próprios não configurados'), unknown: m('Configuração não pôde ser confirmada'),
@@ -70,11 +70,14 @@ export function captureHealth(configuration: CaptureConfiguration, capability: H
 	return {
 		configuration, configurationLabel, capability: capability.status, capabilityLabel, version,
 		diagnosticKind: diagnostics.kind, partial: diagnostics.coverage !== 'complete',
+		environmentLabel: remote ? t('Ambiente: janela remota ({0}); o hook usa o node e o ~/.claude dessa máquina.', remote.slice(0, 64)) : t('Ambiente: janela local.'),
 		observation: captureEventView(diagnostics.latestObservation), completion: captureEventView(diagnostics.lastCompletion),
 		evidenceLabel: diagnostics.kind === 'unknown' || diagnostics.coverage !== 'complete'
 			? t('Diagnóstico desconhecido ou parcial; evidências anteriores são datadas e não comprovam atividade atual.')
 			: diagnostics.kind === 'absent' ? t('Nenhum evento de captura observado neste diagnóstico.')
 				: t('Evidência local datada; configurar o hook não comprova sua execução pelo Claude.'),
-		coverageLabel: t('Cobertura: Edit, Write, MultiEdit e NotebookEdit. Bash, PowerShell, MCP e alterações externas não são abrangidos (o painel avisa quando um comando de terminal pode ter alterado arquivos). Notebook capturado não implica reversão admitida.'),
+		coverageLabel: turnCapture
+			? t('Cobertura: Edit, Write, MultiEdit e NotebookEdit a cada chamada; o que comandos de terminal, ferramentas MCP e geradores mudaram, ao fim de cada resposta do Claude (captura do turno, com limites de arquivos e de espaço). Mudanças feitas fora do Claude não são abrangidas. Notebook capturado não implica reversão admitida.')
+			: t('Cobertura: Edit, Write, MultiEdit e NotebookEdit. Bash, PowerShell, MCP e alterações externas não são abrangidos (o painel avisa quando um comando de terminal pode ter alterado arquivos). Notebook capturado não implica reversão admitida.'),
 	};
 }

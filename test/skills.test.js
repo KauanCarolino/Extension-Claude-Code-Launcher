@@ -151,13 +151,20 @@ function controller(t, { project, projects, config, answers = {} } = {}) {
   vm.runInNewContext(fs.readFileSync(filename, 'utf8'), {
     module, exports: module.exports, setTimeout, clearTimeout,
     process: { ...process, env },
-    require: (name) => name === 'vscode' ? vscode : name === './skills'
+    require: (name) => name === 'vscode' ? vscode : name === './remote' ? withVscode('remote.js', vscode) : name === './skills'
       ? loadSkillsWithEnv(env) : name.startsWith('./') ? require(path.join(OUT, name)) : require(name),
   }, { filename });
   const instance = new module.exports.SkillsController((message) => posted.push(message));
   t.after(() => instance.dispose());
   // Objetos criados no contexto do vm têm outros protótipos; JSON os traz para este contexto.
   return { instance, posted, errors, warnings, opened, deleted, revealed, last: () => JSON.parse(JSON.stringify(posted.at(-1))) };
+}
+
+/** Módulo de out/ carregado com o editor simulado, como o próprio controlador o vê. */
+function withVscode(name, vscode) {
+  const file = path.join(OUT, name), loaded = { exports: {} };
+  vm.runInNewContext(fs.readFileSync(file, 'utf8'), { module: loaded, exports: loaded.exports, require: (id) => id === 'vscode' ? vscode : id.startsWith('.') ? require(path.join(OUT, id)) : require(id) }, { filename: file });
+  return loaded.exports;
 }
 
 function loadSkillsWithEnv(env) {

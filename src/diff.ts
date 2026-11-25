@@ -1,3 +1,5 @@
+import { t } from './i18n';
+
 export interface Segment {
 	text: string;
 	changed: boolean;
@@ -315,7 +317,7 @@ function rangeLabel(lines: DiffLine[]): string {
 	if (first === undefined || last === undefined) {
 		return '';
 	}
-	return first === last ? `linha ${first}` : `linhas ${first}–${last} (${last - first + 1} linhas)`;
+	return first === last ? t('linha {0}', first) : t('linhas {0}–{1} ({2} linhas)', first, last, last - first + 1);
 }
 
 /** Um bloco contínuo de linhas alteradas. */

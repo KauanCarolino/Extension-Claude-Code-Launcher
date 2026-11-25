@@ -37,6 +37,7 @@ function fixture(options = {}) {
     activate: options.activation || (async () => {}) };
   const available = options.available ?? ['claude-vscode.editor.open', 'claude-vscode.sidebar.open'];
   const vscode = {
+    version: options.version ?? '1.147.0',
     Uri, TabInputWebview, RelativePattern: class {},
     StatusBarAlignment: { Right: 2 }, ConfigurationTarget: { Global: 1, Workspace: 2 },
     extensions: { getExtension: () => extension, onDidChange: event },
@@ -160,6 +161,34 @@ test('launcher reports unsupported sidebar and activation timeout', async t => {
   const stalled = fixture({ activation: () => new Promise(() => {}) }); t.after(() => stalled.dispose());
   await stalled.command('openTab');
   assert.match(stalled.errors[0], /terminou de iniciar/); assert.equal(stalled.calls.length, 0);
+});
+
+// Comandos medidos com a extensão oficial 2.1.330: o Cursor 3.30 (API 1.128) registra a view
+// claudeVSCodeSidebarSecondary, mas não o contêiner claude-sidebar-secondary, e a view vai para o Explorer.
+const OFFICIAL = ['claude-vscode.editor.open', 'claude-vscode.sidebar.open', 'claudeVSCodeSidebarSecondary.focus'];
+const SECONDARY_CONTAINER = 'workbench.view.extension.claude-sidebar-secondary';
+
+test('where the sidebar view would land in the Explorer, the sidebar action opens a chat tab instead', async t => {
+  const f = fixture({ version: '1.128.0', available: OFFICIAL }); t.after(() => f.dispose());
+  await f.command('openSidebar');
+  assert.deepEqual(f.calls.map(call => call[0]), ['claude-vscode.editor.open']);
+  assert.equal(f.errors.length, 0); assert.equal(f.updates.length, 0);
+});
+
+test('where the sidebar view would land in the Explorer, the sidebar action focuses an open chat tab', async t => {
+  const f = fixture({ version: '1.128.0', available: OFFICIAL, existingTab: true }); t.after(() => f.dispose());
+  await f.command('openSidebar');
+  assert.deepEqual(f.calls, [['workbench.action.focusFirstEditorGroup'], ['workbench.action.openEditorAtIndex', 0]]);
+  assert.equal(f.errors.length, 0);
+});
+
+test('the sidebar action keeps the official sidebar where the editor shows it outside the Explorer', async t => {
+  // VS Code com o contêiner da barra lateral secundária, e versões anteriores à 1.106, em que a oficial usa a Activity Bar.
+  for (const [version, available] of [['1.147.0', [...OFFICIAL, SECONDARY_CONTAINER]], ['1.100.0', OFFICIAL]]) {
+    const f = fixture({ version, available }); t.after(() => f.dispose());
+    await f.command('openSidebar');
+    assert.deepEqual(f.calls.map(call => call[0]), ['claude-vscode.sidebar.open'], version);
+  }
 });
 
 test('home validates untrusted messages before calling official commands', async t => {

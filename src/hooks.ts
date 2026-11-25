@@ -3,7 +3,14 @@ import * as crypto from 'node:crypto';
 
 export const HOOK_MATCHER = 'Edit|Write|MultiEdit|NotebookEdit';
 export const HOOK_NAME = 'launcher-record-change.js';
-const EVENTS = [['PreToolUse', 'pre'], ['PostToolUse', 'post']] as const;
+/** Um handler próprio: evento do Claude Code, fase passada ao script e matcher do grupo (sem matcher nos eventos de turno). */
+interface HandlerSpec { event: string; phase: string; matcher?: string }
+/** Captura por chamada das ferramentas de edição: define se o registro está ativo. */
+const EDIT_HANDLERS: readonly HandlerSpec[] = [{ event: 'PreToolUse', phase: 'pre', matcher: HOOK_MATCHER }, { event: 'PostToolUse', phase: 'post', matcher: HOOK_MATCHER }];
+/** Captura do turno (o que comandos e outras ferramentas mudaram): opcional, junto do registro. */
+const TURN_HANDLERS: readonly HandlerSpec[] = [{ event: 'UserPromptSubmit', phase: 'turn-start' }, { event: 'Stop', phase: 'turn-end' }];
+const HANDLERS = [...EDIT_HANDLERS, ...TURN_HANDLERS];
+const EVENTS = [...new Set(HANDLERS.map((spec) => spec.event))];
 const MAX_SETTINGS_BYTES = 2 * 1024 * 1024;
 
 export type SettingsRead = { kind: 'content'; text: string } | { kind: 'absent' } | { kind: 'error' };
@@ -21,6 +28,8 @@ export interface HookOptions {
 	/** Exact paths whose previous installation ownership has been established. */
 	knownScriptPaths?: readonly string[];
 	executable?: string;
+	/** Instala também os handlers do turno (UserPromptSubmit/Stop). Sem isso, eles são removidos. */
+	turnCapture?: boolean;
 }
 export interface HookPlan {
 	kind: 'ready' | 'blocked';
@@ -88,7 +97,7 @@ function parsedSettings(read: SettingsRead): { settings?: Record<string, unknown
 		return { code: 'invalidSettingsShape' };
 	}
 	const hooks = value.hooks;
-	for (const [event] of EVENTS) {
+	for (const event of EVENTS) {
 		if (hooks?.[event] === undefined) {
 			continue;
 		}
@@ -118,25 +127,19 @@ export function planHooks(options: HookOptions): HookPlan {
 	}
 	const settings = parsed.settings;
 	const hooks: Record<string, unknown> = { ...(settings.hooks as Record<string, unknown> | undefined) };
-	for (const [event, phase] of EVENTS) {
-		if ((hooks[event] as Record<string, unknown>[] | undefined)?.some((group) =>
-			(group.hooks as unknown[]).some((handler) => ambiguousHandler(handler, phase, options)
-				|| (group.matcher !== HOOK_MATCHER && ownHandler(handler, phase, options))))) {
-			return { ...base, code: 'ambiguousHookOwnership' };
-		}
+	if (ambiguousOwnership(hooks, options)) {
+		return { ...base, code: 'ambiguousHookOwnership' };
 	}
-	const present = EVENTS.map(([event, phase]) => (hooks[event] as unknown[] | undefined)?.some((group) =>
-		object(group) && group.matcher === HOOK_MATCHER
-		&& (group.hooks as unknown[]).some((handler) => ownHandler(handler, phase, options))) ?? false);
-	base.active = present.every(Boolean);
+	base.active = EDIT_HANDLERS.every((spec) => present(hooks, spec, options));
 	if (options.enable && options.capability.status !== 'confirmed') {
 		return { ...base, code: 'execArgumentsNotConfirmed' };
 	}
-	for (const [event, phase] of EVENTS) {
+	for (const spec of HANDLERS) {
+		const { event, phase } = spec;
 		const groups = (hooks[event] as Record<string, unknown>[] | undefined) ?? [];
 		const next: Record<string, unknown>[] = [];
 		for (const group of groups) {
-			if (group.matcher !== HOOK_MATCHER) {
+			if (group.matcher !== spec.matcher) {
 				next.push(group);
 				continue;
 			}
@@ -148,8 +151,8 @@ export function planHooks(options: HookOptions): HookPlan {
 				next.push({ ...group, hooks: kept });
 			}
 		}
-		if (options.enable) {
-			next.push({ matcher: HOOK_MATCHER, hooks: [{
+		if (options.enable && (EDIT_HANDLERS.includes(spec) || options.turnCapture === true)) {
+			next.push({ ...(spec.matcher === undefined ? {} : { matcher: spec.matcher }), hooks: [{
 				type: 'command', command: options.executable ?? 'node',
 				args: [options.scriptPath, phase], timeout: 10,
 			}] });
@@ -173,24 +176,33 @@ export function planHooks(options: HookOptions): HookPlan {
 	};
 }
 
+/** Um handler próprio fora do grupo esperado, ou um parecido que esta instalação não criou. */
+function ambiguousOwnership(hooks: Record<string, unknown> | undefined, options: HookOptions): boolean {
+	return HANDLERS.some(({ event, phase, matcher }) => (hooks?.[event] as Record<string, unknown>[] | undefined)?.some((group) =>
+		(group.hooks as unknown[]).some((handler) => ambiguousHandler(handler, phase, options)
+			|| (group.matcher !== matcher && ownHandler(handler, phase, options)))) ?? false);
+}
+
+function present(hooks: Record<string, unknown> | undefined, spec: HandlerSpec, options: HookOptions): boolean {
+	return (hooks?.[spec.event] as unknown[] | undefined)?.some((group) => object(group) && group.matcher === spec.matcher
+		&& (group.hooks as unknown[]).some((handler) => ownHandler(handler, spec.phase, options))) ?? false;
+}
+
 export function inspectHookConfiguration(read: SettingsRead, scriptPath: string, knownScriptPaths: readonly string[] = []): {
-	valid: boolean; active: boolean; code?: string;
+	valid: boolean; active: boolean; turn: boolean; code?: string;
 } {
 	const parsed = parsedSettings(read);
 	if (!parsed.settings || !validPath(scriptPath)) {
-		return { valid: false, active: false, code: parsed.code ?? 'invalidHookPath' };
+		return { valid: false, active: false, turn: false, code: parsed.code ?? 'invalidHookPath' };
 	}
 	const options: HookOptions = { read, scriptPath, knownScriptPaths, enable: false,
 		capability: { status: 'unknown', harness: 'inspection' } };
 	const hooks = parsed.settings.hooks as Record<string, unknown> | undefined;
-	if (EVENTS.some(([event, phase]) => (hooks?.[event] as Record<string, unknown>[] | undefined)?.some((group) =>
-		(group.hooks as unknown[]).some((handler) => ambiguousHandler(handler, phase, options)
-			|| (group.matcher !== HOOK_MATCHER && ownHandler(handler, phase, options)))))) {
-		return { valid: false, active: false, code: 'ambiguousHookOwnership' };
+	if (ambiguousOwnership(hooks, options)) {
+		return { valid: false, active: false, turn: false, code: 'ambiguousHookOwnership' };
 	}
-	const active = EVENTS.every(([event, phase]) => (hooks?.[event] as Record<string, unknown>[] | undefined)?.some((group) =>
-		group.matcher === HOOK_MATCHER && (group.hooks as unknown[]).some((handler) => ownHandler(handler, phase, options))) ?? false);
-	return { valid: true, active };
+	const active = EDIT_HANDLERS.every((spec) => present(hooks, spec, options));
+	return { valid: true, active, turn: active && TURN_HANDLERS.every((spec) => present(hooks, spec, options)) };
 }
 
 export interface HookConfigIO {

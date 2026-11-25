@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { computeDiff } from './diff';
 import { type ActiveChat, fileKey, isBlobHash, RawEntry, resolveSnapshot, Status } from './logic';
-import { readTranscriptMeta, RequestInfo, sessionsDir, clearTranscriptMetadataForRoots, transcriptMetadataCacheCount } from './sessions';
+import { readTranscriptMeta, RequestInfo, sessionsDir, clearTranscriptMetadataForRoots, transcriptMetadataCacheCount, findTurnToolUse } from './sessions';
 import { activeReview, copyReview, ingestEntries, ReviewContent, ReviewDecisionRequest, ReviewError, ReviewResolution, SharedReview, sameContent } from './review';
 import { ReviewStore } from './review-store';
 import { withCaptureMaintenance, recoverCaptureMaintenance } from './maintenance';
@@ -12,13 +12,14 @@ import { collectLogBlobs, housekeep, MAX_LOG_ENTRIES, pruneReviewedLog } from '.
 import { writeOwnedFile } from './owned-file';
 import { readShellActivity, emptyShellActivity, type ShellActivity } from './shell-activity';
 import { htmlLanguage, plural, t, webviewDictionaryScript } from './i18n';
+import { isTrashUnavailable, remoteName } from './remote';
 import { assessResourceScope, assessStoragePath, makeCapturePolicy, readLogFile, readVerifiedBlob, safeReadText, transcriptAllowed, validateMessage, validateSavedMeta, retentionCandidates, CaptureDiagnostics, readCaptureDiagnostics } from './history';
 import { captureHealth, CaptureConfiguration, retainCaptureEvidence } from './capture-health';
 import { projectReview, operationView, pendingOperationView, ReviewItemResult, blockedReviewResult, ReviewResultError, formatReviewItemResult, summarizeReviewResults } from './review-results';
 import { evaluateMetadataPolicy, revalidateMetadataPermit, MetadataPermit, MetadataPolicyContext } from './metadata-policy';
 import { inventoryPurge, planPurge, summarizePurge, PurgeInventory, PurgeEffect, PurgeReport, PurgeReason, PurgeMemory, PURGE_MEMORY_PATHS } from './purge-plan';
 import { describeReason } from './messages';
-import { BaseView, FileSummary, ViewEntry, basename, capitalize, countFiles, errorCode, excludedPatterns, explain, purgeFailureReason, purgeInventoryText, purgeReportText, toViewEntry, HOOK_SCRIPT_DIFFERS, NODE_MISSING } from './changes-view';
+import { BaseView, FileSummary, ViewEntry, changesSummary, basename, capitalize, countFiles, errorCode, excludedPatterns, explain, purgeFailureReason, purgeInventoryText, purgeReportText, toViewEntry, HOOK_SCRIPT_DIFFERS, NODE_MISSING } from './changes-view';
 import { STATUS_KEY, LEGACY_REVIEWED_KEY, UNDO_KEY, Undo, loadStatus, loadUndo, confirm, createNonce, existsLocal, canonicalResource } from './changes-support';
 import * as nodeFs from 'node:fs';
 import * as nodePath from 'node:path';
@@ -72,6 +73,7 @@ export function registerChanges(context: vscode.ExtensionContext): ChangesContro
 		vscode.commands.registerCommand('claude-code-launcher.releaseReviewWriter', () => controller.releaseReviewWriter()),
 		vscode.commands.registerCommand('claude-code-launcher.recoverReviewWriter', () => controller.recoverReviewWriter()),
 		vscode.commands.registerCommand('claude-code-launcher.refreshChanges', () => controller.refresh()),
+		vscode.commands.registerCommand('claude-code-launcher.copyChangesSummary', () => controller.copySummary()),
 	);
 	void controller.repairHooks().catch(() => undefined);
 	return controller;
@@ -97,6 +99,10 @@ export class ChangesController implements
 	private shellActivity: (ShellActivity & { scope: 'chat' | 'pending' }) | null = null;
 	private shellTimer: ReturnType<typeof setTimeout> | undefined;
 	private shellGeneration = 0;
+	/** Pastas com a captura do turno configurada: nelas, o que os comandos mudam já entra na revisão. */
+	private readonly turnCaptureFolders = new Set<string>();
+	/** Chamada de ferramenta do transcript associada a cada mudança por comando, para achar pedido e explicação. */
+	private readonly commandToolUses = new Map<string, string>();
 	private metaTimer: ReturnType<typeof setTimeout> | undefined;
 	private readonly disposables: vscode.Disposable[] = [];
 	private readonly reasonCache = new Map<string, string>();
@@ -229,7 +235,7 @@ export class ChangesController implements
 			this.stores.clear(); this.sharedReviews.clear(); this.fileStores.clear(); this.resourceAliases.clear(); this.ambiguousResources.clear();
 			this.entries = []; this.undoStack.splice(0); this.status.clear(); this.logCache.clear(); this.entryFolder.clear(); this.ordinals.clear();
 			clearTranscriptMetadataForRoots((vscode.workspace.workspaceFolders ?? []).filter((folder) => folder.uri.scheme === 'file').map((folder) => sessionsDir(folder.uri.fsPath)));
-			this.reasonCache.clear(); this.requestCache.clear(); this.metaAttempts.clear(); this.pendingMetadata.clear(); this.blobCache.clear(); this.viewCache.clear(); this.summaryCache.clear();
+			this.reasonCache.clear(); this.requestCache.clear(); this.commandToolUses.clear(); this.metaAttempts.clear(); this.pendingMetadata.clear(); this.blobCache.clear(); this.viewCache.clear(); this.summaryCache.clear();
 			this.stateText.clear(); this.comparisonTexts.clear(); this.decorated.clear(); this.lastOperationResults.clear();
 			this.captureEvidence.clear(); this.captureHealthStates.clear(); this.captureWarnings.clear(); this.hookWarnings.clear(); this.runtimeWarnings.clear(); this.nextHousekeeping.clear(); this.recoveryOffered.clear(); this.storeErrors.clear();
 		});
@@ -282,7 +288,13 @@ export class ChangesController implements
 		const candidates = scoped ? this.activeChat?.sessions ?? []
 			: this.pendingGroups().flat().map((entry) => entry.session ?? '');
 		const sessions = [...new Set(candidates)].filter((id) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)).slice(0, 20);
-		const roots = (vscode.workspace.workspaceFolders ?? []).filter((folder) => folder.uri.scheme === 'file').map((folder) => sessionsDir(folder.uri.fsPath));
+		const localFolders = (vscode.workspace.workspaceFolders ?? []).filter((folder) => folder.uri.scheme === 'file');
+		const roots = localFolders.map((folder) => sessionsDir(folder.uri.fsPath));
+		// Com a captura do turno em todas as pastas, o que os comandos mudam já aparece na lista: o aviso sobraria.
+		if (localFolders.length && localFolders.every((folder) => this.turnCaptureFolders.has(folder.uri.toString()))) {
+			if (this.shellActivity !== null) { this.shellActivity = null; this.publish(); }
+			return;
+		}
 		const total = emptyShellActivity();
 		for (const session of sessions) {
 			for (const root of roots) {
@@ -619,7 +631,7 @@ export class ChangesController implements
 				try { await this.context.workspaceState.update(UNDO_KEY, []); await this.context.workspaceState.update(STATUS_KEY, {}); await this.context.workspaceState.update(LEGACY_REVIEWED_KEY, []); this.undoStack.splice(0); }
 				catch { memorySucceeded = false; memoryFailed = true; }
 			} else { memorySucceeded = false; }
-			this.reasonCache.clear(); this.requestCache.clear(); this.metaAttempts.clear(); this.pendingMetadata.clear(); this.blobCache.clear(); this.viewCache.clear(); this.summaryCache.clear(); this.comparisonTexts.clear(); this.lastOperationResults.clear(); this.stateText.clear();
+			this.reasonCache.clear(); this.requestCache.clear(); this.commandToolUses.clear(); this.metaAttempts.clear(); this.pendingMetadata.clear(); this.blobCache.clear(); this.viewCache.clear(); this.summaryCache.clear(); this.comparisonTexts.clear(); this.lastOperationResults.clear(); this.stateText.clear();
 			clearTranscriptMetadataForRoots(folders.filter((folder) => folder.uri.scheme === 'file').map((folder) => sessionsDir(folder.uri.fsPath)));
 			for (const run of runs) {
 				try {
@@ -647,7 +659,7 @@ export class ChangesController implements
 			const saved = this.context.workspaceState.get<unknown>(UNDO_KEY, []); if (!Array.isArray(saved)) { return { undoCount: null, cacheCount: null, complete: false }; }
 			const undoCount = saved.length + [...this.stores.values()].reduce((count, store) => count + store.get().undo.filter((item) => item.phase !== 'consumed').length, 0);
 			const roots = (vscode.workspace.workspaceFolders ?? []).filter((folder) => folder.uri.scheme === 'file').map((folder) => sessionsDir(folder.uri.fsPath));
-			return { undoCount, cacheCount: this.reasonCache.size + this.requestCache.size + this.pendingMetadata.size + this.blobCache.size + this.viewCache.size + this.summaryCache.size + this.comparisonTexts.size + this.lastOperationResults.size + this.stateText.size + transcriptMetadataCacheCount(roots), complete: true };
+			return { undoCount, cacheCount: this.reasonCache.size + this.requestCache.size + this.commandToolUses.size + this.pendingMetadata.size + this.blobCache.size + this.viewCache.size + this.summaryCache.size + this.comparisonTexts.size + this.lastOperationResults.size + this.stateText.size + transcriptMetadataCacheCount(roots), complete: true };
 		} catch { return { undoCount: null, cacheCount: null, complete: false }; }
 	}
 	private forgetCapture(folder: vscode.WorkspaceFolder): void { const key = folder.uri.toString(); this.captureEvidence.delete(key); this.captureHealthStates.delete(key); this.captureWarnings.delete(key); this.runtimeWarnings.delete(key); }
@@ -736,6 +748,45 @@ export class ChangesController implements
 		if (group) {
 			await this.executeReviewDecision(group[0].file, { action: 'reject', revision });
 		}
+	}
+
+	/** Arquivos pendentes em que todas as mudanças vieram deste pedido; os que misturam outros pedidos ficam de fora. */
+	private requestGroups(requestId: string | undefined): RawEntry[][] {
+		const ids = new Set(this.entries.filter((entry) => requestId && this.requestCache.get(entry.id)?.id === requestId && !this.status.has(entry.id)).map((entry) => entry.id));
+		if (!ids.size) { return []; }
+		return this.pendingGroups().filter((list) => list.some((entry) => ids.has(entry.id)) && this.getSharedReview(list[0].file)?.ids.every((id) => ids.has(id)));
+	}
+
+	/** Mantém tudo o que o Claude mudou para atender um pedido. */
+	private async acceptRequest(requestId: string | undefined): Promise<void> {
+		const pending = this.entries.some((entry) => requestId && this.requestCache.get(entry.id)?.id === requestId && !this.status.has(entry.id));
+		if (!pending) { return; }
+		const groups = this.requestGroups(requestId);
+		if (!groups.length) { void vscode.window.showInformationMessage(t('Os arquivos deste pedido também têm mudanças de outros pedidos. Aceite-os um a um.')); return; }
+		this.report(await this.accept(groups));
+	}
+
+	/** As edições que o painel mostra agora: as da conversa em foco (e pendentes sem dono), ou todas. */
+	private visibleEntries(): RawEntry[] {
+		const chat = this.activeChat;
+		if (!chat || this.showAllChats) { return this.entries; }
+		const focus = new Set(chat.sessions), elsewhere = new Set(chat.elsewhere);
+		return this.entries.filter((entry) => focus.has(entry.session ?? '') || !this.status.has(entry.id) && !elsewhere.has(entry.session ?? ''));
+	}
+
+	/** Copia um resumo em markdown das mudanças visíveis, agrupado por pedido, para a descrição de um PR. */
+	async copySummary(): Promise<void> {
+		if (this.disposed) { return; }
+		const entries = this.visibleEntries().slice(0, MAX_HISTORY).reverse();
+		if (!entries.length) { void vscode.window.showInformationMessage(t('Não há mudanças para resumir.')); return; }
+		const markdown = changesSummary(entries.map((entry) => {
+			const view = this.viewOf(entry), request = this.requestCache.get(entry.id);
+			return { file: view.file, dir: view.dir, action: view.action, added: view.added + view.modified, removed: view.removed + view.modified,
+				status: this.status.get(entry.id) ?? null, requestId: request?.id ?? null, request: request?.text ?? null, reason: this.reasonOf(entry) };
+		}));
+		await vscode.env.clipboard.writeText(markdown);
+		const files = new Set(entries.map((entry) => entry.file)).size;
+		void vscode.window.showInformationMessage(plural(files, 'Resumo de {0} arquivo copiado para a área de transferência.', 'Resumo de {0} arquivos copiado para a área de transferência.'));
 	}
 
 	/** Recusa tudo o que o Claude mudou para atender um pedido. */
@@ -831,7 +882,8 @@ export class ChangesController implements
 			if (open?.isDirty) { throw new ReviewError('dirtyDocument'); }
 			if (expected.kind === 'absent') { return; }
 			if (this.disposed) { throw new ReviewError('cancelledBeforeEffect'); }
-			await vscode.workspace.fs.delete(uri, { useTrash: true }); if (this.disposed) { throw new ReviewError('cancelledAfterEffect'); } return;
+			try { await vscode.workspace.fs.delete(uri, { useTrash: true }); } catch (error) { if (isTrashUnavailable(error)) { throw new ReviewError('trashUnavailable'); } throw error; }
+			if (this.disposed) { throw new ReviewError('cancelledAfterEffect'); } return;
 		}
 		if (expected.kind === 'absent') {
 			await nodeFs.promises.mkdir(nodePath.dirname(file), { recursive: true });
@@ -928,6 +980,12 @@ export class ChangesController implements
 				return;
 			case 'rejectRequest':
 				await this.rejectRequest(message.request);
+				return;
+			case 'acceptRequest':
+				await this.acceptRequest(message.request);
+				return;
+			case 'copySummary':
+				await this.copySummary();
 				return;
 			case 'purge': case 'clearAllReviewData': await this.clearAllReviewData(); return;
 			case 'release': case 'releaseWriter': await this.releaseReviewWriter(); return;
@@ -1419,7 +1477,10 @@ export class ChangesController implements
 			const byTranscript = new Map<string, RawEntry[]>();
 				const permissions = new Map<string, MetadataPermit[]>();
 			for (const entry of this.metaTargets()) {
-				if (!entry.transcript || !entry.toolUseId || this.hasMeta(entry) || !(await transcriptAllowed(entry.transcript, (vscode.workspace.workspaceFolders ?? []).filter((folder) => folder.uri.scheme === 'file').map((folder) => sessionsDir(folder.uri.fsPath))))) {
+				if (!entry.transcript || this.hasMeta(entry) || !(await transcriptAllowed(entry.transcript, (vscode.workspace.workspaceFolders ?? []).filter((folder) => folder.uri.scheme === 'file').map((folder) => sessionsDir(folder.uri.fsPath))))) {
+					continue;
+				}
+				if (!(await this.metaToolUseId(entry))) {
 					continue;
 				}
 				if ((this.metaAttempts.get(entry.id) ?? 0) >= MAX_META_ATTEMPTS) {
@@ -1440,12 +1501,12 @@ export class ChangesController implements
 					if (!permitted.length) { continue; }
 					if (permitted.length > 256) { missing = true; }
 					const selected = permitted.slice(0, 256);
-					const meta = await readTranscriptMeta(transcript, { toolUseIds: selected.map((entry) => entry.toolUseId as string), cache: false });
+					const meta = await readTranscriptMeta(transcript, { toolUseIds: [...new Set(selected.map((entry) => this.toolUseOf(entry) as string))], cache: false });
 				if (epoch !== this.metaEpoch || this.maintenance || this.disposed) { return; }
 					for (const entry of selected) {
 						const permits = permissions.get(entry.id)!;
 						if (!(await this.metadataPermitsCurrent(entry, permits, epoch))) { continue; }
-					const toolUseId = entry.toolUseId as string;
+					const toolUseId = this.toolUseOf(entry) as string;
 					const reason = meta.reasons.get(toolUseId);
 					const request = meta.requests.get(toolUseId);
 						if (reason !== undefined && !this.reasonCache.has(entry.id) || request && !this.requestCache.has(entry.id)) {
@@ -1475,6 +1536,25 @@ export class ChangesController implements
 				void this.fillMeta();
 			}
 		}
+	}
+
+	private toolUseOf(entry: RawEntry): string | undefined {
+		return entry.toolUseId || this.commandToolUses.get(entry.id);
+	}
+
+	/**
+	 * Mudanças por comando (captura do turno) não têm chamada de ferramenta própria: o pedido e a
+	 * explicação vêm da última chamada (de preferência de terminal) do mesmo turno no transcript.
+	 */
+	private async metaToolUseId(entry: RawEntry): Promise<string | undefined> {
+		const known = this.toolUseOf(entry);
+		if (known || entry.tool !== 'Command' || !entry.transcript) { return known; }
+		const found = await findTurnToolUse(entry.transcript, entry.time);
+		if (found) {
+			this.commandToolUses.set(entry.id, found);
+			if (this.commandToolUses.size > MAX_STATUS) { this.commandToolUses.delete(this.commandToolUses.keys().next().value as string); }
+		}
+		return found;
 	}
 
 	private applySavedMeta(saved: Record<string, unknown> | undefined): void {
@@ -1600,7 +1680,8 @@ export class ChangesController implements
 		this.captureEvidence.set(key, diagnostics);
 		const disabled = vscode.workspace.getConfiguration('claudeCodeLauncher').get<string>('hookExecutionMode', 'auto') === 'disabled';
 		const configuration: CaptureConfiguration = disabled ? 'disabled' : !inspected.valid ? 'unknown' : inspected.active ? 'configured' : 'notConfigured';
-		const health = captureHealth(configuration, capability, diagnostics);
+		if (active && inspected.turn) { this.turnCaptureFolders.add(key); } else { this.turnCaptureFolders.delete(key); }
+		const health = captureHealth(configuration, capability, diagnostics, active && inspected.turn, remoteName());
 		this.captureHealthStates.set(key, health);
 		this.captureWarnings.delete(key);
 		const latest = diagnostics.latestObservation;

@@ -39,6 +39,7 @@ function fixture(before = 'one\ntwo\nthree\n', after = 'ONE\ntwo\nTHREE\n', crea
 		EventEmitter: class { event = () => disposable; fire() {} dispose() {} },
 		window: { visibleTextEditors: [editor], activeTextEditor: editor, createTextEditorDecorationType: options => ({ options, dispose() {} }),
 			onDidChangeVisibleTextEditors: () => disposable, showWarningMessage: message => { messages.push(message); return Promise.resolve(); },
+			showInformationMessage: message => { messages.push(message); return Promise.resolve(); },
 			async showTextDocument(uri) { opened.push(uri.fsPath); return editor; } },
 		languages: { registerCodeLensProvider: () => disposable },
 		workspace: { textDocuments: [document], getConfiguration: () => ({ get: () => true }),
@@ -210,4 +211,18 @@ test('inline identifies a virtual provider before looking up review state or inv
 	await f.commands.get('claude-code-launcher.rejectAllChanges')();
 	assert.equal(f.messages.length, 1); assert.match(f.messages[0], /recurso não possui um adaptador de reversão validado/);
 	assert.deepEqual(f.state.statuses, {}); assert.equal(f.document.content, 'ONE\ntwo\nTHREE\n');
+});
+
+test('o atalho decide só o trecho em que está o cursor, com a mesma assinatura da lente', async t => {
+	const f = fixture(); t.after(() => f.dispose());
+	const groups = diff.groupsOf(diff.diffLines('one\ntwo\nthree\n', 'ONE\ntwo\nTHREE\n').lines);
+	f.editor.selection = { active: { line: 1 } };
+	await f.commands.get('claude-code-launcher.acceptChangeAtCursor')();
+	assert.equal(f.calls.length, 0, 'linha sem mudança: nada é decidido');
+	assert.match(f.messages.at(-1), /Coloque o cursor num trecho/);
+	f.editor.selection = { active: { line: 2 } };
+	const revision = review.activeReview(f.state, f.document.uri.fsPath).revision;
+	await f.commands.get('claude-code-launcher.rejectChangeAtCursor')();
+	assert.deepEqual(JSON.parse(JSON.stringify(f.calls.at(-1).request)), { action: 'reject', index: 1, signature: diff.groupSignature(groups[1]), revision });
+	assert.equal(f.document.getText(), 'ONE\ntwo\nTHREE\n', 'o efeito no conteúdo fica com o executor comum');
 });

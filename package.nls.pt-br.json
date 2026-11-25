@@ -66,5 +66,11 @@
   "walkthrough.newChat.media": "media/walkthrough/pt-br/chat.md",
   "walkthrough.review.title": "Revisar o que o Claude mudou",
   "walkthrough.review.description": "Aceite ou recuse cada arquivo ou trecho, no painel ou direto no editor.\n[Abrir Mudanças](command:claude-code-launcher.showChanges)",
-  "walkthrough.review.media": "media/walkthrough/pt-br/review.md"
+  "walkthrough.review.media": "media/walkthrough/pt-br/review.md",
+  "config.captureCommandChanges": "Com o registro ativo, registra também o que comandos de terminal, ferramentas MCP e geradores mudaram, ao fim de cada resposta do Claude. O estado do projeto é anotado ao enviar o pedido, com cópias dos arquivos de texto dentro do orçamento de armazenamento; .git, node_modules e o .gitignore da raiz ficam de fora.",
+  "command.acceptChangeAtCursor": "Aceitar o trecho do Claude no cursor",
+  "command.rejectChangeAtCursor": "Recusar o trecho do Claude no cursor",
+  "command.copyChangesSummary": "Copiar resumo das mudanças (markdown)",
+  "command.showPermissions": "Mostrar permissões",
+  "command.showHooks": "Mostrar hooks"
 }

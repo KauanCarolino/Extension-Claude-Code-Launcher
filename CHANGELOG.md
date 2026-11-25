@@ -2,6 +2,34 @@
 
 O projeto segue [Versionamento Semântico](https://semver.org/lang/pt-BR/) a partir da 1.0.0.
 
+## 1.2.9 — 2026-11-22
+
+### Adicionado
+
+- **Captura por comando.** O que comandos de terminal, ferramentas MCP e geradores mudam entra na revisão como **Mudou por comando** (ou **Criou por comando**), com antes e depois, e pode ser aceito, recusado e desfeito como qualquer edição. Com o registro ativo, o launcher instala também handlers em `UserPromptSubmit`, que anota o estado do projeto e guarda cópias dos arquivos de texto, e em `Stop`, que compara e grava o que mudou e não foi explicado por uma edição capturada. Pedido e explicação vêm da última chamada de terminal do turno no transcript. Ficam de fora `.git`, `node_modules`, `.claude`, o `.gitignore` da raiz, as exclusões de privacidade e binários. Há limites de 5.000 arquivos, 4 s de percurso e 200 mudanças por turno, e as cópias ocupam no máximo metade do orçamento e 2.000 arquivos. Configuração nova `claudeCodeLauncher.captureCommandChanges` (padrão ligado); instalações com o registro ativo ganham os handlers novos no reparo automático. Com a captura configurada, o aviso de comandos de terminal deixa de aparecer.
+- **Abas Permissões e Hooks.** Permissões lista as regras `allow`/`ask`/`deny` dos `settings.json` local, do projeto, do usuário e da organização, com o `defaultMode` e a regra encoberta por um tipo mais forte; cria e remove regras nos três primeiros. Hooks lista cada handler com evento, matcher, tipo e comando sem segredos aparentes, e marca os do próprio launcher. Comandos **Mostrar permissões** e **Mostrar hooks**.
+- **Aceitar ou recusar o trecho no cursor**, com `Alt+Shift+Y` e `Alt+Shift+N` (`Ctrl+Alt+Y` e `Ctrl+Alt+N` no macOS).
+- **Aceitar pedido**, ao lado de **Desfazer pedido**, para os arquivos cujas mudanças vieram todas daquele pedido.
+- **Copiar resumo das mudanças**: markdown das mudanças visíveis, agrupadas por pedido, com arquivo, ação, linhas, estado e a explicação do Claude, pronto para a descrição de um PR.
+- Screenshots e GIF no README, gerados das páginas reais das views por `scripts/screenshots.cjs`.
+
+### Mudado
+
+- **Janelas remotas.** O manifesto declara `extensionKind: ["workspace"]`, o mesmo lugar onde roda a extensão oficial. Numa janela remota, **Mostrar no sistema** revela no Explorer ou copia o caminho, o diagnóstico de captura informa o ambiente, e a falta de lixeira (comum em contêineres) para a recusa de um arquivo criado com o motivo `trashUnavailable`, sem apagar em definitivo. O comportamento remoto está documentado em `docs/REFERENCIA.md`; WSL, SSH e dev containers não têm teste automatizado.
+- A barra de abas da view do launcher ficou mais compacta para caber sete abas na lateral estreita.
+
+### Corrigido
+
+- O rótulo do trecho no diff ("linhas 3–9 (7 linhas)") continuava em português com a interface em inglês.
+- **Cursor: o chat abria dentro do Explorer.** O Cursor recusa contêineres de barra lateral secundária, e a view de barra lateral da extensão oficial vai parar no Explorer, junto de Estrutura e Linha do tempo. O item **Claude** da barra de status e o comando **Abrir chat na barra lateral** chamavam essa barra lateral e ainda gravavam `claudeCode.preferredLocation: "sidebar"`, de modo que o botão **✻ Claude Code** da oficial também passava a abrir no Explorer. Quando a view da barra lateral existe mas o contêiner dela não, o launcher mostra a aba de chat já aberta ou abre uma nova, e não altera a preferência. No VS Code, e em versões anteriores à 1.106 (em que a oficial usa a Activity Bar), nada muda.
+
+### Interno
+
+- Hook: `runTurn` (fases `turn-start` e `turn-end`), `putBlob` compartilhado com a captura por edição e globs pré-compilados. O hook não escreve na saída, porque a do `UserPromptSubmit` iria para o Claude.
+- `hooks.ts` descreve os handlers por evento, fase e matcher; `inspectHookConfiguration` informa também `turn`. A limpeza completa reconhece `turns/` e `turn-blobs/`, e a manutenção recolhe manifestos de turno com mais de 7 dias.
+- Módulos novos: `settings-catalog.ts` (permissões e hooks, sem dependência do editor) e `remote.ts`.
+- Testes novos: `hook-turn.test.js`, `turn-capture.test.js`, `review-conveniences.test.js`, `remote.test.js`, configuração dos handlers de turno em `hooks-config.test.js`, permissões e hooks em `catalogs.test.js` e o atalho do cursor em `inline.test.js`. A suíte também passou num contêiner `node:22-bookworm-slim` com usuário sem privilégios.
+
 ## 1.2.0 — 2026-11-22
 
 ### Adicionado

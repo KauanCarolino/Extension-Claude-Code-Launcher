@@ -68,6 +68,7 @@ const REASONS: Record<string, string> = {
 	cancelledBeforeEffect: m('a operação foi cancelada antes de alterar qualquer coisa'),
 	cancelledAfterEffect: m('a operação foi cancelada depois de aplicada. Confira o resultado'),
 	explicitReopenRequired: m('reabrir uma decisão exige uma ação explícita'),
+	trashUnavailable: m('a lixeira não está disponível neste ambiente (comum em contêineres e janelas remotas)'),
 	// Sistema de arquivos
 	EACCES: m('o sistema negou a permissão de acesso'),
 	EPERM: m('o sistema negou a permissão de acesso'),

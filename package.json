@@ -2,7 +2,7 @@
   "name": "launcher-for-claude-code",
   "displayName": "Launcher for Claude Code",
   "description": "%extension.description%",
-  "version": "1.2.0",
+  "version": "1.2.9",
   "publisher": "KauanDeveloper",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -42,6 +42,9 @@
     "onStartupFinished"
   ],
   "main": "./out/extension.js",
+  "extensionKind": [
+    "workspace"
+  ],
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": false,
@@ -236,10 +239,38 @@
         "icon": "$(plug)"
       },
       {
+        "command": "claude-code-launcher.showPermissions",
+        "title": "%command.showPermissions%",
+        "category": "Launcher for Claude Code",
+        "icon": "$(shield)"
+      },
+      {
+        "command": "claude-code-launcher.showHooks",
+        "title": "%command.showHooks%",
+        "category": "Launcher for Claude Code",
+        "icon": "$(zap)"
+      },
+      {
         "command": "claude-code-launcher.openWalkthrough",
         "title": "%command.openWalkthrough%",
         "category": "Launcher for Claude Code",
         "icon": "$(book)"
+      },
+      {
+        "command": "claude-code-launcher.acceptChangeAtCursor",
+        "title": "%command.acceptChangeAtCursor%",
+        "category": "Launcher for Claude Code"
+      },
+      {
+        "command": "claude-code-launcher.rejectChangeAtCursor",
+        "title": "%command.rejectChangeAtCursor%",
+        "category": "Launcher for Claude Code"
+      },
+      {
+        "command": "claude-code-launcher.copyChangesSummary",
+        "title": "%command.copyChangesSummary%",
+        "category": "Launcher for Claude Code",
+        "icon": "$(copy)"
       }
     ],
     "menus": {
@@ -289,6 +320,11 @@
           "command": "claude-code-launcher.toggleInlineChanges",
           "when": "view == claude-code-launcher.changes",
           "group": "2_view@1"
+        },
+        {
+          "command": "claude-code-launcher.copyChangesSummary",
+          "when": "view == claude-code-launcher.changes && claudeCodeLauncher.hasChangeHistory",
+          "group": "2_view@2"
         },
         {
           "command": "claude-code-launcher.enableChangeLog",
@@ -361,6 +397,18 @@
         "key": "alt+[",
         "mac": "ctrl+alt+[",
         "when": "editorTextFocus && claudeCodeLauncher.hasPendingChanges && !inlineSuggestionVisible"
+      },
+      {
+        "command": "claude-code-launcher.acceptChangeAtCursor",
+        "key": "alt+shift+y",
+        "mac": "ctrl+alt+y",
+        "when": "editorTextFocus && claudeCodeLauncher.hasPendingChanges && !inlineSuggestionVisible"
+      },
+      {
+        "command": "claude-code-launcher.rejectChangeAtCursor",
+        "key": "alt+shift+n",
+        "mac": "ctrl+alt+n",
+        "when": "editorTextFocus && claudeCodeLauncher.hasPendingChanges && !inlineSuggestionVisible"
       }
     ],
     "colors": [
@@ -406,6 +454,11 @@
           "type": "boolean",
           "default": true,
           "description": "%config.inlineChanges%"
+        },
+        "claudeCodeLauncher.captureCommandChanges": {
+          "type": "boolean",
+          "default": true,
+          "description": "%config.captureCommandChanges%"
         },
         "claudeCodeLauncher.manageEditorGroups": {
           "type": "boolean",

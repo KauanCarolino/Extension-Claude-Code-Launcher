@@ -16,6 +16,8 @@
 		['rules', 'law', t('Regras')],
 		['agents', 'hubot', t('Agentes')],
 		['mcp', 'plug', t('MCP')],
+		['permissions', 'shield', t('Permissões')],
+		['hooks', 'zap', t('Hooks')],
 	];
 	const catalogStates = {};
 	let tab = TABS.some(([id]) => id === saved.tab) ? saved.tab : 'chats';

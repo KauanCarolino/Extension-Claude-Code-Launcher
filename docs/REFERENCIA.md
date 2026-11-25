@@ -10,17 +10,20 @@ Descrição completa do comportamento, dos dados locais e da validação. Para u
 4. [Conversas](#conversas)
 5. [Gerenciamento de skills](#gerenciamento-de-skills)
 6. [Regras, agentes e MCP](#regras-agentes-e-mcp)
-7. [Revisão de mudanças](#revisão-de-mudanças)
-8. [Hooks e dados locais](#hooks-e-dados-locais)
-9. [Comandos operacionais](#comandos-operacionais)
-10. [Desenvolvimento e validação](#desenvolvimento-e-validação)
+7. [Permissões e hooks](#permissões-e-hooks)
+8. [Revisão de mudanças](#revisão-de-mudanças)
+9. [Captura por comando](#captura-por-comando)
+10. [Hooks e dados locais](#hooks-e-dados-locais)
+11. [Janelas remotas, WSL e contêineres](#janelas-remotas-wsl-e-contêineres)
+12. [Comandos operacionais](#comandos-operacionais)
+13. [Desenvolvimento e validação](#desenvolvimento-e-validação)
 
 ## Requisitos e compatibilidade
 
 - Visual Studio Code **1.94.0 ou superior**. No Cursor, a API do editor deve ser compatível; os alvos verificados constam na tabela abaixo.
 - Extensão oficial Claude Code, necessária para abrir conversas. Sua instalação ocorre somente mediante a ação explícita **Instalar**.
 - Workspace confiável e arquivos locais, necessários para a revisão e a captura. O launcher permanece desabilitado no Restricted Mode.
-- Node.js **22 ou superior** no `PATH`, tanto para o fluxo de desenvolvimento quanto para a execução do hook local. O Node embutido no Extension Host é independente do Node do terminal. Quando o registro está configurado e o comando `node` não é localizado no `PATH` da janela, o painel **Mudanças** emite um aviso, que cessa assim que um evento de captura é observado.
+- Node.js **22 ou superior** no `PATH` da máquina onde está o workspace (numa janela remota, a remota), tanto para o fluxo de desenvolvimento quanto para a execução do hook. O Node embutido no Extension Host é independente do Node do terminal. Quando o registro está configurado e o comando `node` não é localizado no `PATH` da janela, o painel **Mudanças** emite um aviso, que cessa assim que um evento de captura é observado.
 - Em workspaces virtuais, a revisão e o registro ficam indisponíveis, pois exigem pastas no disco local. A abertura do chat depende do suporte da extensão oficial a esse tipo de workspace, o que não foi verificado.
 
 | Editor | Alvos do teste de host |
@@ -54,7 +57,7 @@ A interface segue o idioma do editor: português quando ele está em português,
 
 O ícone de balão no título do editor e o item **Claude** na barra de status abrem a barra lateral oficial. Os comandos **Nova conversa em aba** e **Abrir chat em nova aba** utilizam o editor de conversas do Claude.
 
-O contêiner **Launcher for Claude Code**, na barra de atividades, contém a view homônima, que apresenta uma barra de abas no topo: **Conversas**, **Skills** (consulte [Gerenciamento de skills](#gerenciamento-de-skills)), **Regras**, **Agentes** e **MCP** (consulte [Regras, agentes e MCP](#regras-agentes-e-mcp)). A aba ativa mostra o nome; as demais, só o ícone. A aba **Conversas** exibe:
+O contêiner **Launcher for Claude Code**, na barra de atividades, contém a view homônima, que apresenta uma barra de abas no topo: **Conversas**, **Skills** (consulte [Gerenciamento de skills](#gerenciamento-de-skills)), **Regras**, **Agentes**, **MCP** (consulte [Regras, agentes e MCP](#regras-agentes-e-mcp)), **Permissões** e **Hooks** (consulte [Permissões e hooks](#permissões-e-hooks)). A aba ativa mostra o nome; as demais, só o ícone. A aba **Conversas** exibe:
 
 - **Nova conversa**, que abre uma conversa nova em aba;
 - uma lista de conversas, com uma linha por item e o tempo à direita:
@@ -147,9 +150,24 @@ O launcher **nunca grava o `~/.claude.json`**, que o Claude Code reescreve conti
 
 As duas escritas reformatam o JSON com indentação de 2 espaços, recusam arquivos com JSON inválido e só gravam se o arquivo não mudou desde a leitura.
 
+## Permissões e hooks
+
+As abas **Permissões** e **Hooks** leem os quatro arquivos de configurações do Claude Code, do mais específico ao da organização:
+
+| Filtro | Arquivo |
+| --- | --- |
+| **Local** | `.claude/settings.local.json` de cada pasta local (só você) |
+| **Projeto** | `.claude/settings.json` de cada pasta local (compartilhado pelo repositório) |
+| **Usuário** | `settings.json` da pasta de configuração do Claude (`~/.claude` ou `$CLAUDE_CONFIG_DIR`) |
+| **Organização** | `managed-settings.json` na pasta gerenciada; somente leitura |
+
+**Permissões** mostra uma linha por regra de `permissions.allow`, `ask` e `deny`, com o tipo (**permitir**, **perguntar**, **negar**) e o `defaultMode` de cada escopo. Uma regra que também aparece num tipo mais forte (negar vence perguntar, que vence permitir) fica marcada como **sobreposta**. **+ Nova** pergunta o tipo e a regra no formato do Claude Code (`Bash(npm test:*)`, `Read(./src/**)`, `WebFetch(domain:example.com)`) e grava no arquivo do escopo escolhido; **Remover regra** pede confirmação. Como no MCP, as escritas reformatam o JSON com 2 espaços, recusam JSON inválido e só gravam se o arquivo não mudou desde a leitura.
+
+**Hooks** mostra uma linha por handler, com evento, matcher, tipo e o comando sem argumentos com aparência de segredo. Os handlers do próprio registro de mudanças levam a etiqueta **launcher**. A aba é só de leitura: o nome abre o arquivo na entrada do evento. Um arquivo com `disableAllHooks: true` aparece como aviso.
+
 ## Revisão de mudanças
 
-A view **Mudanças** reúne as edições capturadas pelas ferramentas Edit, Write, MultiEdit e NotebookEdit. A captura de um evento de notebook não implica que a reversão correspondente esteja habilitada.
+A view **Mudanças** reúne as edições capturadas pelas ferramentas Edit, Write, MultiEdit e NotebookEdit e, com a [captura por comando](#captura-por-comando), o que comandos e outras ferramentas mudaram. A captura de um evento de notebook não implica que a reversão correspondente esteja habilitada.
 
 ### Escopo por conversa
 
@@ -187,6 +205,10 @@ As ações disponíveis no título da view são:
 - **Atualizar** e **Tela maior**;
 - no menu `...`: aceitar ou recusar todas as pendentes, ligar ou desligar as marcas no código, ativar ou desligar o registro, **Limpar histórico revisado**, **Apagar todos os dados locais de revisão** e **Liberar revisão para outra janela**.
 
+Cada pedido do histórico oferece, ao passar o ponteiro, **Aceitar pedido** e **Desfazer pedido**. Os dois só alcançam os arquivos cujas mudanças pendentes vieram todas daquele pedido; um arquivo com mudanças de outros pedidos fica para a decisão por arquivo.
+
+**Copiar resumo das mudanças** (no menu `...` da view, na barra da tela maior ou pela paleta) põe na área de transferência um markdown com as mudanças visíveis, agrupadas por pedido: arquivo, ação, contagem de linhas, estado e a primeira parte da explicação do Claude. Serve de ponto de partida para a descrição de um PR.
+
 ### Tela maior
 
 A **tela maior** abre o mesmo painel em uma aba, com as ações na barra superior. Cada edição é apresentada como um cartão com o resumo, o pedido e a explicação localizados no transcript, além dos trechos de diff, com alternador **Unificado / Lado a lado**. Trechos com mais de 60 linhas iniciam recolhidos. Os cartões abertos, o bloco recolhido e a legenda são preservados ao reabrir o painel, e a rolagem não se desloca quando uma nova mudança é recebida. Quando a revisão está em modo somente leitura, os botões que a alteram permanecem desabilitados, e um aviso explicita o motivo.
@@ -207,11 +229,30 @@ As lentes oferecem **Aceitar** e **Recusar** por trecho e, quando há vários tr
 
 O modo **Lado a lado** das lentes compara a base da revisão atual, inclusive com decisões parciais, ao arquivo observado. A comparação de um cartão exibe o antes/depois histórico da edição correspondente. As duas comparações respondem a perguntas distintas.
 
-Arquivos pendentes recebem a letra **C** no Explorer, e a barra de status exibe a respectiva contagem. Os atalhos `Alt+]` e `Alt+[` percorrem os trechos; no macOS, onde essas teclas produzem caracteres, os atalhos são `Ctrl+Alt+]` e `Ctrl+Alt+[`. As cores são ajustáveis pelo tema, inclusive `claudeCodeLauncher.pendingChangeForeground`.
+Arquivos pendentes recebem a letra **C** no Explorer, e a barra de status exibe a respectiva contagem. Os atalhos `Alt+]` e `Alt+[` percorrem os trechos; no macOS, onde essas teclas produzem caracteres, os atalhos são `Ctrl+Alt+]` e `Ctrl+Alt+[`. `Alt+Shift+Y` e `Alt+Shift+N` (no macOS, `Ctrl+Alt+Y` e `Ctrl+Alt+N`) aceitam e recusam o trecho em que está o cursor, com a mesma conferência de revisão da lente; fora de um trecho, nada é decidido. As cores são ajustáveis pelo tema, inclusive `claudeCodeLauncher.pendingChangeForeground`.
+
+## Captura por comando
+
+As ferramentas Edit, Write, MultiEdit e NotebookEdit são capturadas a cada chamada. Um formatador, `npm install`, `sed -i`, um gerador de código ou uma ferramenta MCP mudam arquivos sem passar por elas. Com `claudeCodeLauncher.captureCommandChanges` ligado (padrão) e o registro ativo, o launcher instala mais dois handlers, sem matcher:
+
+- **`UserPromptSubmit`** (você envia um pedido): o hook percorre o projeto, anota tamanho, data e hash de cada arquivo em `turns/<conversa>.json` e guarda uma cópia de cada arquivo de texto em `turn-blobs/`. Arquivos que não mudaram desde o pedido anterior reaproveitam o hash e a cópia;
+- **`Stop`** (o Claude termina a resposta): o hook percorre de novo e grava no log, com a ferramenta `Command`, cada arquivo criado, mudado ou apagado que uma edição capturada no mesmo turno não explica. O "antes" é a cópia do início do turno, ou o "depois" da última edição capturada daquele arquivo; o "depois" é o arquivo atual.
+
+Essas mudanças entram na revisão como as outras, com o rótulo **Mudou por comando** (ou **Criou por comando**): aceitar, recusar, desfazer e as barreiras valem igual. O pedido e a explicação vêm do transcript: a última chamada de terminal do turno (ou, sem nenhuma, a última de qualquer ferramenta) depois da mensagem que abriu o turno. Com a captura do turno configurada em todas as pastas, o aviso de comandos de terminal deixa de aparecer, porque o que eles mudam já está na lista.
+
+Limites e o que fica de fora:
+
+- nunca entram `.git`, `.hg`, `.svn`, `node_modules`, `.claude`, os padrões simples do `.gitignore` da raiz (sem negações nem classes de caracteres; `.gitignore` de subpastas não é lido), as exclusões de privacidade e links simbólicos;
+- até 5.000 arquivos e 24 níveis de pasta por percurso, 4 segundos de percurso e 200 mudanças por turno; acima disso, o turno é marcado como limitado e arquivos que não foram percorridos não são dados como apagados;
+- as cópias do início do turno usam no máximo metade de `historyMaxStorageMB` e 2.000 arquivos de até 512 KiB. Um arquivo sem cópia aparece mudado, mas sem o conteúdo de antes, e não pode ser recusado;
+- binários não entram: só texto UTF-8 é revisado;
+- duas conversas trabalhando ao mesmo tempo no mesmo projeto podem atribuir a uma delas o que um comando da outra mudou.
+
+O hook não executa nada do projeto (nem `git`): só lê arquivos. Ele não escreve na saída, porque a saída de um `UserPromptSubmit` seria entregue ao Claude como contexto. Cópias de `turn-blobs/` sem referência em nenhum manifesto são recolhidas no início do turno seguinte, depois de 10 minutos; manifestos de conversas que nunca chegaram ao `Stop` saem depois de 7 dias.
 
 ## Hooks e dados locais
 
-A ativação do registro configura handlers próprios em `.claude/settings.local.json` e copia o script para `.claude/launcher-changes/`. O comando do hook utiliza executável e argumentos separados. Grupos mistos preservam os handlers de terceiros; JSON inválido ou alteração concorrente bloqueiam a atualização da configuração.
+A ativação do registro configura handlers próprios em `.claude/settings.local.json` (`PreToolUse` e `PostToolUse` para as edições e, com a captura por comando, `UserPromptSubmit` e `Stop`) e copia o script para `.claude/launcher-changes/`. O comando do hook utiliza executável e argumentos separados. Grupos mistos preservam os handlers de terceiros; JSON inválido ou alteração concorrente bloqueiam a atualização da configuração.
 
 O modo `auto` exige capacidade comprovada no schema. O modo `exec` é uma escolha explícita, destinada a harness cuja compatibilidade com esse formato tenha sido verificada. O modo `disabled` desliga os hooks geridos. Não existe fallback automático por shell. O hook apenas observa a edição: uma falha de captura não autoriza nem impede a operação original do Claude.
 
@@ -279,6 +320,8 @@ O diretório `.claude/launcher-changes/` é local e recebe regra de exclusão do
 | `capture-policy.json`, `capture-status.json` | Política de captura, pausa e diagnóstico legado; isoladamente, não comprovam conclusão |
 | `capture-diagnostics/v2/observations/`, `capture-diagnostics/v2/completions/` | Evidências separadas de tentativas e conclusões; retenção conservadora de 32 registros válidos por categoria, preservados os dados desconhecidos |
 | `active/`, `pending/`, `completed/` | Coordenação e idempotência do hook; marcadores antigos são recolhidos automaticamente |
+| `turns/<conversa>.json`, `turns/index.json` | Estado do projeto no início do turno de cada conversa e índice de hashes da captura por comando |
+| `turn-blobs/` | Cópias dos arquivos de texto do início do turno; as citadas pelo log são copiadas para `blobs/` |
 
 #### Propriedade da escrita
 
@@ -307,6 +350,22 @@ A versão 0.7.0 não participa desse protocolo. Não se deve manter versões ant
 
 As versões 0.8 e 0.9 também não reconhecem a intenção de limpeza introduzida na 0.10. Uma limpeza interrompida deve ser concluída com a versão 0.10 ou superior antes de se considerar um downgrade. O uso simultâneo dessas versões durante a limpeza não é suportado.
 
+## Janelas remotas, WSL e contêineres
+
+O launcher declara `extensionKind: ["workspace"]`: numa janela remota (WSL, SSH, dev container, Codespaces), ele roda no host do workspace, como a extensão oficial do Claude Code, que também é uma extensão de workspace. Assim:
+
+- o hook roda com o `node` do host remoto; o Node.js 22+ precisa estar instalado lá, no `PATH` do processo do Claude Code;
+- as conversas, as skills globais e o `settings.json` do usuário são os do `~/.claude` do host remoto;
+- os dados da revisão ficam em `.claude/launcher-changes/` dentro do workspace remoto;
+- o diagnóstico de captura informa o ambiente (por exemplo, "janela remota (wsl)").
+
+Duas ações dependem da máquina local e mudam numa janela remota:
+
+- **Mostrar no sistema** revela o arquivo no Explorer quando ele é do workspace; fora dele (por exemplo, em `~/.claude`), copia o caminho e avisa;
+- a **lixeira** não existe em todo ambiente (é comum faltar em contêineres). Sem ela, recusar um arquivo criado pelo Claude e excluir skills, regras ou agentes param com o motivo "a lixeira não está disponível": o launcher nunca apaga em definitivo.
+
+O que foi verificado e o que não foi está em [VERIFICACAO.md](VERIFICACAO.md#ambientes-remotos). Para conferir num ambiente remoto: abra a janela remota, instale a extensão nela, ative o registro, comece uma conversa nova, peça uma edição e um comando (`npm run format`, por exemplo) e confira o painel **Mudanças** e o diagnóstico de captura.
+
 ## Comandos operacionais
 
 Todos os comandos constam na categoria **Launcher for Claude Code** da paleta, além das ações disponíveis nas views.
@@ -316,7 +375,7 @@ Todos os comandos constam na categoria **Launcher for Claude Code** da paleta, a
 | Abrir chat na barra lateral / Abrir chat em nova aba | Abrir a integração oficial |
 | Nova conversa em aba | Solicitar nova conversa |
 | Instalar Claude Code | Instalar a extensão oficial, por ação explícita |
-| Mostrar conversas e mudanças / skills / regras / agentes / servidores MCP | Alternar as abas da view do launcher |
+| Mostrar conversas e mudanças / skills / regras / agentes / servidores MCP / permissões / hooks | Alternar as abas da view do launcher |
 | Mostrar mudanças do Claude | Abrir o painel maior |
 | Atualizar mudanças | Reler o histórico e o estado da revisão |
 | Ativar / Desligar registro de mudanças | Gerir os hooks próprios |
@@ -328,6 +387,8 @@ Todos os comandos constam na categoria **Launcher for Claude Code** da paleta, a
 | Desfazer a última recusa | Recuperar o último lote, mantendo os itens que não puderem ser restaurados |
 | Ligar/desligar marcas das mudanças no código | Alterar a apresentação inline |
 | Próxima / Mudança anterior do Claude | Navegar pelos trechos |
+| Aceitar / Recusar o trecho do Claude no cursor | Decidir o trecho sob o cursor, com a assinatura da lente |
+| Copiar resumo das mudanças (markdown) | Copiar as mudanças visíveis, por pedido, para a descrição de um PR |
 | Abrir o passo a passo | Abrir o guia de primeiros passos |
 
 ## Desenvolvimento e validação
@@ -346,6 +407,16 @@ npm run verify:package -- launcher-for-claude-code.vsix
 ```
 
 O `typecheck` confere o TypeScript de `src/` e também o JavaScript que vai no pacote sem compilação: o hook (`tsconfig.hooks.json`, tipos do Node) e as páginas das views (`tsconfig.webview.json`, tipos do DOM e `types/webview.d.ts`). O `lint` cobre `src/`, `hooks/` e `media/`.
+
+### Imagens do README
+
+As imagens de `docs/images/` saem das páginas reais das views (`media/*.js` e `*.css`), renderizadas num Chromium headless com um estado de demonstração, as cores do tema Dark Modern e os diffs e rótulos do próprio `out/`:
+
+```sh
+npm run compile && node scripts/screenshots.cjs
+```
+
+O script acha o Chromium do cache do Playwright (`--chrome` informa outro) e usa o `ffmpeg` para o GIF. As lentes no editor não aparecem nessas imagens, porque elas são do editor, não das páginas.
 
 ### Tradução
 

@@ -2,6 +2,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { createSkill, DISABLED_FILE, globalSkillsRoot, scanSkills, scanSynced, setSkillEnabled, SKILL_FILE, validSkillName, type SkillInfo, type SkillScope } from './skills';
 import { t } from './i18n';
+import { deleteToTrash, revealPath } from './remote';
 
 const globalRoot = () => globalSkillsRoot();
 /** `.claude/skills` de cada pasta local do workspace, na ordem do editor. */
@@ -65,13 +66,13 @@ export class SkillsController implements vscode.Disposable {
 				case 'skills.open': if (skill && skill.state !== 'broken') {
 					await vscode.window.showTextDocument(vscode.Uri.file(path.join(skill.dir, skill.state === 'disabled' ? DISABLED_FILE : SKILL_FILE)));
 				} break;
-				case 'skills.reveal': if (skill) { await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(skill.dir)); } break;
+				case 'skills.reveal': if (skill) { await revealPath(skill.dir); } break;
 				case 'skills.toggle': if (skill && skill.scope !== 'claudeai') { await setSkillEnabled(skill, skill.state === 'disabled'); } break;
 				case 'skills.delete': if (skill && skill.scope !== 'claudeai') {
 					const remove = t('Excluir');
 					const ok = await vscode.window.showWarningMessage(t('Excluir a skill "{0}"? A pasta vai para a lixeira.', skill.name),
 						{ modal: true, detail: skill.dir }, remove);
-					if (ok === remove) { await vscode.workspace.fs.delete(vscode.Uri.file(skill.dir), { recursive: true, useTrash: true }); }
+					if (ok === remove) { await deleteToTrash(vscode.Uri.file(skill.dir), true); }
 				} break;
 				case 'skills.create': await this.create(key === 'project' ? 'project' : 'global'); break;
 			}

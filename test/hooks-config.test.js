@@ -129,3 +129,29 @@ test('ownership loss or backup failure blocks the write', async () => {
 	assert.equal(result.kind, 'failed');
 	assert.equal(writes, 0);
 });
+
+test('a captura do turno adiciona UserPromptSubmit e Stop sem matcher, é idempotente e sai quando desligada', () => {
+	const third = { matcher: undefined, hooks: [{ type: 'command', command: 'notify-done', args: [] }] };
+	const source = JSON.stringify({ hooks: { Stop: [third] } });
+	const plan = planHooks(options(source, true, { turnCapture: true }));
+	const configured = JSON.parse(plan.nextText);
+	assert.deepEqual(configured.hooks.UserPromptSubmit, [{ hooks: [{ type: 'command', command: 'node', args: [scriptPath, 'turn-start'], timeout: 10 }] }]);
+	assert.deepEqual(configured.hooks.Stop[0].hooks, third.hooks, 'o hook de terceiros fica');
+	assert.deepEqual(configured.hooks.Stop.at(-1), { hooks: [{ type: 'command', command: 'node', args: [scriptPath, 'turn-end'], timeout: 10 }] });
+	const inspected = inspectHookConfiguration({ kind: 'content', text: plan.nextText }, scriptPath);
+	assert.deepEqual([inspected.active, inspected.turn], [true, true]);
+	assert.equal(planHooks(options(plan.nextText, true, { turnCapture: true })).changed, false);
+	// Desligar só a captura do turno mantém o registro por edição e o hook de terceiros.
+	const withoutTurn = JSON.parse(planHooks(options(plan.nextText, true, { turnCapture: false })).nextText);
+	assert.equal(withoutTurn.hooks.UserPromptSubmit, undefined);
+	assert.deepEqual(withoutTurn.hooks.Stop, [{ hooks: third.hooks }]);
+	assert.equal(inspectHookConfiguration({ kind: 'content', text: JSON.stringify(withoutTurn) }, scriptPath).turn, false);
+	const disabled = JSON.parse(planHooks(options(plan.nextText, false)).nextText);
+	assert.deepEqual(Object.keys(disabled.hooks), ['Stop']);
+});
+
+test('um handler de turno próprio dentro de um grupo com matcher é ambíguo', () => {
+	const source = JSON.stringify({ hooks: { Stop: [{ matcher: 'x', hooks: [{ type: 'command', command: 'node', args: [scriptPath, 'turn-end'] }] }] } });
+	assert.equal(planHooks(options(source, true, { turnCapture: true })).code, 'ambiguousHookOwnership');
+	assert.equal(inspectHookConfiguration({ kind: 'content', text: source }, scriptPath).code, 'ambiguousHookOwnership');
+});
