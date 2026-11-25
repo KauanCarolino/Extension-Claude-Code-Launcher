@@ -38,7 +38,10 @@ exports.run = async () => {
     if (process.env.LAUNCHER_HOST_EXPECTED_VERSION) {
       assert.equal(vscode.version, process.env.LAUNCHER_HOST_EXPECTED_VERSION, 'O editor executado deve corresponder ao pin.');
     }
-    const lockBefore = vscode.workspace.getConfiguration('workbench.editor').get('autoLockGroups');
+    // Compare only stored values: the default of autoLockGroups gains a key for every custom editor
+    // that built-in extensions register during startup, so get() races with that registration.
+    const storedLock = () => { const { globalValue, workspaceValue, workspaceFolderValue } = vscode.workspace.getConfiguration('workbench.editor').inspect('autoLockGroups') ?? {}; return { globalValue, workspaceValue, workspaceFolderValue }; };
+    const lockBefore = storedLock();
     const extension = vscode.extensions.getExtension(LAUNCHER_ID);
     assert(extension, 'Extensão não encontrada no perfil de teste.');
     report.extensionVersion = extension.packageJSON.version;
@@ -49,7 +52,7 @@ exports.run = async () => {
     for (const command of extension.packageJSON.contributes.commands) {
       assert(commands.has(command.command), 'Comando não registrado: ' + command.command);
     }
-    assert.deepEqual(vscode.workspace.getConfiguration('workbench.editor').get('autoLockGroups'), lockBefore);
+    assert.deepEqual(storedLock(), lockBefore);
     checks.push('activation, declared commands and unmanaged preferences');
 
     const assertResolution = async (id, resolution) => {
