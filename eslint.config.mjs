@@ -30,7 +30,7 @@ const javascriptRules = {
 const readonly = (names) => Object.fromEntries(names.map((name) => [name, 'readonly']));
 
 export default tseslint.config(
-	{ ignores: ['out/**', 'node_modules/**', 'scripts/**', 'test/**', 'docs/**', 'types/**', '.claude/**'] },
+	{ ignores: ['out/**', 'node_modules/**', 'scripts/**', 'test/**', 'docs/**', 'types/**', '.claude/**', 'orchestrator/**'] },
 	{
 		files: ['src/**/*.ts'],
 		languageOptions: { parser: tseslint.parser, parserOptions: { project: './tsconfig.json', tsconfigRootDir: import.meta.dirname } },

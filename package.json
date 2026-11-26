@@ -615,7 +615,8 @@
     "verify:package": "node scripts/verify-package.cjs",
     "test:package": "node --test test/package/*.test.cjs",
     "test:host": "node scripts/test-host.cjs",
-    "test:host:contracts": "node scripts/test-host-contracts.cjs"
+    "test:host:contracts": "node scripts/test-host-contracts.cjs",
+    "test:orchestrator": "npm --prefix orchestrator test"
   },
   "devDependencies": {
     "@types/node": "20.16.15",

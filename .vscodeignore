@@ -8,6 +8,9 @@ docs/**
 tsconfig.json
 tsconfig.*.json
 types/**
+# Orquestrador: CLI separada, fora do pacote da extensão
+orchestrator/**
+.orquestra/**
 eslint.config.mjs
 **/*.ts
 **/*.map

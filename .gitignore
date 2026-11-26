@@ -12,6 +12,9 @@ dist/
 # Pasta local do Claude Code: configurações da máquina, log de mudanças e skills instaladas
 .claude/
 
+# Orquestrador: jobs locais de cada máquina (o project.json vai para o git)
+.orquestra/jobs/
+
 # Logs
 *.log
 npm-debug.log*
