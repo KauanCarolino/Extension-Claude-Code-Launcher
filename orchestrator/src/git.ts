@@ -137,6 +137,15 @@ export async function stepCommits(cwd: string, branch: string, baseCommit: strin
 	return out;
 }
 
+export async function remoteExists(cwd: string, remote: string): Promise<boolean> {
+	return (await git(cwd, ['remote', 'get-url', remote], true)).code === 0;
+}
+
+/** Envia só o branch da tarefa, sem forçar. Os hooks de pre-push da pessoa continuam valendo. */
+export async function pushBranch(cwd: string, remote: string, branch: string): Promise<void> {
+	await git(cwd, ['push', '--quiet', '--set-upstream', remote, `refs/heads/${branch}:refs/heads/${branch}`]);
+}
+
 export async function diffSince(cwd: string, baseCommit: string): Promise<string> {
 	return (await git(cwd, ['diff', '--no-color', `${baseCommit}..HEAD`])).stdout;
 }

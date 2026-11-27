@@ -9,6 +9,7 @@
 	let filter = saved.filter || '';
 	let lastState = null;
 	let skillsState = null;
+	let orchestraState = null;
 	// Abas além de Conversas: Skills tem desenho próprio (skills.js); as outras usam catalog.js.
 	const TABS = [
 		['chats', 'comment', t('Conversas')],
@@ -18,6 +19,7 @@
 		['mcp', 'plug', t('MCP')],
 		['permissions', 'shield', t('Permissões')],
 		['hooks', 'zap', t('Hooks')],
+		['orchestra', 'rocket', t('Orquestrador')],
 	];
 	const catalogStates = {};
 	let tab = TABS.some(([id]) => id === saved.tab) ? saved.tab : 'chats';
@@ -31,6 +33,9 @@
 		} else if (data.type === 'skills') {
 			skillsState = data;
 			if (tab === 'skills') { renderPanelTab(); }
+		} else if (data.type === 'orchestra') {
+			orchestraState = data;
+			if (tab === 'orchestra') { renderPanelTab(); }
 		} else if (data.type === 'catalog') {
 			catalogStates[data.kind] = data;
 			if (tab === data.kind) { renderPanelTab(); }
@@ -156,9 +161,14 @@
 
 	function renderPanelTab() {
 		const focus = captureFocus();
+		// A aba do orquestrador redesenha a cada linha de log: a rolagem não pode voltar ao topo.
+		const scroll = window.scrollY;
 		root.replaceChildren(renderTabs());
 		if (tab === 'skills') {
 			window.renderSkills(root, skillsState, send);
+		} else if (tab === 'orchestra') {
+			window.renderOrchestra(root, orchestraState, send);
+			window.scrollTo(0, scroll);
 		} else {
 			window.renderCatalog(root, tab, catalogStates[tab] || null, send);
 		}

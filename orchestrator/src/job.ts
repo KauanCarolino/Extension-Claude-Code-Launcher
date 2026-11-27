@@ -162,6 +162,21 @@ export function acquireLock(cwd: string, id: string): Lock {
 	throw new Error(`Could not lock job ${id}`);
 }
 
+/** Apaga uma tarefa que ainda não editou nada: sem plano confirmado, nenhum branch foi criado. */
+export function dropJob(cwd: string, id: string): void {
+	const lock = acquireLock(cwd, id);
+	try {
+		const job = loadJob(cwd, id);
+		if (job.planConfirmed) {
+			throw new Error(`Job ${id} already started editing on ${job.branch}; it cannot be dropped. Delete the branch yourself if you no longer want it.`);
+		}
+		fs.rmSync(jobFile(cwd, id), { force: true });
+		fs.rmSync(path.join(jobsDir(cwd), `${id}.runs`), { recursive: true, force: true });
+	} finally {
+		lock.release();
+	}
+}
+
 export function wallMs(job: Job, now: Date): number {
 	const end = job.timing.endedAt ? Date.parse(job.timing.endedAt) : now.getTime();
 	return Math.max(0, end - Date.parse(job.createdAt));

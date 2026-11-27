@@ -22,6 +22,8 @@ interface Window {
 	launcherL10n: LauncherL10n;
 	/** skills.js */
 	renderSkills(host: HTMLElement, state: any, send: WebviewSend): void;
+	/** orchestra.js */
+	renderOrchestra(host: HTMLElement, state: any, send: WebviewSend): void;
 	/** catalog.js */
 	renderCatalog(host: HTMLElement, kind: string, state: any, send: WebviewSend): void;
 	/** changes-time.js */

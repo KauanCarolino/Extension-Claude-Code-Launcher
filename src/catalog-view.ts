@@ -15,7 +15,7 @@ import { m, t } from './i18n';
 import { deleteToTrash, revealPath } from './remote';
 
 /** Abas da view do launcher. Só a de conversas mostra o painel de Mudanças. */
-export const PANELS = ['chats', 'skills', 'rules', 'agents', 'mcp', 'permissions', 'hooks'] as const;
+export const PANELS = ['chats', 'skills', 'rules', 'agents', 'mcp', 'permissions', 'hooks', 'orchestra'] as const;
 export type Panel = typeof PANELS[number];
 export type CatalogKind = 'rules' | 'agents' | 'mcp' | 'permissions' | 'hooks';
 
@@ -399,7 +399,8 @@ export interface Catalogs {
 	handle(command: string, id?: string, key?: string): Promise<void>;
 }
 
-export function registerCatalogs(context: vscode.ExtensionContext, postToView: (message: unknown) => void): Catalogs {
+/** `onPanel` avisa quem desenha uma aba fora dos catálogos (o orquestrador) de cada troca de aba. */
+export function registerCatalogs(context: vscode.ExtensionContext, postToView: (message: unknown) => void, onPanel?: (panel: Panel) => void): Catalogs {
 	const controllers: Array<CatalogController<RuleInfo & Item> | CatalogController<AgentInfo & Item> | CatalogController<McpServer & Item>
 		| CatalogController<PermissionRule & Item> | CatalogController<HookHandlerInfo & Item>> = [
 		new CatalogController(rulesSource, postToView), new CatalogController(agentsSource, postToView), new CatalogController(mcpSource, postToView),
@@ -419,12 +420,13 @@ export function registerCatalogs(context: vscode.ExtensionContext, postToView: (
 
 	const setPanel = async (panel: Panel, fromView: boolean) => {
 		controllers.forEach((c) => { c.active = c.source.kind === panel; });
+		onPanel?.(panel);
 		await vscode.commands.executeCommand('setContext', 'claudeCodeLauncher.panel', panel);
 		// Pela paleta, a página também precisa trocar de aba.
 		if (!fromView) { postToView({ type: 'tab', tab: panel }); }
 	};
 	void setPanel('chats', true);
-	const titles: Record<Panel, string> = { chats: 'Chats', skills: 'Skills', rules: 'Rules', agents: 'Agents', mcp: 'Mcp', permissions: 'Permissions', hooks: 'Hooks' };
+	const titles: Record<Panel, string> = { chats: 'Chats', skills: 'Skills', rules: 'Rules', agents: 'Agents', mcp: 'Mcp', permissions: 'Permissions', hooks: 'Hooks', orchestra: 'Orchestra' };
 	context.subscriptions.push(...controllers, { dispose: () => watchers.forEach((w) => w.dispose()) },
 		vscode.workspace.onDidChangeWorkspaceFolders(() => { rewatch(); controllers.forEach((c) => c.refresh(0)); }),
 		...PANELS.map((panel) => vscode.commands.registerCommand(`claude-code-launcher.show${titles[panel]}`, () => setPanel(panel, false))),

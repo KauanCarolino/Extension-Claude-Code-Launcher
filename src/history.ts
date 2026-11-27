@@ -484,15 +484,21 @@ export function validateSavedMeta(value: unknown): Record<string, { reason: stri
 	return result;
 }
 
-export interface HistoryMessage { command: string; id?: string; key?: string; request?: string; revision?: number }
+export interface HistoryMessage { command: string; id?: string; key?: string; request?: string; revision?: number; text?: string }
 const CHANGES_COMMANDS = new Set([
 	'ready', 'refresh', 'toggleChatFilter', 'enable', 'disable', 'clear', 'purge', 'openPanel', 'compare', 'showInCode', 'openFile',
 	'acceptAll', 'rejectAll', 'acceptFile', 'rejectFile', 'rejectRequest', 'undoReject',
 	'release', 'recover', 'releaseWriter', 'recoverWriter', 'clearAllReviewData', 'openScm', 'newChat', 'openWalkthrough', 'acceptRequest', 'copySummary',
 ]);
 const CATALOG_ACTIONS = ['refresh', 'open', 'reveal', 'toggle', 'delete', 'create'];
+/** Aba do orquestrador: cada ação vira um processo da CLI `orquestra` (orchestra-view.ts). */
+export const ORCHESTRA_COMMANDS = ['refresh', 'folder', 'plan', 'confirm', 'resume', 'discard', 'pr', 'drop', 'stop', 'openPr', 'details', 'log',
+	'createProject', 'settings'].map((action) => `orchestra.${action}`);
 const HOME_COMMANDS = new Set(['ready', 'install', 'newTab', 'openSidebar', 'refresh', 'openSession', 'focusTab', 'closeTab', 'showPanel',
-	...['skills', 'rules', 'agents', 'mcp', 'permissions', 'hooks'].flatMap((kind) => CATALOG_ACTIONS.map((action) => `${kind}.${action}`))]);
+	...['skills', 'rules', 'agents', 'mcp', 'permissions', 'hooks'].flatMap((kind) => CATALOG_ACTIONS.map((action) => `${kind}.${action}`)),
+	...ORCHESTRA_COMMANDS]);
+/** Pedido digitado na aba do orquestrador: aceita quebra de linha e tab, nenhum outro controle. */
+const MAX_TEXT = 8000;
 export function validateMessage(value: unknown, surface: 'changes' | 'home' = 'changes'): HistoryMessage | undefined {
 	if (!object(value) || typeof value.command !== 'string'
 		|| !(surface === 'changes' ? CHANGES_COMMANDS : HOME_COMMANDS).has(value.command)) { return undefined; }
@@ -500,6 +506,8 @@ export function validateMessage(value: unknown, surface: 'changes' | 'home' = 'c
 		if (value[field] !== undefined && !limitedString(value[field], field === 'key' ? 8192 : 256)) { return undefined; }
 	}
 	if (value.revision !== undefined && (!Number.isSafeInteger(value.revision) || (value.revision as number) < 0)) { return undefined; }
+	if (value.text !== undefined && (surface !== 'home' || typeof value.text !== 'string' || value.text.length > MAX_TEXT
+		|| /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value.text))) { return undefined; }
 	const required = new Map([
 		['compare', 'id'], ['showInCode', 'id'], ['openFile', 'id'], ['openSession', 'id'],
 		['acceptFile', 'key'], ['rejectFile', 'key'], ['focusTab', 'key'], ['closeTab', 'key'], ['rejectRequest', 'request'], ['acceptRequest', 'request'],
@@ -507,7 +515,7 @@ export function validateMessage(value: unknown, surface: 'changes' | 'home' = 'c
 	const field = required.get(value.command);
 	if (field && value[field] === undefined) { return undefined; }
 	return { command: value.command, id: value.id as string | undefined, key: value.key as string | undefined,
-		request: value.request as string | undefined, revision: value.revision as number | undefined };
+		request: value.request as string | undefined, revision: value.revision as number | undefined, text: value.text };
 }
 
 export const PROTECTED_HISTORY_PATHS = [

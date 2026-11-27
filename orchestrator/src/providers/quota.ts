@@ -30,7 +30,8 @@ export function loadQuotaFixtures(provider: string): string[] {
 }
 
 function normalize(text: string): string {
-	return text.replace(/\s+/g, ' ').trim().toLowerCase();
+	// O Codex escreve "You’ve" com apóstrofo curvo; o Claude, com o reto.
+	return text.replace(/[‘’ʼ]/g, "'").replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
 /** Casa a fixture inteira (sem diferença de espaço e caixa), nunca uma palavra solta como "limit". */

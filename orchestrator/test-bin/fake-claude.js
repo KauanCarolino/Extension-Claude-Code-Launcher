@@ -40,6 +40,12 @@ function reply(obj, code = 0) {
 }
 
 const mode = env.FAKE_CLAUDE_MODE || 'fix';
+if (mode === 'hang') {
+	// Fica rodando até alguém matar: o teste do "Parar" confere que a CLI leva o modelo junto.
+	if (env.FAKE_CLAUDE_PIDFILE) fs.writeFileSync(env.FAKE_CLAUDE_PIDFILE, String(process.pid));
+	setInterval(() => {}, 1000);
+	return;
+}
 if (mode === 'garbage') {
 	process.stdout.write('not json at all\n');
 	process.exit(0);
@@ -49,6 +55,11 @@ if (mode === 'error') {
 }
 
 const readOnly = opts['--tools'] === 'Read,Glob,Grep';
+// Linha que o Claude Code 2.x monta quando a janela de 5 horas acaba.
+const QUOTA = "You've hit your 5-hour limit · resets 3pm (America/Sao_Paulo)";
+if (mode === 'quota' || (mode === 'quota-worker' && !readOnly)) {
+	reply({ subtype: 'success', is_error: true, result: QUOTA }, 1);
+}
 if (readOnly) {
 	const plan = {
 		goal: 'add() returns the sum',

@@ -6,6 +6,7 @@ import { calibrationFile, loadCalibration, recordOutcome, saveCalibration } from
 import * as g from './git';
 import { acquireLock, jobsDir, loadJob, newJob, saveJob, transition } from './job';
 import { parsePlan } from './plan';
+import type { Publisher } from './pr';
 import { isAllowed, isDenied } from './project';
 import { choosePath, otherProvider, pickProvider } from './router';
 import type { Job, ProjectConfig, Provider, ProviderId, RunResult, Step, WorkPacket } from './types';
@@ -25,6 +26,8 @@ export interface Context {
 	calibrationPath?: string;
 	/** Parada antes da primeira edição. Sem ela (ou com `false`), a tarefa espera em `planning`. */
 	confirmPlan?: (job: Job) => Promise<boolean>;
+	/** Push e PR depois do teste verde (fase 4). Só é usado quando a tarefa pediu `--pr`. */
+	publisher?: Publisher;
 }
 
 export class DirtyTreeError extends Error {
@@ -409,6 +412,38 @@ async function verifyAndRepair(ctx: Context, job: Job): Promise<Outcome> {
 export interface RunOptions {
 	/** Descarta mudanças deixadas por um passo interrompido, só no branch da própria tarefa. */
 	discard?: boolean;
+	/** Abre o PR depois do teste verde. Fica gravado na tarefa, então `resume` continua pedindo. */
+	pr?: boolean;
+}
+
+// ---------------------------------------------------------------- PR
+
+/** Recusa antes de qualquer chamada de modelo: sem `gh` com login, `--pr` gastaria cota à toa. */
+async function ensurePublisher(ctx: Context): Promise<void> {
+	if (!ctx.publisher) throw new Error('--pr needs a publisher, and none is configured');
+	const status = await ctx.publisher.available();
+	if (!status.ok) throw new Error(`--pr cannot open a pull request: ${status.reason ?? 'gh is unavailable'}`);
+}
+
+/** Envia o branch e abre o PR. Uma falha deixa a tarefa em `passed`, com o motivo, para `resume --pr`. */
+async function publish(ctx: Context, job: Job): Promise<void> {
+	const started = Date.now();
+	try {
+		if (!ctx.publisher) throw new Error('no publisher configured');
+		log(ctx, `Pushing ${job.branch} and opening the pull request…`);
+		const { url, reused } = await ctx.publisher.open(job, ctx.cwd);
+		job.pr = { url };
+		job.prError = undefined;
+		transition(job, 'pr_open', nowOf(ctx), `${reused ? 'pull request already open' : 'pull request opened'}: ${url}`);
+		log(ctx, `${reused ? 'Pull request already open' : 'Pull request opened'}: ${url}`);
+	} catch (err) {
+		job.prError = (err as Error).message;
+		note(ctx, job, `could not open the pull request: ${job.prError}`);
+		log(ctx, `The branch is tested; run \`orquestra resume ${job.id} --pr\` to try the pull request again.`);
+	} finally {
+		job.timing.testMs += Date.now() - started;
+		save(ctx, job);
+	}
 }
 
 async function ensureCleanOnBranch(ctx: Context, job: Job, opts: RunOptions): Promise<void> {
@@ -442,7 +477,19 @@ export async function runJob(ctx: Context, job: Job, opts: RunOptions = {}): Pro
 }
 
 async function drive(ctx: Context, job: Job, opts: RunOptions): Promise<Job> {
-	if (job.state === 'passed' || job.state === 'pr_open') return job;
+	if (job.state === 'pr_open') return job;
+	if (opts.pr && !job.wantPr) {
+		job.wantPr = true;
+		save(ctx, job);
+	}
+	if (job.wantPr) await ensurePublisher(ctx);
+	if (job.state === 'passed') {
+		if (job.wantPr && !job.pr) {
+			await ensureCleanOnBranch(ctx, job, opts);
+			await publish(ctx, job);
+		}
+		return job;
+	}
 	await g.excludeJobsDir(ctx.cwd);
 	if (!job.plan) {
 		if ((await g.changedFiles(ctx.cwd)).length) {
@@ -465,7 +512,8 @@ async function drive(ctx: Context, job: Job, opts: RunOptions): Promise<Job> {
 	await reconcile(ctx, job);
 	save(ctx, job);
 	if ((await executeSteps(ctx, job)) === 'halted') return job;
-	await verifyAndRepair(ctx, job);
+	if ((await verifyAndRepair(ctx, job)) === 'halted') return job;
+	if (job.wantPr) await publish(ctx, job);
 	return job;
 }
 
@@ -474,9 +522,13 @@ export async function resumeJob(ctx: Context, id: string, opts: RunOptions = {})
 	const lock = acquireLock(ctx.cwd, id);
 	try {
 		const job = loadJob(ctx.cwd, id);
-		if (job.state === 'passed' || job.state === 'pr_open') {
+		if (job.state === 'pr_open' || (job.state === 'passed' && !(opts.pr || job.wantPr))) {
 			log(ctx, `Job ${id} is already ${job.state}.`);
 			return job;
+		}
+		if (job.state === 'passed') {
+			// Teste já verde: só falta o PR. Nada de modelo, nada de teste de novo.
+			return await drive(ctx, job, opts);
 		}
 		job.quota = {};
 		for (const step of job.steps) if (step.status !== 'done') step.attempts = 0;

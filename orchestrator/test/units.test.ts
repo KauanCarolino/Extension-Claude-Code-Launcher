@@ -71,10 +71,39 @@ test('quota: only full captured messages count, never a loose word', () => {
 	assert.equal(matchesQuotaFixtures('Error: usage limit', [fixture]), false);
 	assert.equal(matchesQuotaFixtures('anything', []), false);
 	assert.equal(matchesQuotaFixtures('anything', ['   ']), false);
-	// Sem fixture real capturada, nenhum erro do Claude ou do Codex é cota ainda.
-	assert.deepEqual(loadQuotaFixtures('claude'), []);
-	assert.deepEqual(loadQuotaFixtures('codex'), []);
 	assert.equal(new PendingProvider('claude', 1).isQuotaError({ exitCode: 1, output: fixture, stderr: '', durationMs: 0 }), false);
+});
+
+test('quota: the Claude and Codex limit lines count; capacity errors and loose words do not', () => {
+	const claude = loadQuotaFixtures('claude');
+	const codex = loadQuotaFixtures('codex');
+	assert.ok(claude.length >= 5 && codex.length >= 2);
+	for (const text of [
+		"You've hit your 5-hour limit · resets 3pm (America/Sao_Paulo)",
+		"API Error: You've hit your weekly limit · resets Dec 1",
+		"You've hit your session limit · /upgrade to keep using Claude Code",
+		"You're out of usage credits. Switch to another model to continue.",
+	]) {
+		assert.ok(matchesQuotaFixtures(text, claude), text);
+	}
+	for (const text of [
+		'You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/settings/usage to purchase more credits or try again at 3:05 PM.',
+		"You've hit your usage limit. Try again later.",
+		'Quota exceeded. Check your plan and billing details.',
+	]) {
+		assert.ok(matchesQuotaFixtures(text, codex), text);
+	}
+	for (const text of [
+		'Selected model is at capacity. Please try a different model.',
+		'rate limit exceeded: 429 Too Many Requests',
+		'Context limit reached · /compact or /clear to continue',
+		'Subagent nesting limit reached (depth 3 of 3).',
+		'error: usage limit',
+	]) {
+		assert.equal(matchesQuotaFixtures(text, [...claude, ...codex]), false, text);
+	}
+	// Um provedor não reconhece a cota do outro: o limite do Codex não pausa o Claude.
+	assert.equal(matchesQuotaFixtures('You’ve hit your usage limit.', claude), false);
 });
 
 test('budget: the packet is cut to the cap of its path', () => {
@@ -123,6 +152,12 @@ test('project: defaults, limits and a deny list that cannot release secrets', ()
 	assert.throws(() => parseProject({ maxRepairCycles: 3 }), /0 to 2/);
 	assert.throws(() => parseProject({ test: '' }), /test/);
 	assert.throws(() => parseProject({ defaultProvider: 'gpt' }), /defaultProvider/);
+	assert.equal(p.remote, 'origin');
+	assert.equal(p.prDraft, false);
+	assert.deepEqual([parseProject({ remote: 'upstream', prDraft: true }).remote, parseProject({ prDraft: true }).prDraft], ['upstream', true]);
+	assert.throws(() => parseProject({ remote: '--upload-pack=x' }), /remote/);
+	assert.throws(() => parseProject({ remote: 'a b' }), /remote/);
+	assert.throws(() => parseProject({ prDraft: 'yes' }), /prDraft/);
 	assert.ok(isDenied('.env', DEFAULT_DENY));
 	assert.ok(isDenied('a/b/.env.local', DEFAULT_DENY));
 	assert.ok(isDenied('certs\\server.PEM', DEFAULT_DENY));

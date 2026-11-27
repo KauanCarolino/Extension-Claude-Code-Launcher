@@ -52,6 +52,7 @@ function launcher(t, { tabs, sessions }) {
       : id === './changes' ? { registerChanges: () => ({ setActiveChat: (chat) => chats.push(chat === null ? null : JSON.parse(JSON.stringify(chat))), refreshShellActivity() {}, dispose() {}, whenDisposed: async () => {} }) }
       : id === './inline' ? { registerInline() {} } : id === './skills-view' ? { registerSkills() {} }
       : id === './catalog-view' ? { registerCatalogs() {} }
+      : id === './orchestra-view' ? { OrchestraController: class { dispose() {} } }
       : id === './sessions' ? { sessionsDir: () => '/fixture/sessions', listSessionsAsync: async () => ({ sessions: listing, partial: false }) }
       : id.startsWith('.') ? require(path.resolve(OUT, id)) : require(id),
   }, { filename: source });

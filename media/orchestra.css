@@ -1,0 +1,60 @@
+/* Aba do orquestrador dentro da view do launcher. Prefixo oq- evita colisão com home.css e skills.css. */
+.oq { display: flex; flex-direction: column; gap: 10px; }
+.oq-field { display: flex; align-items: center; gap: 6px; }
+.oq-label { font-size: var(--text-sm); color: var(--muted); }
+.oq-select { flex: none; min-width: 0; padding: 4px 6px; color: var(--vscode-dropdown-foreground); background: var(--vscode-dropdown-background); border: 1px solid var(--vscode-dropdown-border, var(--border-subtle)); border-radius: var(--radius); font: inherit; font-size: var(--text-sm); }
+.oq-field .oq-select { flex: 1; }
+.oq-select:focus { border-color: var(--focus); outline: none; }
+
+.oq-providers { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; font-size: var(--text-sm); }
+.oq-providers .sk-icon-btn { width: 24px; height: 24px; margin-left: auto; border-color: transparent; }
+.oq-chip { display: inline-flex; align-items: center; gap: 5px; padding: 1px 8px; border-radius: var(--radius-sm); background: var(--surface-strong); font-size: var(--text-xs); cursor: default; }
+.oq-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
+.oq-chip.ok .oq-dot { background: var(--add-fg, var(--vscode-testing-iconPassed)); }
+.oq-chip.off { color: var(--muted); }
+.oq-chip.off .oq-dot { background: var(--del-fg, var(--vscode-testing-iconFailed)); }
+
+.oq-hint, .oq-error { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-radius: var(--radius); font-size: var(--text-sm); background: var(--surface-strong); }
+.oq-hint > span:nth-child(2), .oq-error > span:nth-child(2) { flex: 1; min-width: 0; }
+.oq-error { color: var(--del-fg, var(--vscode-errorForeground)); }
+
+.oq-form { display: flex; flex-direction: column; gap: 6px; }
+.oq-request { width: 100%; box-sizing: border-box; min-height: 64px; resize: vertical; padding: 6px 8px; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, var(--border-subtle)); border-radius: var(--radius); font: inherit; }
+.oq-request:focus { border-color: var(--focus); outline: none; }
+.oq-options { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.oq-check { display: inline-flex; align-items: center; gap: 4px; font-size: var(--text-sm); cursor: pointer; }
+.oq-form-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.oq-note { font-size: var(--text-xs); color: var(--muted); }
+
+.oq-running { border: 1px solid var(--border-subtle); border-radius: var(--radius); overflow: hidden; }
+.oq-running-head { display: flex; align-items: center; gap: 6px; padding: 6px 8px; background: var(--surface-strong); font-size: var(--text-sm); }
+.oq-running-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.oq-running-head .sk-icon-btn { width: 24px; height: 24px; border-color: transparent; }
+.oq-log { margin: 0; max-height: 180px; overflow: auto; padding: 6px 8px; font-family: var(--vscode-editor-font-family, monospace); font-size: var(--text-xs); white-space: pre-wrap; word-break: break-word; color: var(--muted); }
+
+.oq-jobs .sk-group { margin-top: 2px; }
+.oq-job { padding: 6px 0 8px; border-bottom: 1px solid var(--border-subtle); }
+.oq-job.awaiting { border-left: 2px solid var(--accent); padding-left: 6px; }
+.oq-job-head { display: flex; align-items: center; gap: 6px; width: 100%; padding: 2px 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.oq-job-head:focus-visible { outline: 1px solid var(--focus); }
+.oq-job-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.oq-state { flex: none; padding: 1px 7px; border-radius: var(--radius-sm); background: var(--surface-strong); font-size: var(--text-xs); }
+.oq-state.awaiting, .oq-state.planning { color: var(--accent); }
+.oq-state.passed, .oq-state.pr_open { color: var(--add-fg, var(--vscode-testing-iconPassed)); }
+.oq-state.needs_human, .oq-state.blocked_test { color: var(--del-fg, var(--vscode-errorForeground)); }
+.oq-state.blocked_quota { color: var(--mod-fg, var(--vscode-editorWarning-foreground)); }
+.oq-reason { margin: 3px 0 0 20px; font-size: var(--text-sm); color: var(--muted); word-break: break-word; }
+.oq-job-body { margin: 6px 0 0 20px; display: flex; flex-direction: column; gap: 4px; }
+.oq-request-full { margin: 0; white-space: pre-wrap; font-size: var(--text-sm); }
+.oq-steps { list-style: none; margin: 2px 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.oq-step { display: flex; gap: 6px; align-items: flex-start; font-size: var(--text-sm); }
+.oq-step .codicon { margin-top: 2px; color: var(--muted); }
+.oq-step.done .codicon { color: var(--add-fg, var(--vscode-testing-iconPassed)); }
+.oq-step.running .codicon { color: var(--accent); }
+.oq-step-text { display: flex; flex-direction: column; min-width: 0; }
+.oq-step-meta { font-size: var(--text-xs); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.oq-meta { display: flex; gap: 6px; font-size: var(--text-sm); }
+.oq-meta-label { flex: none; color: var(--muted); }
+.oq-meta-value { min-width: 0; word-break: break-word; }
+.oq-job-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 6px 0 0 20px; }
+.oq-job-actions .sk-icon-btn { width: 24px; height: 24px; border-color: transparent; margin-left: auto; }

@@ -1,5 +1,6 @@
 import { registerCatalogs, type Catalogs } from './catalog-view';
 import { registerSkills } from './skills-view';
+import { OrchestraController } from './orchestra-view';
 import * as vscode from 'vscode';
 import { ChangesController, registerChanges } from './changes';
 import { registerInline } from './inline';
@@ -77,6 +78,10 @@ class LauncherViewProvider implements vscode.WebviewViewProvider, vscode.Disposa
 						await skills?.handle(message.command, message.id, message.key);
 						return;
 					default:
+						if (message.command.startsWith('orchestra.')) {
+							await orchestra?.handle(message.command, message.id, message.key, message.text);
+							return;
+						}
 						if (/^(rules|agents|mcp|permissions|hooks)\./.test(message.command)) {
 							await catalogs?.handle(message.command, message.id, message.key);
 							return;
@@ -143,6 +148,8 @@ class LauncherViewProvider implements vscode.WebviewViewProvider, vscode.Disposa
 		const skillsScript = webview.asWebviewUri(vscode.Uri.joinPath(media, 'skills.js'));
 		const catalogScript = webview.asWebviewUri(vscode.Uri.joinPath(media, 'catalog.js'));
 		const skillsStyle = webview.asWebviewUri(vscode.Uri.joinPath(media, 'skills.css'));
+		const orchestraScript = webview.asWebviewUri(vscode.Uri.joinPath(media, 'orchestra.js'));
+		const orchestraStyle = webview.asWebviewUri(vscode.Uri.joinPath(media, 'orchestra.css'));
 		const base = webview.asWebviewUri(vscode.Uri.joinPath(media, 'base.css'));
 		const codicons = webview.asWebviewUri(vscode.Uri.joinPath(media, 'codicons', 'codicon.css'));
 		const l10n = webview.asWebviewUri(vscode.Uri.joinPath(media, 'l10n.js'));
@@ -156,6 +163,7 @@ class LauncherViewProvider implements vscode.WebviewViewProvider, vscode.Disposa
 	<link rel="stylesheet" href="${base}" />
 	<link rel="stylesheet" href="${style}" />
 	<link rel="stylesheet" href="${skillsStyle}" />
+	<link rel="stylesheet" href="${orchestraStyle}" />
 	<title>Claude Code</title>
 </head>
 <body>
@@ -164,6 +172,7 @@ class LauncherViewProvider implements vscode.WebviewViewProvider, vscode.Disposa
 	<script nonce="${nonce}" src="${l10n}"></script>
 	<script nonce="${nonce}" src="${skillsScript}"></script>
 	<script nonce="${nonce}" src="${catalogScript}"></script>
+	<script nonce="${nonce}" src="${orchestraScript}"></script>
 	<script nonce="${nonce}" src="${script}"></script>
 </body>
 </html>`;
@@ -229,6 +238,7 @@ async function openClaudeTab(sessionId?: string): Promise<void> {
 let provider: LauncherViewProvider | undefined;
 let skills: ReturnType<typeof registerSkills> | undefined;
 let catalogs: Catalogs | undefined;
+let orchestra: OrchestraController | undefined;
 let changes: ChangesController | undefined;
 let preferenceManager: PreferenceManager | undefined;
 const PREFERENCE_KEY = 'claudeCodeLauncher.managedPreferences.v1';
@@ -251,7 +261,14 @@ export function activate(context: vscode.ExtensionContext): void {
 	registerInline(context, changes);
 	scheduleActiveChat(1000);
 	skills = registerSkills(context, (message) => { void provider?.postRaw(message); });
-	catalogs = registerCatalogs(context, (message) => { void provider?.postRaw(message); });
+	orchestra = new OrchestraController(context, (message) => { void provider?.postRaw(message); });
+	context.subscriptions.push(orchestra);
+	catalogs = registerCatalogs(context, (message) => { void provider?.postRaw(message); }, (panel) => {
+		if (!orchestra) { return; }
+		const wasActive = orchestra.active;
+		orchestra.active = panel === 'orchestra';
+		if (orchestra.active && !wasActive) { void orchestra.refresh(); }
+	});
 	watchSessions(context);
 
 	context.subscriptions.push(

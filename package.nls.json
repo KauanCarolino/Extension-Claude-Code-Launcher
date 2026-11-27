@@ -73,5 +73,7 @@
   "command.rejectChangeAtCursor": "Reject Claude's Hunk at Cursor",
   "command.copyChangesSummary": "Copy Changes Summary (Markdown)",
   "command.showPermissions": "Show Permissions",
-  "command.showHooks": "Show Hooks"
+  "command.showHooks": "Show Hooks",
+  "command.showOrchestra": "Show Orchestrator",
+  "config.orchestrator.cliPath": "Absolute path to the orquestra CLI (its cli.js or an executable) used by the Orchestrator tab. Empty: the orchestrator built next to the extension, then orquestra on PATH. Applies to the machine: a project's settings do not change this option."
 }

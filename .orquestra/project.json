@@ -1,0 +1,9 @@
+{
+  "test": "npm test",
+  "baseBranch": "main",
+  "maxRepairCycles": 2,
+  "defaultProvider": "claude",
+  "allowBash": [],
+  "remote": "origin",
+  "prDraft": false
+}

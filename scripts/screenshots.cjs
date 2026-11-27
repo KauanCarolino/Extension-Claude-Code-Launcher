@@ -162,7 +162,7 @@ function main() {
   fs.mkdirSync(target, { recursive: true });
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'launcher-shots-'));
   const changes = { scripts: ['changes-time.js', 'changes-diff.js', 'changes.js'], styles: ['base.css', 'changes.css'] };
-  const homeView = { scripts: ['skills.js', 'catalog.js', 'home.js'], styles: ['base.css', 'home.css', 'skills.css'] };
+  const homeView = { scripts: ['skills.js', 'catalog.js', 'orchestra.js', 'home.js'], styles: ['base.css', 'home.css', 'skills.css', 'orchestra.css'] };
   const sidebar = '#181818', editor = '#1f1f1f';
   const produced = [];
   try {

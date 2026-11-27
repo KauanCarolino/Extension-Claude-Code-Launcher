@@ -22,6 +22,15 @@ export interface ProcOptions {
 
 const MAX_CAPTURE = 4 * 1024 * 1024;
 
+/** Processos ainda vivos. Cada um tem o próprio grupo, então um sinal na CLI não chega neles sozinho. */
+const active = new Set<number>();
+
+/** Mata a árvore de cada processo filho ainda vivo. Usada quando a CLI recebe SIGINT ou SIGTERM. */
+export function killActiveChildren(): void {
+	for (const pid of active) killTree(pid);
+	active.clear();
+}
+
 export function killTree(pid: number | undefined): void {
 	if (!pid) return;
 	if (process.platform === 'win32') {
@@ -70,6 +79,7 @@ function run(command: string, args: string[], opts: ProcOptions, extra: { shell?
 			detached: process.platform !== 'win32',
 			stdio: ['pipe', 'pipe', 'pipe'],
 		});
+		if (child.pid) active.add(child.pid);
 		const out = collector();
 		const err = collector();
 		child.stdout?.on('data', out.push);
@@ -86,6 +96,7 @@ function run(command: string, args: string[], opts: ProcOptions, extra: { shell?
 			if (settled) return;
 			settled = true;
 			clearTimeout(timer);
+			if (child.pid) active.delete(child.pid);
 			resolve({ exitCode: timedOut ? null : exitCode, timedOut, stdout: out.text(), stderr: err.text(), durationMs: Date.now() - started, spawnError });
 		};
 		child.on('error', (e) => finish(null, e.message));

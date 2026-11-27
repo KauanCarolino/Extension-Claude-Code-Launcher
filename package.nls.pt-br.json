@@ -73,5 +73,7 @@
   "command.rejectChangeAtCursor": "Recusar o trecho do Claude no cursor",
   "command.copyChangesSummary": "Copiar resumo das mudanças (markdown)",
   "command.showPermissions": "Mostrar permissões",
-  "command.showHooks": "Mostrar hooks"
+  "command.showHooks": "Mostrar hooks",
+  "command.showOrchestra": "Mostrar orquestrador",
+  "config.orchestrator.cliPath": "Caminho absoluto da CLI orquestra (o cli.js dela ou um executável) usada pela aba Orquestrador. Vazio: o orquestrador compilado ao lado da extensão e, depois, o orquestra do PATH. Vale para a máquina: as configurações de um projeto não alteram esta opção."
 }

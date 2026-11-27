@@ -42,6 +42,8 @@ export function formatStatus(job: Job, now: Date): string {
 		lines.push(`Last test: ${t.passed ? 'passed' : 'failed'} — ${t.command} (${t.timedOut ? 'timeout' : `exit ${String(t.exitCode)}`}, ${formatDuration(t.durationMs)})`);
 	}
 	if (job.pr) lines.push(`PR:      ${job.pr.url}`);
+	else if (job.prError) lines.push(`PR:      not opened — ${job.prError}`);
+	else if (job.wantPr) lines.push('PR:      opens after the test passes');
 	return lines.join('\n');
 }
 

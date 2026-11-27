@@ -25,6 +25,8 @@ export const DEFAULT_PROJECT: ProjectConfig = {
 	defaultProvider: 'claude',
 	deny: [...DEFAULT_DENY],
 	allowBash: [],
+	remote: 'origin',
+	prDraft: false,
 };
 
 export function orquestraDir(cwd: string): string {
@@ -81,6 +83,16 @@ export function parseProject(raw: unknown): ProjectConfig {
 			if (/^\s*(git|gh)\b/i.test(c)) throw new Error(`allowBash cannot include git or gh commands: ${c}`);
 		}
 		out.allowBash = (r.allowBash as string[]).map((c) => c.trim());
+	}
+	if (r.remote !== undefined) {
+		if (typeof r.remote !== 'string' || !/^[A-Za-z0-9._/-]+$/.test(r.remote) || r.remote.startsWith('-')) {
+			throw new Error('remote must be the name of a git remote');
+		}
+		out.remote = r.remote;
+	}
+	if (r.prDraft !== undefined) {
+		if (typeof r.prDraft !== 'boolean') throw new Error('prDraft must be true or false');
+		out.prDraft = r.prDraft;
 	}
 	if (r.defaultProvider !== undefined) {
 		if (!PROVIDER_IDS.includes(r.defaultProvider as ProviderId)) throw new Error(`defaultProvider must be one of ${PROVIDER_IDS.join(', ')}`);

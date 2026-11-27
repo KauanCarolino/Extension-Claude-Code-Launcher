@@ -106,7 +106,11 @@ export interface Job {
 	lastTest?: TestRecord;
 	/** A calibração só conta a primeira rodada de teste de cada tarefa. */
 	calibrationRecorded: boolean;
+	/** Pedido com `--pr`: depois do teste verde, o orquestrador envia o branch e abre o PR. */
+	wantPr?: boolean;
 	pr?: { url: string };
+	/** Por que o último push ou `gh pr create` falhou; `resume --pr` tenta de novo sem refazer nada. */
+	prError?: string;
 	events: JobEvent[];
 }
 
@@ -172,4 +176,8 @@ export interface ProjectConfig {
 	deny: string[];
 	/** Comandos que o worker pode rodar para ver um erro pontual, como `npm test -- *`. Vazio: sem shell. */
 	allowBash: string[];
+	/** Remoto para onde `--pr` envia o branch. */
+	remote: string;
+	/** Abre o PR como rascunho. */
+	prDraft: boolean;
 }

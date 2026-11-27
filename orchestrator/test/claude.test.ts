@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -7,33 +6,7 @@ import { test } from 'node:test';
 import { buildArgs, ClaudeProvider, parseClaudeOutput, PROBE_FLAG, probeArgs, workerEnv } from '../src/providers/claude';
 import { quoteForCmd } from '../src/proc';
 import type { ProcResult } from '../src/proc';
-import { git } from './helpers';
-
-const ROOT = path.resolve(__dirname, '..', '..');
-const FAKE = path.join(ROOT, 'test-bin', 'fake-claude.js');
-const CLI = path.join(ROOT, 'out', 'src', 'cli.js');
-
-/** Um executável de verdade: `.cmd` no Windows (passa pelo cmd.exe), script `sh` no resto. */
-function fakeBin(): string {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orquestra-bin-'));
-	// O script vai ao lado do shim: o cmd.exe lê o .cmd na página de código OEM, e o caminho do repositório tem "ã".
-	fs.copyFileSync(FAKE, path.join(dir, 'fake-claude.js'));
-	if (process.platform === 'win32') {
-		const shim = path.join(dir, 'claude.cmd');
-		fs.writeFileSync(shim, `@"${process.execPath}" "%~dp0fake-claude.js" %*\r\n`);
-		return shim;
-	}
-	const shim = path.join(dir, 'claude');
-	fs.writeFileSync(shim, `#!/bin/sh\nexec "${process.execPath}" "$(dirname "$0")/fake-claude.js" "$@"\n`, { mode: 0o755 });
-	return shim;
-}
-
-function cleanEnv(extra: Record<string, string>): NodeJS.ProcessEnv {
-	const env = { ...process.env, ...extra };
-	// Sem isso, o `node --test` do repositório de teste se reportaria a este runner.
-	delete env.NODE_TEST_CONTEXT;
-	return env;
-}
+import { bugRepo, cleanEnv, fakeBin, git, runCli } from './helpers';
 
 function proc(partial: Partial<ProcResult>): ProcResult {
 	return { exitCode: 0, timedOut: false, stdout: '', stderr: '', durationMs: 5, ...partial };
@@ -120,34 +93,13 @@ test('claude run: prompt through stdin, args survive cmd.exe quoting, unknown er
 	const failing = new ClaudeProvider({ bin, timeoutMs: 30_000, allowBash: [], env: cleanEnv({ FAKE_CLAUDE_MODE: 'error' }) });
 	const bad = await failing.run({ jobId: 'j', kind: 'step', cwd, path: 'full', maxTurns: 10, readOnly: false, goal: 'g', doneTitles: [], allowedFiles: [], deny: [], prompt: 'x', estimatedTokens: 1 });
 	assert.equal(bad.exitCode, 1);
-	assert.equal(failing.isQuotaError(bad), false, 'no captured claude fixture yet, so nothing is quota');
+	assert.equal(failing.isQuotaError(bad), false, 'loose words such as limit or 429 are not quota');
+
+	const limited = new ClaudeProvider({ bin, timeoutMs: 30_000, allowBash: [], env: cleanEnv({ FAKE_CLAUDE_MODE: 'quota' }) });
+	const hit = await limited.run({ jobId: 'j', kind: 'step', cwd, path: 'full', maxTurns: 10, readOnly: false, goal: 'g', doneTitles: [], allowedFiles: [], deny: [], prompt: 'x', estimatedTokens: 1 });
+	assert.equal(hit.exitCode, 1);
+	assert.equal(limited.isQuotaError(hit), true, 'the 5-hour limit line is quota');
 });
-
-function runCli(cwd: string, args: string[], env: NodeJS.ProcessEnv): Promise<{ code: number; stdout: string; stderr: string }> {
-	return new Promise((resolve) => {
-		execFile(process.execPath, [CLI, ...args], { cwd, env }, (err, stdout, stderr) => {
-			resolve({ code: err ? ((err as { code?: number }).code ?? 1) : 0, stdout: String(stdout), stderr: String(stderr) });
-		});
-	});
-}
-
-function bugRepo(testCmd: string): string {
-	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'orquestra-e2e-'));
-	git(cwd, 'init', '--quiet', '-b', 'main');
-	git(cwd, 'config', 'user.name', 'Test');
-	git(cwd, 'config', 'user.email', 'test@example.invalid');
-	git(cwd, 'config', 'commit.gpgsign', 'false');
-	fs.writeFileSync(path.join(cwd, 'math.js'), 'exports.add = (a, b) => a - b;\n');
-	fs.writeFileSync(
-		path.join(cwd, 'math.test.js'),
-		"const test = require('node:test');\nconst assert = require('node:assert');\nconst { add } = require('./math');\ntest('add', () => assert.equal(add(2, 3), 5));\n",
-	);
-	fs.mkdirSync(path.join(cwd, '.orquestra'));
-	fs.writeFileSync(path.join(cwd, '.orquestra', 'project.json'), JSON.stringify({ test: testCmd, baseBranch: 'main' }));
-	git(cwd, 'add', '-A');
-	git(cwd, 'commit', '--quiet', '-m', 'init with a bug');
-	return cwd;
-}
 
 test('phase 1: one command takes a bug with a test from the request to a green test, with the four times on screen', async () => {
 	const cwd = bugRepo('node --test');
@@ -212,8 +164,9 @@ test('phase 1: a failing claude keeps its raw output for fixture capture and sto
 
 test('providers command reports readiness without calling a model', async () => {
 	const cwd = bugRepo('node --test');
-	const r = await runCli(cwd, ['providers'], cleanEnv({ ORQUESTRA_CLAUDE_BIN: fakeBin() }));
+	const r = await runCli(cwd, ['providers'], cleanEnv({ ORQUESTRA_CLAUDE_BIN: fakeBin(), FAKE_CODEX_LOGIN: 'none' }));
 	assert.equal(r.code, 0, r.stderr);
 	assert.match(r.stdout, /^claude +ready$/m);
-	assert.match(r.stdout, /^codex +unavailable — the codex adapter arrives in phase 3$/m);
+	assert.match(r.stdout, /^codex +unavailable — codex is not logged in \(run `codex login`\): Not logged in$/m);
+	assert.match(r.stdout, /^gh +ready \(for --pr\)$/m);
 });

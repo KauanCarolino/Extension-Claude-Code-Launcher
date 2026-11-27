@@ -1,22 +1,29 @@
 #!/usr/bin/env node
-// orquestra plan | run | status | resume | list
+// orquestra plan | run | status | resume | list | drop | providers
 import * as readline from 'node:readline/promises';
 import { repoRoot } from './git';
-import { acquireLock, listJobs, loadJob } from './job';
+import * as fs from 'node:fs';
+import { acquireLock, dropJob, listJobs, loadJob } from './job';
+import { killActiveChildren } from './proc';
 import { loadProject } from './project';
+import { GhPublisher } from './pr';
 import { ClaudeProvider } from './providers/claude';
-import { PendingProvider } from './providers/pending';
+import { CodexProvider } from './providers/codex';
 import { createJob, DirtyTreeError, planJob, resumeJob, runJob, type Context } from './runner';
 import { formatList, formatPlan, formatStatus } from './status';
 import { PROVIDER_IDS, type Job, type ProjectConfig, type Provider, type ProviderId } from './types';
 
 const USAGE = `Usage:
-  orquestra providers
+  orquestra providers [--json]
   orquestra plan "<request>" [--provider claude|codex]
   orquestra run "<request>" [--yes] [--pr] [--provider claude|codex]
-  orquestra status [id]
-  orquestra resume [id] [--yes] [--discard]
-  orquestra list`;
+  orquestra status [id] [--json]
+  orquestra resume [id] [--yes] [--discard] [--pr]
+  orquestra list [--json]
+  orquestra drop <id>
+
+  --stdin reads the request of plan/run from standard input instead of the arguments.
+  --json prints machine-readable output for list, status and providers.`;
 
 interface Args {
 	command: string;
@@ -37,7 +44,7 @@ function parseArgs(argv: string[]): Args {
 			if (!PROVIDER_IDS.includes(v as ProviderId)) throw new Error(`--provider must be one of ${PROVIDER_IDS.join(', ')}`);
 			provider = v as ProviderId;
 		} else if (a.startsWith('--')) {
-			if (!['--yes', '--pr', '--discard'].includes(a)) throw new Error(`Unknown option ${a}`);
+			if (!['--yes', '--pr', '--discard', '--json', '--stdin'].includes(a)) throw new Error(`Unknown option ${a}`);
 			flags.add(a);
 		} else {
 			positional.push(a);
@@ -49,8 +56,14 @@ function parseArgs(argv: string[]): Args {
 function providers(project: ProjectConfig): Provider[] {
 	return [
 		new ClaudeProvider({ timeoutMs: project.modelTimeoutSec * 1000, allowBash: project.allowBash }),
-		new PendingProvider('codex', 3),
+		new CodexProvider({ timeoutMs: project.modelTimeoutSec * 1000 }),
 	];
+}
+
+/** Terminou como pedido: teste verde, e PR aberto quando a tarefa pediu um. */
+function finished(job: Job): boolean {
+	if (job.state === 'pr_open' || job.state === 'planning') return true;
+	return job.state === 'passed' && !(job.wantPr && !job.pr);
 }
 
 async function askConfirm(job: Job): Promise<boolean> {
@@ -86,12 +99,16 @@ async function main(argv: string[]): Promise<number> {
 		project,
 		log: (m) => process.stderr.write(`${m}\n`),
 		confirmPlan: async (job) => (yes ? true : askConfirm(job)),
+		publisher: new GhPublisher({ remote: project.remote, draft: project.prDraft }),
 	};
+	const pr = args.flags.has('--pr');
+	const json = args.flags.has('--json');
+	// A interface do editor manda o pedido pelo stdin: texto longo, aspas e quebras de linha chegam intactos.
+	const request = () => (args.flags.has('--stdin') ? fs.readFileSync(0, 'utf8') : args.positional.join(' '));
 
 	switch (args.command) {
 		case 'plan': {
-			const request = args.positional.join(' ');
-			const job = await createJob(ctx, request, args.provider);
+			const job = await createJob(ctx, request(), args.provider);
 			const lock = acquireLock(cwd, job.id);
 			try {
 				await planJob(ctx, job);
@@ -106,40 +123,65 @@ async function main(argv: string[]): Promise<number> {
 			return job.plan ? 0 : 1;
 		}
 		case 'run': {
-			if (args.flags.has('--pr')) throw new Error('--pr arrives in phase 4. Run without it for now.');
-			const job = await createJob(ctx, args.positional.join(' '), args.provider);
-			await runJob(ctx, job, { discard: false });
+			if (pr) {
+				// Antes de criar a tarefa: sem `gh` com login, nenhuma cota é gasta.
+				const status = await ctx.publisher?.available();
+				if (!status?.ok) throw new Error(`--pr cannot open a pull request: ${status?.reason ?? 'gh is unavailable'}`);
+			}
+			const job = await createJob(ctx, request(), args.provider);
+			await runJob(ctx, job, { discard: false, pr });
 			process.stdout.write(`${formatStatus(job, new Date())}\n`);
-			return job.state === 'passed' || job.state === 'pr_open' || job.state === 'planning' ? 0 : 1;
+			return finished(job) ? 0 : 1;
 		}
 		case 'resume': {
 			const id = args.positional[0] ?? latest(cwd).id;
-			const job = await resumeJob(ctx, id, { discard: args.flags.has('--discard') });
+			const job = await resumeJob(ctx, id, { discard: args.flags.has('--discard'), pr });
 			process.stdout.write(`${formatStatus(job, new Date())}\n`);
-			return job.state === 'passed' || job.state === 'pr_open' || job.state === 'planning' ? 0 : 1;
+			return finished(job) ? 0 : 1;
 		}
 		case 'status': {
 			const job = args.positional[0] ? loadJob(cwd, args.positional[0]) : latest(cwd);
-			process.stdout.write(`${formatStatus(job, new Date())}\n`);
+			process.stdout.write(json ? `${JSON.stringify(job)}\n` : `${formatStatus(job, new Date())}\n`);
 			return 0;
 		}
 		case 'list':
-			process.stdout.write(`${formatList(listJobs(cwd))}\n`);
+			process.stdout.write(json ? `${JSON.stringify(listJobs(cwd))}\n` : `${formatList(listJobs(cwd))}\n`);
 			return 0;
+		case 'drop': {
+			const id = args.positional[0];
+			if (!id) throw new Error('drop needs a job id');
+			dropJob(cwd, id);
+			process.stdout.write(`Job ${id} dropped. Nothing had been edited.\n`);
+			return 0;
+		}
 		case 'providers': {
 			// Versão e flags de cada CLI, sem nenhuma chamada de modelo.
-			let any = false;
-			for (const p of ctx.providers) {
-				const s = await p.available();
-				any ||= s.ok;
-				process.stdout.write(`${p.id.padEnd(7)} ${s.ok ? 'ready' : `unavailable — ${s.reason ?? ''}`}\n`);
+			const statuses = await Promise.all(ctx.providers.map(async (p) => ({ id: p.id, ...(await p.available()) })));
+			const any = statuses.some((s) => s.ok);
+			// O `gh` só importa para `--pr`; ele não muda o código de saída.
+			const gh = await ctx.publisher?.available();
+			if (json) {
+				process.stdout.write(`${JSON.stringify({ providers: statuses, gh: gh ?? { ok: false, reason: 'not configured' }, defaultProvider: project.defaultProvider })}\n`);
+				return any ? 0 : 1;
 			}
+			for (const s of statuses) process.stdout.write(`${s.id.padEnd(7)} ${s.ok ? 'ready' : `unavailable — ${s.reason ?? ''}`}\n`);
+			if (gh) process.stdout.write(`${'gh'.padEnd(7)} ${gh.ok ? 'ready (for --pr)' : `unavailable — ${gh.reason ?? ''}`}\n`);
 			return any ? 0 : 1;
 		}
 		default:
 			process.stderr.write(`Unknown command ${args.command}\n${USAGE}\n`);
 			return 2;
 	}
+}
+
+// Ctrl+C no terminal ou "Parar" no editor: o modelo e o teste rodam em grupo próprio e precisam ser mortos aqui.
+// O passo interrompido fica `running` sem commit; `resume` o devolve para pending.
+for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+	process.on(signal, () => {
+		killActiveChildren();
+		process.stderr.write(`orquestra: stopped (${signal}). Run \`orquestra resume\` to continue; add --discard to drop a half-done edit.\n`);
+		process.exit(130);
+	});
 }
 
 main(process.argv.slice(2)).then(
